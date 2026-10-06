@@ -345,7 +345,8 @@ class EventCard(QFrame):
         layout.setSpacing(2)
         kind = event.get("type", "event")
         self.kind = kind
-        summary = event.get("command") or event.get("tool") or event.get("summary") or event.get("name") or event.get("status", "")
+        summary = (event.get("command") or event.get("tool") or event.get("summary") or event.get("name")
+                   or (event.get("content") if kind == "error" else "") or event.get("status", ""))
         if event.get("imported") and event.get("tool") and event.get("summary") and not event.get("command"):
             summary = f"{event['tool']} · {event['summary']}"
         request = approvals.describe(event.get("details")) if kind in APPROVAL_EVENTS else None
@@ -369,6 +370,8 @@ class EventCard(QFrame):
             # The command or file as the backend will run it, not a JSON dump of it.
             readable = request["command"] or request["path"] or plain(event.get("details") or {})
             self.body = QPlainTextEdit(ANSI_ESCAPE.sub("", request["tool"] + "\n\n" + readable))
+        elif kind == "error" and isinstance(event.get("content"), str):
+            self.body = QPlainTextEdit(ANSI_ESCAPE.sub("", event["content"]).strip())
         else:
             self.body = QPlainTextEdit(ANSI_ESCAPE.sub("", plain(detail)))
         self.body.setReadOnly(True)
@@ -656,6 +659,13 @@ class AgentPanel(QFrame):
         self.approval_button.setMenu(approval_menu)
         self.approval_button.setVisible(agent != "dot")
         controls.addWidget(self.approval_button)
+        self._dot_follow = None
+        if agent == "dot":
+            self.dot_refresh_inline = button("Refresh", lambda: self.read_dot(False), "refresh_dot_inline")
+            self.dot_refresh_inline.setToolTip("讀取 G8毛 的最新回覆")
+            controls.addWidget(self.dot_refresh_inline)
+            self._dot_timer = QTimer(self)
+            self._dot_timer.timeout.connect(self._dot_follow_tick)
         controls.addStretch()
         self.stop_button = button("Stop", self.stop, "stop")
         self.stop_button.setAccessibleName(f"Stop {ROLE_NAMES[agent]}")
@@ -795,7 +805,9 @@ class AgentPanel(QFrame):
         target = adapter.target_name+' ('+adapter.target+')' if adapter.target else 'Identifier/name enumeration only; select G8毛 next'
         box = QMessageBox(QMessageBox.Question, 'Unofficial Dot — explicit local action', '', QMessageBox.Yes | QMessageBox.No, self)
         box.setTextFormat(Qt.PlainText)
-        box.setText(DISCLOSURE+'\nAction: '+action+'\nTarget: '+target+'\nStreaming / server Stop / attachments / New chat: Unsupported.')
+        follow = ('\nAfter this send the workspace reads this Dot for replies automatically, about every 8 seconds '
+                  'for up to 5 minutes, then stops.') if action == 'send' else ''
+        box.setText(DISCLOSURE+'\nAction: '+action+'\nTarget: '+target+follow+'\nStreaming / server Stop / attachments / New chat: Unsupported.')
         box.setDefaultButton(QMessageBox.No)
         if box.exec() != QMessageBox.Yes: return False
         adapter.authorize_manual_action(action)
@@ -956,6 +968,8 @@ class AgentPanel(QFrame):
         self.state.setStyleSheet(f"color: {color};")
         if state in ("Disconnected", "Offline"):
             self.approval_rules.clear()
+            if self._dot_follow is not None:
+                self.stop_dot_follow()
         if (old_state in ("Connected", "Busy")) != (state in ("Connected", "Busy")):
             self.update_capabilities(self.capabilities)
         self.connect_button.setText("中斷連線" if state in ("Connected", "Busy") else ("重新連線" if state in ("Error", "Offline") else "連線"))
@@ -994,6 +1008,7 @@ class AgentPanel(QFrame):
             self.connect_button.setEnabled(self.connect_button.isEnabled() and not self.monitor)
             self.dot_select.setEnabled(enabled and not self.monitor and self.connection_state not in ('Busy','Connected','Connecting'))
             self.dot_refresh.setEnabled(ready)
+            self.dot_refresh_inline.setEnabled(ready)
             self.dot_older.setEnabled(ready)
             self.stop_button.setToolTip('Unsupported: no server cancellation; manual reads are not streaming')
             self.new_button.setToolTip('Unsupported: map an existing Dot identity with Resume')
@@ -1121,8 +1136,67 @@ class AgentPanel(QFrame):
         self.set_state("Busy")
         self.input.clear()
         self.clear_attachments()
-        self.window.run(lambda: self.window.core.send_message(self.agent, content, model=model, effort=effort, attachments=attachments or None), agent=self.agent,
-                        on_error=lambda _: self.input.setPlainText(content) if not self.input.toPlainText() else None)
+        def failed(_):
+            if not self.input.toPlainText():
+                self.input.setPlainText(content)
+            if self.agent == 'dot':
+                # A network timeout does not tell whether G8毛 received it; sending again may duplicate.
+                self.window.footer.setText("傳送沒有得到確認：訊息可能已經送出。請先按「重新整理」確認，再決定要不要重送。")
+        self.window.run(lambda: self.window.core.send_message(self.agent, content, model=model, effort=effort, attachments=attachments or None),
+                        (lambda _: self.follow_dot_replies()) if self.agent == 'dot' else None, agent=self.agent, on_error=failed)
+
+    def _dot_replies(self):
+        return tuple((m["id"], len(str(m["content"]))) for m in self.window.core.messages(agent="dot") if m.get("role") == "assistant")
+
+    def follow_dot_replies(self):
+        """After a consented send, read G8毛 for its reply for a few minutes so the answer shows up here."""
+        adapter = self.window.core.adapters.get("dot")
+        run = self.window.orchestrator
+        task = self.window.core.current_task or {}
+        if not hasattr(adapter, "grant_run") or (run and run.active) or task.get("dot_session") != getattr(adapter, "target", None):
+            return
+        try:
+            adapter.grant_run(45)
+        except Exception:
+            return
+        self._dot_follow = {"until": time.monotonic() + 300, "baseline": self._dot_replies(), "seen": None, "stable": 0, "task": task.get("id")}
+        self._dot_timer.start(8000)
+        self.notice.setText("已送出 · 正在自動讀取 G8毛 的回覆（最多 5 分鐘）")
+
+    def stop_dot_follow(self, note=""):
+        if self._dot_follow is None:
+            return
+        self._dot_follow = None
+        self._dot_timer.stop()
+        adapter, run = self.window.core.adapters.get("dot"), self.window.orchestrator
+        if hasattr(adapter, "revoke_run") and not (run and run.active):
+            adapter.revoke_run()
+        if note:
+            self.notice.setText(note)
+            self.notice.setToolTip(note)
+
+    def _dot_follow_tick(self):
+        follow = self._dot_follow
+        if follow is None:
+            return self._dot_timer.stop()
+        if self.connection_state == "Busy":
+            return
+        if self.monitor or self.connection_state != "Connected" or (self.window.core.current_task or {}).get("id") != follow["task"]:
+            return self.stop_dot_follow()
+        if time.monotonic() > follow["until"]:
+            return self.stop_dot_follow("已停止自動讀取 · 需要時請按「重新整理」")
+        def done(_):
+            if self._dot_follow is not follow:
+                return
+            current = self._dot_replies()
+            if current != follow["baseline"]:
+                # G8毛 may answer in several messages; it is finished once two reads in a row match.
+                follow["stable"] = follow["stable"] + 1 if current == follow["seen"] else 0
+                follow["seen"] = current
+                if follow["stable"] >= 2:
+                    self.stop_dot_follow("G8毛 已回覆")
+        self.window.run(lambda: self.window.core.adapters["dot"].refresh_messages(False), done, agent="dot",
+                        on_error=lambda _: self.stop_dot_follow("讀取回覆失敗 · 請按「重新整理」再試"))
 
     def stop(self):
         self.window.run(lambda: self.window.core.stop(self.agent), agent=self.agent)

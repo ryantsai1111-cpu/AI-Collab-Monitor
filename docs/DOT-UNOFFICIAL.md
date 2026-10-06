@@ -73,3 +73,11 @@ for a run-scoped authorisation. While that run is active the workspace may send 
 Dot without further prompts (reads about every 10 seconds, at most 400 requests). The authorisation covers only
 `send` and `messages` for the selected Dot, never `list` or `connect`, and is revoked when the run ends, is
 stopped, or the Dot disconnects. See `docs/DESIGN-auto-collab.md`.
+
+## Reading the reply after a manual send (2026-10-06)
+
+A manual send still needs its own consent. That consent now also covers reading the selected Dot for its reply:
+about every 8 seconds for at most 5 minutes (at most 45 reads), ending early once two reads in a row show the
+same new reply, or on disconnect, task switch or error. The consent dialog states this. The panel also has its
+own Refresh button, which asks for consent each time as before. The network timeout of the pinned client is
+raised from 30 to 90 seconds in `scripts/dot_cli_entry.py`; the pinned source itself is unchanged.
