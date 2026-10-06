@@ -1,0 +1,39 @@
+[project]
+name = "chatgpt-dot-cli"
+dynamic = ["version"]
+description = "Read and message a ChatGPT Your dot with the local ChatGPT login."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "ImL1s" }]
+requires-python = ">=3.11"
+classifiers = [
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Environment :: Console",
+    "Operating System :: OS Independent",
+]
+dependencies = []
+
+[project.optional-dependencies]
+mcp = ["mcp>=1.2,<2"]
+
+[project.urls]
+Homepage = "https://gitlab.com/aa22396584/chatgpt-dot-cli"
+Repository = "https://gitlab.com/aa22396584/chatgpt-dot-cli"
+Issues = "https://gitlab.com/aa22396584/chatgpt-dot-cli/-/issues"
+
+[project.scripts]
+chatgpt-dot-cli = "chatgpt_dot.cli:main"
+chatgpt-dot-cli-mcp = "chatgpt_dot.mcp_server:main"
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.dynamic]
+version = { attr = "chatgpt_dot.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["chatgpt_dot*"]

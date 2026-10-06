@@ -1,0 +1,20 @@
+{
+  "commit": "1413f7b61060eb582fd53a0210ef1a499d158fe0",
+  "repository": "https://gitlab.com/aa22396584/chatgpt-dot-cli",
+  "version": "0.2.2",
+  "runtime_dependencies": [],
+  "review": "static source only; no CLI authentication invoked",
+  "files": {
+    "chatgpt_dot/__init__.py": "500686215e4d1b82ae7bd37b5530c8c3db6b55c2abbb969a35463462dde0be8a",
+    "chatgpt_dot/__main__.py": "bbffcfd1244f988c59e20a12515c9afebe68290540eec9aa5be66cbbfedce6f8",
+    "chatgpt_dot/api.py": "1801755defd60350a2a03c8f68763047274ecbd147b5a752cd200bf5baf17a37",
+    "chatgpt_dot/cli.py": "255029424f50579fe56653602ba085a191f0b0256b0b13353ac89c5bc05117b7",
+    "chatgpt_dot/mcp_server.py": "89f88c4e8e3f186cde15c9cab4e7042867f219998ebf974b3d4ad3ee22badf62",
+    "chatgpt_dot/platform.py": "d421d3db8792da9aa39161278ddceaa76c9b254a63e28d98964a3d47e8c806bd",
+    "chatgpt_dot/summaries.py": "f30d99f9b8e9e68bc859dae4ac70bc73cf575a90e5918ce6bb324a011d6950ec",
+    "LICENSE": "49cbe869e87d4af51fe4a1cadecf91637f24dae52b825e9c71d226122d71c26c",
+    "pyproject.toml": "d5ef6a8b301ca556d562a7b657bcf220100ef52c7b4c3824ba74148c5886ac89",
+    "README.md": "1834056b13c5eda9b6f31a1323fc2f06a070c91e963d860559d91f7fca78aa6d",
+    "SECURITY.md": "136b99a6d783058ede1056e4c3cf09c2779f59b0358a15fe5d0abe7941318640"
+  }
+}
