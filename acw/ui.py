@@ -2751,13 +2751,30 @@ class MainWindow(QMainWindow):
         if self.core.adapters[agent].state != "Connected":
             self.core.connect(agent)
 
+    def _opening_done(self, *_):
+        self._opening = False
+        if not (self.orchestrator and self.orchestrator.active):
+            for control in (self.project_combo, self.task_combo, self.navigator):
+                control.setEnabled(True)
+
+    def _opening_begin(self):
+        # One open at a time: a second one landing mid-resume would attach the conversation to the wrong task.
+        if getattr(self, "_opening", False) or not self.confirm_context_change():
+            return False
+        self._opening = True
+        for control in (self.project_combo, self.task_combo, self.navigator):
+            control.setEnabled(False)
+        return True
+
     def open_desktop_session(self, record, resume=True):
-        if not self.confirm_context_change():
+        if not self._opening_begin():
             return
         agent = record.get("agent", "claude")
         def opened(result):
             self.reload_context()
             self.focus_role(agent)
+            if not resume:
+                self._opening_done()
             self.footer.setText(f"已載入「{record.get('title', '')}」· {result['imported']} 則訊息、{result['tools']} 筆工具紀錄")
             # A conversation opens at its latest message, like the desktop apps.
             QTimer.singleShot(150, self.panels[agent], self.panels[agent].jump_to_latest)
@@ -2766,11 +2783,12 @@ class MainWindow(QMainWindow):
                 def continue_session():
                     self._agent_ready(agent)
                     return self.core.resume_session(agent, result["session_id"])
-                self.run(continue_session, lambda _: (self.reload_context(), self.refresh_agent(agent)), agent)
-        self.run(lambda: self.core.open_desktop_session(record), opened)
+                self.run(continue_session, lambda _: (self._opening_done(), self.reload_context(), self.refresh_agent(agent)),
+                         agent, on_error=self._opening_done)
+        self.run(lambda: self.core.open_desktop_session(record), opened, on_error=self._opening_done)
 
     def new_desktop_conversation(self, directory, agent="claude"):
-        if not self.confirm_context_change():
+        if not self._opening_begin():
             return
         title = "新對話 " + datetime.now().strftime("%m-%d %H:%M")
         def opened(_):
@@ -2780,8 +2798,9 @@ class MainWindow(QMainWindow):
             def start():
                 self._agent_ready(agent)
                 return self.core.create_session(agent)
-            self.run(start, lambda _: (self.reload_context(), self.refresh_agent(agent)), agent)
-        self.run(lambda: self.core.open_desktop_project(directory, title), opened)
+            self.run(start, lambda _: (self._opening_done(), self.reload_context(), self.refresh_agent(agent)),
+                     agent, on_error=self._opening_done)
+        self.run(lambda: self.core.open_desktop_project(directory, title), opened, on_error=self._opening_done)
 
     def focus_role(self, agent):
         self._preferred_agent = agent

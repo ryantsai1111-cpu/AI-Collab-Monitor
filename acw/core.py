@@ -396,9 +396,16 @@ class WorkspaceCore:
         project=self._project_for_directory(str(record.get('cwd') or ''))
         self.select_project(project['id'])
         title=sanitize(str(record.get('title') or session_id))[:200]
-        task=next((t for t in self.list_tasks(project_id=project['id']) if t.get(agent+'_session')==session_id),None)
+        tasks=self.list_tasks(project_id=project['id'])
+        mapped=[t for t in tasks if t.get(agent+'_session')==session_id]
+        # A conversation belongs to one task: the one named after it wins, and a task that merely
+        # shares the title is reused only when it has no conversation of this role yet.
+        task=(next((t for t in mapped if t['title']==title),None) or (mapped[0] if mapped else None)
+              or next((t for t in tasks if t['title']==title and not t.get(agent+'_session')),None))
         if task: self.select_task(task['id'])
         else: task=self.create_task(title)
+        for other in mapped:
+            if other['id']!=task['id']: self.store.update('tasks',{'id':other['id']},{agent+'_session':'','updated_at':now()})
         identity={'agent':agent,'id':session_id}
         fields=dict(task_id=task['id'],project_id=project['id'],title=title,cwd=project['repo_path'],updated_at=now())
         if self.store.get('sessions',identity): self.store.update('sessions',identity,fields)

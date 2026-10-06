@@ -134,6 +134,42 @@ class CoreAndUiTests(DesktopSessionFixture):
         self.assertEqual(1, len(self.core.list_projects()))
         self.assertEqual(2, len(self.core.messages(first["task_id"], "claude")))
 
+    def test_a_conversation_mapped_into_the_wrong_task_is_moved_back_to_its_own(self):
+        own = self.core.open_desktop_session(self.record)
+        wrong = self.core.create_task("別的對話")
+        self.core.store.update("tasks", {"id": wrong["id"]}, {"claude_session": SESSION})
+        again = self.core.open_desktop_session(self.record)
+        self.assertEqual(own["task_id"], again["task_id"])
+        self.assertEqual("", self.core.get_task(wrong["id"])["claude_session"])
+        self.assertEqual(SESSION, self.core.get_task(own["task_id"])["claude_session"])
+        # A task that only shares the title is reused when it has no Claude conversation yet.
+        self.core.store.update("tasks", {"id": own["task_id"]}, {"claude_session": ""})
+        self.assertEqual(own["task_id"], self.core.open_desktop_session(self.record)["task_id"])
+        self.assertEqual(2, len(self.core.list_tasks(project_id=own["project_id"])))
+
+    def test_a_second_open_is_ignored_while_the_first_is_still_in_flight(self):
+        window = OfflineWindow(self.core)
+        try:
+            pending = []
+            original = window.run
+            window.run = lambda operation, callback=None, agent=None, on_error=None: pending.append((operation, callback, agent, on_error))
+            window.open_desktop_session(self.record, resume=True)
+            window.open_desktop_session(self.record, resume=True)
+            window.open_desktop_session(dict(self.record, title="另一個"), resume=True)
+            self.assertEqual(1, len(pending), "Only the first open may start")
+            self.assertFalse(window.navigator.isEnabled())
+            window.run = original
+            operation, callback, agent, on_error = pending.pop()
+            callback(operation())
+            self.assertTrue(window.navigator.isEnabled())
+            self.assertEqual(1, [call[0] for call in self.adapters["claude"].calls].count("resume_session"))
+            window.open_desktop_session(dict(self.record, id="../bad"), resume=True)
+            self.assertTrue(window.navigator.isEnabled(), "A failed open must release the lock")
+            window.reported_errors.clear()
+        finally:
+            window.timer.stop()
+            window.close()
+
     def test_missing_folder_or_bad_identifier_is_refused(self):
         with self.assertRaises(ValueError):
             self.core.open_desktop_session(desktop_sessions.list_desktop_sessions()[1])
