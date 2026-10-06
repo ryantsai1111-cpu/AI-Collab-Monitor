@@ -10,7 +10,7 @@ from pathlib import Path
 from .security import sanitize, safe_file, is_secret_path, is_hidden_reasoning, safe_export_path, verify_screenshot, reject_link_ancestors
 from .store import Store, now, uid
 
-AGENTS = ('claude','dot','codex')
+AGENTS = ('claude','dot','codex','local')
 TASK_STATUSES = ('NEW','PLANNING','REVIEWING','READY','IMPLEMENTING','VERIFYING','WAITING_USER','BLOCKED','DONE','FAILED','CANCELLED')
 ARTIFACT_TYPES = {'diff','patch','test','test log','report','screenshot','jsonl','markdown'}
 ARTIFACT_SUFFIXES={'diff':'.diff','patch':'.patch','test':'.log','test log':'.log','report':'.txt','jsonl':'.jsonl','markdown':'.md'}
@@ -79,6 +79,18 @@ class WorkspaceCore:
         adapter=self._adapter(agent)
         settings=self.get_setting('agent.'+agent,{})
         if not settings.get('enabled',True): raise RuntimeError(f'{agent}: disabled in Settings')
+        if agent=='local' and hasattr(adapter,'local_harness'):
+            if adapter.state in ('Connected','Busy','Connecting'):
+                raise RuntimeError('請先中斷本地模型連線，再套用設定')
+            from .adapters.local import make_local_adapter
+            defaults={key:adapter.settings[key] for key in ('codex_executable','claude_executable','attachment_roots') if key in adapter.settings}
+            replacement=make_local_adapter(self.make_emitter(agent),**dict(defaults,**settings))
+            if replacement.local_harness==adapter.local_harness:
+                replacement.session_id=adapter.session_id
+                if hasattr(adapter,'_resume'): replacement._resume=adapter._resume
+            if adapter._process:
+                adapter.disconnect()
+            adapter=self.set_adapter(agent,replacement)
         if not self.current_project and settings.get('default_project'):
             self.select_project(settings['default_project'])
         if settings.get('executable'): adapter.executable=settings['executable']
@@ -120,7 +132,7 @@ class WorkspaceCore:
         if not str(name).strip(): raise ValueError('Project name is required')
         project=dict(id=metadata.pop('id',uid('project-')),name=name,repo_path=str(repo),created_at=now(),
                      default_branch=metadata.pop('default_branch',''),active_branch=metadata.pop('active_branch',''),
-                     claude_cwd=str(repo),codex_cwd=str(repo),dot_metadata='',notes=metadata.pop('notes',''),metadata=metadata)
+                     claude_cwd=str(repo),codex_cwd=str(repo),local_cwd=str(repo),dot_metadata='',notes=metadata.pop('notes',''),metadata=metadata)
         self.store.insert('projects',project)
         return self.get_project(project['id'])
 
@@ -322,6 +334,107 @@ class WorkspaceCore:
         self._record('session_imported',agent,task_id=None,session_id=session_id,content='Native session metadata imported; explicit Resume is still required.')
         return self.store.get('sessions',identity)
 
+    def desktop_sessions(self,agent='claude'):
+        """Explicit navigator read of locally saved Claude desktop or Codex conversations (metadata only)."""
+        from .desktop_sessions import list_desktop_sessions, list_codex_sessions
+        if agent not in ('claude','codex'): raise ValueError('Local conversations are available for Claude and Codex only')
+        rows=sanitize(list_desktop_sessions() if agent=='claude' else list_codex_sessions())
+        overrides=self.get_setting('desktop.overrides',{}) or {}
+        for row in rows:
+            override=overrides.get(agent+':'+row['id']) or {}
+            if override.get('title'): row.update(title=override['title'],renamed=True)
+            if 'archived' in override: row['archived']=bool(override['archived'])
+        return rows
+
+    def set_desktop_override(self,agent,session_id,*,title=None,archived=None):
+        """Rename or archive a listed conversation inside this workspace only; the source app is never written."""
+        from .desktop_sessions import _valid_id
+        if agent not in ('claude','codex') or not _valid_id(str(session_id)): raise ValueError('Invalid conversation')
+        overrides=dict(self.get_setting('desktop.overrides',{}) or {})
+        entry=dict(overrides.get(agent+':'+session_id) or {})
+        if title is not None:
+            title=sanitize(str(title)).strip()[:200]
+            if title: entry['title']=title
+            else: entry.pop('title',None)
+            if title and self.store.get('sessions',{'agent':agent,'id':session_id}):
+                self.store.update('sessions',{'agent':agent,'id':session_id},{'title':title,'updated_at':now()})
+        if archived is not None: entry['archived']=bool(archived)
+        if entry: overrides[agent+':'+session_id]=entry
+        else: overrides.pop(agent+':'+session_id,None)
+        self.set_setting('desktop.overrides',overrides)
+        return entry
+
+    def _project_for_directory(self,directory):
+        directory=Path(directory)
+        if not directory.is_dir(): raise ValueError('此對話的資料夾已不存在：'+str(directory))
+        directory=directory.resolve()
+        for project in self.list_projects():
+            try:
+                if Path(project['repo_path']).resolve()==directory: return project
+            except OSError: continue
+        return self.create_project(directory.name or str(directory),directory)
+
+    def open_desktop_project(self,directory,title='新對話'):
+        """Select (or create) the project for a listed folder and start a fresh task in it."""
+        self._assert_idle()
+        project=self._project_for_directory(directory)
+        self.select_project(project['id'])
+        task=self.create_task(title)
+        return {'project_id':project['id'],'task_id':task['id']}
+
+    def open_desktop_session(self,record,history_limit=200):
+        """Map one explicitly chosen local conversation to a project and task, with its visible history.
+
+        Never contacts the agent: resuming stays a separate explicit call."""
+        from .desktop_sessions import read_history, _valid_id
+        if not isinstance(record,dict): raise ValueError('Conversation metadata must be an object')
+        agent=record.get('agent','claude')
+        if agent not in ('claude','codex'): raise ValueError('Local conversations are available for Claude and Codex only')
+        session_id=str(record.get('id') or '').lower()
+        if not _valid_id(session_id): raise ValueError('Invalid session identifier')
+        self._assert_idle()
+        project=self._project_for_directory(str(record.get('cwd') or ''))
+        self.select_project(project['id'])
+        title=sanitize(str(record.get('title') or session_id))[:200]
+        tasks=self.list_tasks(project_id=project['id'])
+        mapped=[t for t in tasks if t.get(agent+'_session')==session_id]
+        # A conversation belongs to one task: the one named after it wins, and a task that merely
+        # shares the title is reused only when it has no conversation of this role yet.
+        task=(next((t for t in mapped if t['title']==title),None) or (mapped[0] if mapped else None)
+              or next((t for t in tasks if t['title']==title and not t.get(agent+'_session')),None))
+        if task: self.select_task(task['id'])
+        else: task=self.create_task(title)
+        for other in mapped:
+            if other['id']!=task['id']: self.store.update('tasks',{'id':other['id']},{agent+'_session':'','updated_at':now()})
+        identity={'agent':agent,'id':session_id}
+        fields=dict(task_id=task['id'],project_id=project['id'],title=title,cwd=project['repo_path'],updated_at=now())
+        if self.store.get('sessions',identity): self.store.update('sessions',identity,fields)
+        else: self.store.insert('sessions',dict(identity,**fields,created_at=now(),metadata={'source':agent+'-local','imported_native':True}))
+        self.store.update('tasks',{'id':task['id']},{agent+'_session':session_id,'updated_at':now()})
+        self._contexts.clear()
+        known={(m['role'],str(m['content']).strip()) for m in self.messages(task['id'],agent)}
+        imported=tools=0
+        for item in read_history(agent,session_id,history_limit):
+            item_id='desktop-'+session_id+'-'+item['id']
+            if not item['id']: continue
+            if item['kind']=='message':
+                content=sanitize(item['content'])
+                if is_hidden_reasoning(content) or (item['role'],str(content).strip()) in known: continue
+                if self.store.get('messages',{'id':item_id}): continue
+                self.store.insert('messages',dict(id=item_id,task_id=task['id'],agent=agent,session_id=session_id,
+                    role=item['role'],content=content,timestamp=item['timestamp'] or now(),status='complete',
+                    metadata={'source':agent+'-local','imported':True}))
+                imported+=1
+            elif not self.store.get('events',{'id':item_id}):
+                payload=sanitize({'tool':item['tool'],'summary':item['summary'],'input':item['input'],'output':item['output'],'imported':True})
+                if item['type']=='command': payload['command']=payload['summary']
+                self.store.insert('events',dict(id=item_id,task_id=task['id'],agent=agent,session_id=session_id,type=item['type'],
+                    status='imported',timestamp=item['timestamp'] or now(),summary=str(payload['summary'])[:600],raw_ref='',payload=payload))
+                tools+=1
+        self._record('session_imported',agent,task_id=task['id'],session_id=session_id,
+                     content=f'Local conversation opened; {imported} messages and {tools} tool records imported. Resume is a separate action.')
+        return {'agent':agent,'project_id':project['id'],'task_id':task['id'],'session_id':session_id,'imported':imported,'tools':tools}
+
     def _context(self,agent):
         if agent not in self._contexts:
             task=self.current_task or {}
@@ -338,6 +451,9 @@ class WorkspaceCore:
         identity={'agent':agent,'id':session_id}
         fields={'task_id':task['id'] if task else None,'project_id':project['id'] if project else None,
                 'cwd':getattr(self.adapters.get(agent),'cwd',''),'updated_at':now()}
+        if agent=='local' and hasattr(self.adapters.get(agent),'local_harness'):
+            existing=self.store.get('sessions',identity) or {}
+            fields['metadata']=dict(existing.get('metadata') or {},local_harness=self.adapters[agent].local_harness)
         if self.store.get('sessions',identity): self.store.update('sessions',identity,fields)
         else: self.store.insert('sessions',dict(identity,**fields,title=session_id,created_at=now()))
         if task: self.store.update('tasks',{'id':task['id']},{agent+'_session':session_id,'updated_at':now()})
@@ -360,6 +476,9 @@ class WorkspaceCore:
         if not self.capabilities(agent).get('supports_sessions'): raise NotImplementedError(f'{agent}: sessions Unsupported')
         if getattr(adapter,'state','')=='Busy': raise RuntimeError('Wait for the active turn before resuming a session')
         saved=self.store.get('sessions',{'agent':agent,'id':session_id})
+        if agent=='local' and saved and hasattr(adapter,'local_harness'):
+            if (saved.get('metadata') or {}).get('local_harness',adapter.local_harness)!=adapter.local_harness:
+                raise ValueError('此本地對話使用不同 Harness；請切回原 Harness 或建立新對話')
         if saved and agent!='dot':
             project=self.current_project
             expected=project.get(agent+'_cwd') or project['repo_path']

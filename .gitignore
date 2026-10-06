@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Vendored Qt runtime and local transport artifacts (not source)
+vendor/
+COMPLETE-MANIFEST.json
+PARTS-MANIFEST.json
+請先讀_*.txt
+/evidence/
+
+# Runtime data, logs and machine-specific files
+test-data/
+startup-error.log
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.lock
+!pnpm-lock.yaml
+!uv.lock
+*.lnk
+node_modules/
+.claude/
+
+# Archives and third-party binaries do not belong in the repo
+*.zip
+*.exe
+
+# Machine-specific Local LLM endpoint
+config/local-llm.json

@@ -25,6 +25,11 @@ def main():
         if len(tail)!=2 or tail[0]!='--': raise ValueError('Exactly one unchanged text argument required')
         argv+=tail
     elif tail: raise ValueError('Unexpected arguments')
+    # The pinned client waits 30 seconds; a slow send then fails although it may have been delivered.
+    # Allow more time here without touching the pinned source.
+    import urllib.request
+    original=urllib.request.urlopen
+    urllib.request.urlopen=lambda *a,**k: original(*a,**dict(k,timeout=max(k.get('timeout') or 0,90)))
     sys.path.insert(0,str(source));sys.argv=argv
     runpy.run_module('chatgpt_dot',run_name='__main__')
 

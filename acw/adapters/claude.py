@@ -133,7 +133,13 @@ class ClaudeAdapter(Adapter):
                     raise ValueError('Session MCP args must be a string list')
             args.extend(['--mcp-config=' + json.dumps({'mcpServers': servers}, separators=(',', ':')),
                          '--strict-mcp-config', '--tools='])
-        return args
+        return args + self._extra_args()
+
+    def _extra_args(self):
+        return []
+
+    def _process_env(self):
+        return None
 
     def connect(self):
         if self._process and self._process.poll() is None:
@@ -148,12 +154,13 @@ class ClaudeAdapter(Adapter):
         self._stopping = False
         self.set_state('Connecting')
         try:
+            env = self._process_env()
             self.version = subprocess.run([self.executable, '--version'], capture_output=True,
                 text=True, encoding='utf-8', errors='replace', timeout=15,
-                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0)).stdout.strip()
+                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0), **({'env': env} if env is not None else {})).stdout.strip()
             self._process = subprocess.Popen(self._argv(), cwd=self.cwd, stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8',
-                errors='replace', bufsize=1, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+                errors='replace', bufsize=1, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0), **({'env': env} if env is not None else {}))
             process = self._process
             self._stdout_thread = threading.Thread(target=self._read_stdout, args=(process,),
                                                    daemon=True, name='claude-events')

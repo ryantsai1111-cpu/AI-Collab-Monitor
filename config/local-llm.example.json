@@ -1,0 +1,8 @@
+{
+  "harness": "claude",
+  "base_url": "http://127.0.0.1:8081",
+  "model": "your-model-name",
+  "api_key_env": "",
+  "max_output_tokens": 16384,
+  "context_tokens": 65536
+}

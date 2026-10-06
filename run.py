@@ -16,20 +16,35 @@ def main():
     from acw.adapters.claude import ClaudeAdapter
     from acw.adapters.codex import CodexAdapter
     from acw.adapters.dot import DotAdapter
-    app=QApplication(sys.argv[:1]);app.setApplicationName('AI Collaboration Workspace');app.setOrganizationName('AI Collaboration Workspace')
+    from acw.adapters.local import make_local_adapter
+    app=QApplication(sys.argv[:1]);app.setStyle('Fusion');app.setApplicationName('AI Collaboration Workspace');app.setOrganizationName('AI Collaboration Workspace')
     args.data_dir.mkdir(parents=True,exist_ok=True)
     lock=QLockFile(str(args.data_dir/'workspace.lock'));lock.setStaleLockTime(30000)
     if not lock.tryLock(100):
         QMessageBox.information(None,'Workspace already open','This data directory is already open. Use the existing window.');return 1
     core=WorkspaceCore(args.data_dir)
+    if core.get_setting('ui.sidebar_page') is None: core.set_setting('ui.sidebar_page','nav')
+    seed=ROOT/'config'/'local-llm.json'
+    if seed.is_file():
+        # Optional machine-local Local LLM settings; the file wins so it can be edited by hand.
+        import json
+        try:
+            values=json.loads(seed.read_text(encoding='utf-8'))
+            allowed={k:values[k] for k in ('harness','base_url','model','api_key_env','max_output_tokens','context_tokens','enabled') if k in values}
+            if allowed.get('model'): allowed['default_model']=allowed['model']
+            core.set_setting('agent.local',dict(core.get_setting('agent.local',{}) or {},**allowed))
+        except (OSError,ValueError): pass
     local=Path(os.environ.get('LOCALAPPDATA',''))
     claudes=list((local/'Packages'/'Claude_pzs8sxrjxfjjc'/'LocalCache'/'Roaming'/'Claude'/'claude-code').glob('*/*/claude.exe'))
     codexes=list((local/'OpenAI'/'Codex'/'bin').glob('*/codex.exe'))
     def newest(paths): return str(max(paths,key=lambda p:p.stat().st_mtime)) if paths else ''
-    for agent, cls, default in [('claude',ClaudeAdapter,newest(claudes)),('dot',DotAdapter,''),('codex',CodexAdapter,newest(codexes))]:
+    for agent, cls, default in [('claude',ClaudeAdapter,newest(claudes)),('dot',DotAdapter,''),('codex',CodexAdapter,newest(codexes)),('local',make_local_adapter,'')]:
         settings=core.get_setting('agent.'+agent,{}) or {}
         exe=settings.pop('executable',default)
         settings.setdefault('attachment_roots',[str(core.store.artifact_dir)])
+        if agent=='local':
+            settings.setdefault('codex_executable',newest(codexes))
+            settings.setdefault('claude_executable',newest(claudes))
         core.set_adapter(agent,cls(core.make_emitter(agent),executable=exe,**settings))
     window=MainWindow(core);window.show()
     result=app.exec()

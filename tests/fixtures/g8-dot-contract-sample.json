@@ -1,0 +1,22 @@
+{
+  "provenance": "PINNED resolve_dot OPAQUE-STRING CONTRACT SAMPLE ONLY, NOT ACTUAL ACCOUNT DATA",
+  "source_commit": "1413f7b61060eb582fd53a0210ef1a499d158fe0",
+  "api_envelope": {
+    "items": [
+      {
+        "id": "opaque-prefix:YWJj+/==",
+        "display_name": "G8毛",
+        "messaging_room_id": "room~CONTRACT_SAMPLE",
+        "active_root_thread_id": "thread~CONTRACT_SAMPLE"
+      }
+    ]
+  },
+  "cli_list": [
+    {
+      "id": "opaque-prefix:YWJj+/==",
+      "display_name": "G8毛",
+      "messaging_room_id": "room~CONTRACT_SAMPLE",
+      "active_root_thread_id": "thread~CONTRACT_SAMPLE"
+    }
+  ]
+}

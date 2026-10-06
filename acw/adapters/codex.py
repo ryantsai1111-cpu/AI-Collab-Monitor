@@ -290,6 +290,12 @@ class CodexAdapter(Adapter):
             self._write({"id": message["id"], "error": {"code": -32601, "message": "Unsupported client request; use the official CLI for this interaction"}})
             self._error("Unsupported Codex client request: " + method)
 
+    def _extra_args(self):
+        return []
+
+    def _process_env(self):
+        return None
+
     def connect(self):
         if self._process and self._process.poll() is None and self.state in ("Connected", "Busy"):
             return self.capabilities
@@ -305,10 +311,11 @@ class CodexAdapter(Adapter):
             self.set_state("Offline")
             raise FileNotFoundError("Official Codex executable not configured")
         try:
-            self._process = subprocess.Popen([self.executable, "app-server", "--listen", "stdio://"],
+            env = self._process_env()
+            self._process = subprocess.Popen([self.executable, "app-server", "--listen", "stdio://"] + self._extra_args(),
                 cwd=self.cwd or None, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, encoding="utf-8", errors="replace", bufsize=1,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), **({'env': env} if env is not None else {}))
             self._reader = threading.Thread(target=self._read_loop, daemon=True, name="codex-jsonl")
             self._stderr_reader = threading.Thread(target=self._read_stderr, daemon=True, name="codex-stderr")
             self._reader.start()

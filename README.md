@@ -1,58 +1,81 @@
 # AI Collaboration Workspace
 
-Windows desktop workspace for independent Claude, dot, and Codex panels, local task history, and explicit handoffs.
+本機桌面程式（Python 3.12 + PySide6），把三個 AI 角色放在同一個視窗並排協作，所有連線與交接都由人手動觸發：
 
-**Release status: acceptance candidate; Final is not certified.** An official embeddable dot message bridge has not been established. The dot panel is an honest blocked integration, not a simulated agent. See [Final Acceptance Report](evidence/FINAL-ACCEPTANCE-REPORT.md) for the measured outcome.
+| 角色 | 後端 | 預設職責 |
+| --- | --- | --- |
+| Claude | 官方 Claude Code CLI | 主審 |
+| G8毛 | ChatGPT Dot（非官方整合，每次操作需同意） | 轉接／複核 |
+| Codex | 官方 Codex CLI（`app-server`） | 實作 |
 
-## Run
+啟動時不連線、不讀取認證、不自動交接、不自動核准。
 
-The installed **AI Collaboration Workspace.exe** launch was rejected by Windows security and its installed file is now absent. The existing shortcuts therefore do not have verified working startup. No restore/rebuild/retry or security change has been performed. See [the exact blocker](evidence/EXE-SECURITY-BLOCKER.md).
+## 啟動
 
-From the existing Python runtime: `python run.py`. For an isolated dataset: `python run.py --data-dir C:\path\to\isolated-data`.
+需要 Windows x64 與 CPython 3.11–3.14（目前使用 3.12）。
 
-`install.ps1` installs this new application to `%LOCALAPPDATA%\AI-Collaboration-Workspace\app`, creates Desktop and Start Menu shortcuts, and leaves the original Desktop Monitor untouched. An existing install is never silently replaced. App data is under `%LOCALAPPDATA%\AI-Collaboration-Workspace\data`.
+```powershell
+python run.py
+```
 
-Startup restores local project/task/history but does not start backends, reconnect sessions, or resend prompts. Press Connect on each supported panel. Use an explicitly selected project and task before sending.
+- 使用隔離資料：`python run.py --data-dir C:\path\to\data`
+- 預設資料位置：`%LOCALAPPDATA%\AI-Collaboration-Workspace\data`
+- 不想開終端機：建立一個指向 `pythonw.exe "<repo>\run.py"` 的捷徑即可（`*.lnk` 不進版控）
 
-## Documents and verification
+`run.py` 會優先從同層的 `vendor/` 載入 PySide6（不進版控）；沒有 `vendor/` 時執行 `pip install -r requirements.txt`。
 
-- [Original PRD](docs/PRD.md) and [requirement tracker](docs/REQUIREMENTS.md)
-- [Architecture](docs/ARCHITECTURE.md), [adapters](docs/ADAPTERS.md), [security](docs/SECURITY.md)
-- [User guide](docs/USER_GUIDE.md), [troubleshooting](docs/TROUBLESHOOTING.md)
-- [Backend discovery](evidence/backend-discovery.md), [Final acceptance](evidence/FINAL-ACCEPTANCE-REPORT.md)
+## 接續 Claude Desktop 與 Codex 的對話
 
-`python scripts/run_tests.py` measured129PASS/0FAIL/2opt-in skips (131discovered). `python scripts/run_ui_tests.py --visible` measured50PASS in real Qt with isolated Core/SQLite/Git and explicit synthetic transports; the last changed widget paths passed25focused cases with `--widgets-only`. Real official Claude/Codex visible handoff/resume/stream/Stop passed16checks, official readonly native history5checks. Actual Codex human-approved write/diff/test passed. One subsequently expressly authorized Claude run passed7 actual human-approved file/command/UI checks. Physical two-monitor Qt checks passed10 after fixing high-DPI clipping; previous canceled/failed attempts are preserved. Test doubles do not certify real backends. Current tracker:593PASS/0FAIL/56BLOCKED/4UNSUPPORTED/0PENDING, Final not accepted.
+側欄的「對話」頁會列出這台電腦上保存的 Claude Desktop（Code）對話與 Codex 對話，分組方式與 Desktop 相同
+（有 git origin 的用儲存庫名稱，否則用資料夾名稱）。
 
-The official Claude CLI and Codex app-server keep their own login and permission state. This application never reads credentials and never automatically approves tool requests. Tool output can contain sensitive text: redaction is applied before persistence, and raw-event safety exceptions are recorded.
+- 按兩下或「接續對話」：切換到該資料夾、匯入紀錄，並在對應面板接續同一個對話
+- 「⋯」選單：只載入紀錄、在此專案開新對話、重新命名、封存、顯示已封存與系統對話
+- 匯入的紀錄包含雙方的文字訊息，以及指令、檔案變更與其他工具紀錄；不含思考過程
+- 重新命名與封存只存在這個程式裡，不會寫回 Claude Desktop 或 Codex 的檔案
+- 只在開啟「對話」頁之後才讀取；同一個對話不要同時在兩邊傳送訊息
 
-## Official session helper dependency
+## 核准方式
 
-Native Claude session browsing uses the pinned public Agent SDK in `tools/claude-session-sdk` and the existing Node runtime. Its manifest/lockfile are included in source; `node_modules` and PySide6 `vendor` are excluded from the source ZIP. The isolated real helper tests passed with SDK 0.3.289. The SDK's optional standalone CLI binary is not used; model interaction retains the pre-existing Claude Code executable. See `evidence/claude-session-sdk-install.json` for the bounded package installation outcome.
+每個角色面板的「⋯ → 核准方式」可以選（G8毛 除外），預設是每次都問：
 
-Per-user installation on RYAN-PC is complete: Desktop and Start Menu shortcuts were verified against the installed executable. Actual compiled EXE launch was attempted and rejected by Windows security; do not disable or exclude it. Python/Qt UI testing does not certify EXE startup. Current23-case visible UI suite passed. Installed official SDK session/list/history checks pass; see `evidence/installed-sdk-verification.json`.
+- **每次都問**
+- **自動核准讀取與專案內的檔案編輯**：指令仍然會問
+- **自動核准全部**：指令和專案內的編輯都不問
 
-Human approval remains explicit. Pending requests now have a fixed Review reminder above the event viewport, so newer activity cannot hide the action. See `evidence/live-codex-ui` and `evidence/EXE-SECURITY-BLOCKER.md`.
+不論選哪一種，這些永遠會問：刪除資料夾、`git push`、強制覆寫、修改系統設定、下載後直接執行、修改專案資料夾以外的檔案。
+核准卡片上的「一律允許 <程式>」只在這次連線期間有效，而且不涵蓋用 `&&`、`;`、`|` 串接的指令。
 
-Authorized MCP follow-up: actual official Claude `mcp__acw_acceptance__echo`, fixed input/result, one human native approval, exact tool/result/status in actual Workspace UI,11 checks PASS; saved Raw UI checks overlap. No persistent config/service/port, private connector, automatic allow rule or permission-mode change. See evidence/live-mcp-echo-ui/result.json. Earlier Claude Docs public-document scope attempt remains historical BLOCKED.
+## 自動協作
 
+標題列的「自動協作…」會讓三個角色自己把一個任務來回做完：Claude 規劃 → G8毛 審查並轉交 → Codex 實作 →
+G8毛 審查 → Claude 最終審查，不通過就再來一輪，直到通過或達到回合上限。
 
-## Current approved Dot integration update
+- 只在你按「開始」後執行，三個角色都要先連線；執行中隨時可按「停止」
+- 工具核准不會自動，任何錯誤、逾時或回覆格式不符都會暫停
+- G8毛 的自動傳送與讀取需要每次執行前勾選授權，執行結束即失效
+- 開始時可選擇讓 Local LLM 加入：當第二意見（不會擋流程），或取代 Codex 擔任實作者
+- 設計與邊界見 [docs/DESIGN-auto-collab.md](docs/DESIGN-auto-collab.md)
 
-The earlier official-bridge blocker remains historical context. An explicitly approved, pinned unofficial Dot adapter and manual UI are now implemented and offline-tested. See [Dot activation and boundaries](docs/DOT-UNOFFICIAL.md). Only the human may trigger live credential-bearing list/connect/read/send. No live Dot PASS or Final acceptance is claimed. EXE work remains deferred.
-## Source-only EXE follow-up
+## 目錄
 
-The G8 second review authorizes source changes/offline tests only. The revised
-installer, build and EXE launch-verification scripts have **not been executed**.
-Their default modes are read-only plans; execution switches are not approval.
-Existing app/partial/quarantine states are not auto-resumed. See
-`docs/EXE-SOURCE-HARDENING.md` and the append-only evidence for the deployment,
-physical-path, binary-provenance and acceptance limits. Existing binary/data and
-live windows remain unchanged; no antivirus exclusions or vendor uploads occurred.
+| 路徑 | 內容 |
+| --- | --- |
+| `run.py` | 進入點 |
+| `acw/` | 程式本體：`core`、`store`（SQLite）、`security`、`ui`、`theme`（金屬風格樣式）、`adapters/` |
+| `tests/` | 離線測試；執行方式與基準結果見 [tests/README.md](tests/README.md) |
+| `docs/` | 架構、adapter、安全、使用說明；介面現況見 [docs/UI-REFRESH.md](docs/UI-REFRESH.md) |
+| `scripts/` | 歷次驗收與打包用腳本（多數依賴當時的本機環境） |
+| `tools/` | 釘選版本的 Dot CLI 與 Claude session helper 來源 |
+| `AI-Collab-Monitor/` | 舊版 PowerShell 唯讀監看工具（獨立於本程式） |
+| `codex-env-diag-20261004/` | Codex 沙箱問題的診斷紀錄 |
 
-The second source-only remediation records complete eligible-file inventories,
-explicit exclusions and reparse failures; actual bundled dependency preparation
-remains blocked by linked/unknown/unreadable resources. Package identity is an
-additional read-only signal, not full virtualization coverage. Launch argv uses
-bounded ASCII JSON stdin; production data access remains UNKNOWN. See the
-second-draft boundaries and manual INCOMPLETE rollback plan in
-`docs/EXE-SOURCE-HARDENING.md`. No compilation, deployment or EXE launch is implied.
+## 進行中的工作
+
+- 第四個角色視窗（Local LLM，跑在 Codex 或 Claude Code 環境內）：規格見 [docs/HANDOFF-local-llm-panel.md](docs/HANDOFF-local-llm-panel.md)
+- 其他 agent 協作工具的做法與本專案的取捨：見 [docs/LANDSCAPE.md](docs/LANDSCAPE.md)
+
+## 歷史文件
+
+- [docs/BASELINE-README.md](docs/BASELINE-README.md)：整理前的 README（EXE 被 Windows 攔截時的驗收狀態）
+- [docs/CANDIDATE-PACKAGE-README.md](docs/CANDIDATE-PACKAGE-README.md)：三份 ZIP 候選包的解壓說明

@@ -6,60 +6,47 @@ never spawns a shell, reads credentials, or creates an agent session on startup.
 from __future__ import annotations
 
 import json
+import re
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 from .presentation import (session_identity, session_display, local_session_displays,
                            project_label, task_label, compact)
+from . import approvals
+from .orchestrator import Orchestrator
+from .theme import (CODE_BLOCK_BG, CODE_INLINE_BG, CODE_INLINE_FG, EVENT_COLOR, HEADING_COLOR, MUTED_COLOR,
+                    STATE_COLORS, STATE_IDLE, build_style, metal_palette)
 
 from PySide6.QtCore import Qt, Signal, QObject, QRunnable, QThreadPool, QTimer, QUrl, QByteArray
-from PySide6.QtGui import QAction, QDesktopServices, QFont, QKeySequence, QPixmap
+from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont, QKeySequence, QPixmap, QTextCharFormat,
+                           QTextCursor, QTextDocument, QTextFormat)
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
-    QFormLayout, QFrame, QGridLayout, QHBoxLayout, QInputDialog, QLabel,
+    QFormLayout, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
     QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
     QScrollArea, QSizePolicy, QSpinBox, QSplitter, QStackedWidget, QTabWidget,
-    QTableWidget, QTableWidgetItem, QTextBrowser, QToolButton, QTreeWidget,
+    QTableWidget, QTableWidgetItem, QTextBrowser, QToolButton, QTreeWidget, QTabBar,
     QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
-AGENTS = ("claude", "dot", "codex")
+AGENTS = ("claude", "dot", "codex", "local")
 STATUSES = ("NEW", "PLANNING", "REVIEWING", "READY", "IMPLEMENTING", "VERIFYING",
             "WAITING_USER", "BLOCKED", "DONE", "FAILED", "CANCELLED")
-STYLE = """
-QWidget { color: #dce3ef; background: #141b27; font-family: 'Segoe UI'; font-size: 12px; }
-QMainWindow, QDialog { background: #111721; }
-QLabel#brand { font-size: 22px; font-weight: 650; color: #f3f6fb; }
-QLabel#subtitle, QLabel#muted { color: #8494ad; }
-QLabel#agentTitle { font-size: 16px; font-weight: 700; letter-spacing: 1px; }
-QLabel#status { color: #9facbe; }
-QFrame#panel { background: #182130; border: 1px solid #303d51; border-radius: 8px; }
-QFrame#message { border: 1px solid #29374b; border-radius: 5px; background: #182130; }
-QFrame#event { border: 1px solid #29374b; border-radius: 4px; background: #131c29; }
-QPushButton, QToolButton { background: #243247; border: 1px solid #354761; border-radius: 5px; padding: 6px 10px; }
-QPushButton:hover, QToolButton:hover { background: #30455f; border-color: #557395; }
-QPushButton:disabled, QToolButton:disabled { color: #63728a; background: #1d2838; border-color: #28354a; }
-QPushButton#primary { background: #37679a; border-color: #487cb5; color: white; font-weight: 600; }
-QPushButton#stop { color: #ffb6ab; }
-QPushButton#primary:disabled, QPushButton#stop:disabled { color: #63728a; background: #1d2838; border-color: #28354a; }
-QLineEdit, QComboBox, QPlainTextEdit, QTextBrowser, QSpinBox { background: #101823; border: 1px solid #334157; border-radius: 4px; padding: 5px; selection-background-color: #355d8c; }
-QComboBox::drop-down { border: none; width: 22px; }
-QComboBox QAbstractItemView { background: #1a2637; selection-background-color: #365477; }
-QScrollArea { border: none; }
-QScrollBar:vertical { width: 9px; background: #141b27; }
-QScrollBar::handle:vertical { background: #3b4c65; border-radius: 4px; min-height: 25px; }
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
-QTabWidget::pane { border: 1px solid #2b3b51; }
-QTabBar::tab { background: #172131; padding: 9px 16px; border-bottom: 2px solid transparent; }
-QTabBar::tab:selected { background: #22344d; border-bottom-color: #6ea9e6; }
-QHeaderView::section { background: #24344b; padding: 7px; border: none; font-weight: 600; }
-QTreeWidget, QTableWidget { background: #111b29; border: 1px solid #303f56; alternate-background-color: #192637; }
-QSplitter::handle { background: #111721; width: 7px; }
-QMenu { background: #1b293c; border: 1px solid #42546e; }
-QMenu::item:selected { background: #355d8c; }
-QToolTip { color: #edf3fa; background: #2a3c54; border: 1px solid #657a98; }
-"""
+ROLE_NAMES = {"claude": "Claude", "dot": "G8毛", "codex": "Codex", "local": "Local LLM"}
+ROLE_LABELS = {"claude": "主審", "dot": "轉接／複核", "codex": "實作", "local": "本地模型"}
+STATE_LABELS = {"Disconnected": "未連線", "Connected": "已連線", "Busy": "處理中", "Connecting": "連線中",
+                "Error": "錯誤", "Blocked": "受阻", "Offline": "離線", "Stopping": "停止中", "Interrupted": "已中斷"}
+STATUS_LABELS = dict(zip(STATUSES, ("新任務", "規劃中", "主審中", "可實作", "實作中", "驗證中",
+                                  "等待使用者", "受阻", "已完成", "失敗", "已取消")))
+BUTTON_LABELS = {
+    "Connect": "連線", "Send": "傳送", "Stop": "停止", "Attach": "附件", "Clear": "清除附件",
+    "New": "新增", "Resume": "恢復", "Rename": "重新命名", "Discover…": "探索原生對話…",
+    "Refresh": "重新整理", "Older page": "較早訊息", "Settings…": "設定…", "Work details": "工作詳情",
+    "Three panes": "並排", "New messages ↓": "新訊息 ↓", "Pending backend approval · Review…": "等待核准 · 檢視…",
+    "Select G8毛…": "選擇 G8毛…", "Copy": "複製", "Close": "關閉", "Deny": "拒絕", "Approve…": "核准…",
+    "Open Diff / Tests / Artifacts…": "檢視差異／測試／附件…", "Open full timeline": "完整時間線",
+}
 
 
 def plain(value: Any) -> str:
@@ -79,7 +66,7 @@ def identifier(item: dict) -> str:
 
 
 def button(text, callback=None, name=None):
-    result = QPushButton(text)
+    result = QPushButton(BUTTON_LABELS.get(text, text))
     if name:
         result.setObjectName(name)
     if callback:
@@ -126,11 +113,18 @@ class FocusLabel(QLabel):
 
 
 class PromptEdit(QPlainTextEdit):
+    """Ctrl+Enter sends only after the input method has committed its text."""
+    _ime_preedit = False
+
+    def inputMethodEvent(self, event):
+        self._ime_preedit = bool(event.preeditString())
+        super().inputMethodEvent(event)
+
     submit = Signal()
     files_dropped = Signal(list)
 
     def keyPressEvent(self, event):
-        if event.key() in (Qt.Key_Return, Qt.Key_Enter) and event.modifiers() & Qt.ControlModifier:
+        if not self._ime_preedit and event.key() in (Qt.Key_Return, Qt.Key_Enter) and event.modifiers() & Qt.ControlModifier:
             self.submit.emit()
             event.accept()
             return
@@ -173,65 +167,165 @@ class DetailDialog(QDialog):
         layout.addLayout(actions)
 
 
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[@-Z\\-_]|[\x00-\x08\x0b\x0c\x0e-\x1f]")
+# Shown inline in a conversation. Everything else stays in the timeline, raw events and logs.
+TRANSCRIPT_EVENTS = ("tool_start", "tool_result", "tool", "command", "command_output", "file", "file_edit", "diff",
+                     "test", "error", "handoff", "stop", "recovery", "approval", "approval_request", "tool_approval")
+APPROVAL_EVENTS = ("approval", "approval_request", "tool_approval")
+EVENT_LABELS = {"tool_start": "工具", "tool_result": "工具結果", "tool": "工具", "command": "指令", "command_output": "輸出",
+                "file": "檔案", "file_edit": "編輯", "diff": "差異", "test": "測試", "error": "錯誤", "handoff": "交接",
+                "stop": "停止", "recovery": "復原", "approval": "核准", "approval_request": "核准", "tool_approval": "核准"}
+
+
+def chat_markdown(text):
+    """Keep the author's line breaks: outside code fences a single newline becomes a hard break."""
+    lines, fenced, result = text.split("\n"), False, []
+    for index, line in enumerate(lines):
+        if line.lstrip().startswith(("```", "~~~")):
+            fenced = not fenced
+        following = lines[index + 1] if index + 1 < len(lines) else ""
+        soft = not fenced and line.strip() and following.strip() and not line.lstrip().startswith(("```", "~~~", "|", "#"))
+        result.append(line.rstrip() + "  " if soft else line)
+    return "\n".join(result)
+
+
+class MessageBody(QTextBrowser):
+    """Read-only rendered message that grows to fit its content instead of scrolling inside the transcript."""
+    def __init__(self):
+        super().__init__()
+        self.setObjectName("message_body")
+        self.setFrameShape(QFrame.NoFrame)
+        self.setOpenLinks(False)
+        self.setOpenExternalLinks(False)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        self.document().setDocumentMargin(2)
+
+    def loadResource(self, kind, name):
+        return None  # never load images or any other resource a message refers to
+
+    def fit(self):
+        width = self.viewport().width()
+        if width > 0:
+            self.document().setTextWidth(width)
+        self.setFixedHeight(int(self.document().size().height()) + 4)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.fit()
+
+    def wheelEvent(self, event):
+        event.ignore()  # the transcript scrolls, not the message
+
+    def render(self, text, markdown):
+        if not markdown:
+            self.setPlainText(text)
+        else:
+            # Raw HTML in a message is shown literally, never interpreted.
+            self.document().setMarkdown(chat_markdown(text), QTextDocument.MarkdownDialectGitHub | QTextDocument.MarkdownNoHTML)
+            block = self.document().begin()
+            while block.isValid():
+                cursor = QTextCursor(block)
+                if block.blockFormat().hasProperty(QTextFormat.BlockCodeFence) or block.blockFormat().hasProperty(QTextFormat.BlockCodeLanguage):
+                    shaded = block.blockFormat()
+                    shaded.setBackground(QColor(CODE_BLOCK_BG))
+                    shaded.setLeftMargin(8)
+                    shaded.setRightMargin(8)
+                    cursor.setBlockFormat(shaded)
+                    cursor.movePosition(QTextCursor.EndOfBlock, QTextCursor.KeepAnchor)
+                    mono = QTextCharFormat()
+                    mono.setFontFamilies(["Cascadia Mono", "Consolas"])
+                    mono.setForeground(QColor(EVENT_COLOR))
+                    cursor.mergeCharFormat(mono)
+                else:
+                    if block.textList() is None:
+                        spaced = block.blockFormat()
+                        spaced.setBottomMargin(7)
+                        cursor.setBlockFormat(spaced)
+                    part = block.begin()
+                    while not part.atEnd():
+                        fragment = part.fragment()
+                        if fragment.isValid() and fragment.charFormat().fontFixedPitch():
+                            cursor.setPosition(fragment.position())
+                            cursor.setPosition(fragment.position() + fragment.length(), QTextCursor.KeepAnchor)
+                            inline = QTextCharFormat()
+                            inline.setBackground(QColor(CODE_INLINE_BG))
+                            inline.setForeground(QColor(CODE_INLINE_FG))
+                            inline.setFontFamilies(["Cascadia Mono", "Consolas"])
+                            cursor.mergeCharFormat(inline)
+                        part += 1
+                block = block.next()
+        self.fit()
+
+
 class MessageCard(QFrame):
-    """Plain response content plus explicit actions; source text is never rewritten."""
+    """Rendered response plus explicit actions; the stored source text is never rewritten."""
     def __init__(self, message, panel):
         super().__init__()
-        self.setObjectName("message")
         self.message = dict(message)
         self.panel = panel
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(9, 7, 9, 8)
-        header = QHBoxLayout()
         role = message.get("role", "assistant")
-        self.heading = label(role.upper())
-        self.heading.setStyleSheet("font-weight: 650; color: #a4c5e7;")
-        header.addWidget(self.heading)
-        stamp = str(message.get("timestamp", ""))
-        header.addWidget(label(stamp[11:19] if "T" in stamp else stamp, True))
-        header.addStretch()
-        menu_button = QToolButton()
-        menu_button.setText("⋯")
-        menu_button.setToolTip("Copy, raw event, and handoff")
-        menu_button.setPopupMode(QToolButton.InstantPopup)
-        menu = QMenu(menu_button)
-        menu.addAction("Copy", lambda: self.copy(False))
-        menu.addAction("Copy with metadata", lambda: self.copy(True))
-        menu.addAction("Open raw event", lambda: panel.window.open_raw(self.message))
-        if role == "assistant":
-            menu.addSeparator()
-            for target in AGENTS:
-                if target != panel.agent:
-                    menu.addAction(f"Send to {target.title()}…", lambda checked=False, target=target: panel.window.forward(self.message, target))
-        menu_button.setMenu(menu)
-        header.addWidget(menu_button)
-        layout.addLayout(header)
-        self.body = QPlainTextEdit()
-        self.body.setReadOnly(True)
-        self.body.setFrameShape(QFrame.NoFrame)
-        self.body.setStyleSheet("background: transparent; border: none; padding: 0;")
-        self.body.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        self.role = role
+        self.setObjectName("message_user" if role == "user" else "message")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 9, 12, 7) if role == "user" else layout.setContentsMargins(4, 2, 4, 2)
+        layout.setSpacing(3)
+        self.body = MessageBody()
+        self.body.setStyleSheet("background: transparent; border: none; padding: 0; font-size: 14px;")
         layout.addWidget(self.body)
+        footer = QHBoxLayout()
+        footer.setSpacing(2)
+        stamp = str(message.get("timestamp", ""))
+        try:
+            stamp = datetime.fromisoformat(stamp.replace("Z", "+00:00")).astimezone().strftime("%H:%M")
+        except ValueError:
+            stamp = stamp[11:16] if "T" in stamp else stamp
+        self.heading = label(("你" if role == "user" else ROLE_NAMES.get(panel.agent, role)) + " · " + stamp, True)
+        self.heading.setObjectName("message_meta")
+        self.heading.setWordWrap(False)
+        footer.addWidget(self.heading)
+        footer.addStretch()
         if role == "assistant":
-            forward = QHBoxLayout()
-            forward.addStretch()
             self.forward_button = QToolButton()
-            self.forward_button.setText("Forward ▾")
+            self.forward_button.setObjectName("ghost")
+            self.forward_button.setText("轉交 ▾")
             self.forward_button.setPopupMode(QToolButton.InstantPopup)
             targets = QMenu(self.forward_button)
             for target in AGENTS:
                 if target != panel.agent:
-                    targets.addAction(target.title(), lambda checked=False, target=target: panel.window.forward(self.message, target))
+                    targets.addAction(ROLE_NAMES[target], lambda checked=False, target=target: panel.window.forward(self.message, target))
             self.forward_button.setMenu(targets)
-            forward.addWidget(self.forward_button)
-            layout.addLayout(forward)
+            footer.addWidget(self.forward_button)
+        menu_button = QToolButton()
+        menu_button.setObjectName("ghost")
+        menu_button.setText("⋯")
+        menu_button.setToolTip("複製、原始事件與轉交")
+        menu_button.setPopupMode(QToolButton.InstantPopup)
+        menu = QMenu(menu_button)
+        menu.addAction("Copy", lambda: self.copy(False))
+        menu.addAction("複製含中繼資料", lambda: self.copy(True))
+        menu.addAction("檢視原始事件", lambda: panel.window.open_raw(self.message))
+        if role == "assistant":
+            menu.addSeparator()
+            for target in AGENTS:
+                if target != panel.agent:
+                    menu.addAction(f"轉交給 {ROLE_NAMES[target]}…", lambda checked=False, target=target: panel.window.forward(self.message, target))
+        menu_button.setMenu(menu)
+        footer.addWidget(menu_button)
+        layout.addLayout(footer)
         self.update_content(message.get("content", ""))
 
     def update_content(self, content):
         self.message["content"] = content
-        self.body.setPlainText(plain(content))
-        lines = max(1, sum(max(1, (len(line) + 51) // 52) for line in plain(content).splitlines()))
-        self.body.setFixedHeight(min(360, 25 + lines * 18))
+        cursor = self.body.textCursor()
+        start, end = cursor.anchor(), cursor.position()
+        self.body.render(plain(content), self.role == "assistant")
+        size = len(self.body.toPlainText())
+        cursor = self.body.textCursor()
+        cursor.setPosition(min(start, size))
+        cursor.setPosition(min(end, size), QTextCursor.KeepAnchor)
+        self.body.setTextCursor(cursor)
 
     def copy(self, metadata=False):
         content = plain(self.message.get("content", ""))
@@ -245,22 +339,41 @@ class EventCard(QFrame):
         super().__init__()
         event = {**(event.get("payload") or {}), **event}
         self.setObjectName("event")
+        self.event_key = identifier(event) or str(event.get("request_id") or event.get("timestamp") or plain(event))
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(7, 4, 7, 4)
+        layout.setContentsMargins(6, 2, 6, 2)
+        layout.setSpacing(2)
         kind = event.get("type", "event")
-        summary = event.get("command") or event.get("tool") or event.get("summary") or event.get("name") or event.get("status", "")
+        self.kind = kind
+        summary = (event.get("command") or event.get("tool") or event.get("summary") or event.get("name")
+                   or (event.get("content") if kind == "error" else "") or event.get("status", ""))
+        if event.get("imported") and event.get("tool") and event.get("summary") and not event.get("command"):
+            summary = f"{event['tool']} · {event['summary']}"
+        request = approvals.describe(event.get("details")) if kind in APPROVAL_EVENTS else None
+        if request:
+            summary = request["tool"] + " · " + (request["command"] or request["path"] or "")
+        summary = ANSI_ESCAPE.sub("", str(summary)).strip()
         self.toggle = QToolButton()
-        self.toggle.setText(f"{kind.replace('_', ' ').upper()}  {str(summary)[:100]}")
+        self.toggle.setText(f"{EVENT_LABELS.get(kind, kind.replace('_', ' '))}  {(summary.splitlines() or [''])[0][:100]}")
         self.toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self.toggle.setArrowType(Qt.RightArrow)
-        self.toggle.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        # A long command must not widen the transcript past its viewport.
+        self.toggle.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.toggle.setToolTip(summary[:600])
         self.toggle.setCheckable(True)
-        self.toggle.setStyleSheet("text-align: left; border: none; background: transparent;")
+        self.toggle.setStyleSheet(f"text-align: left; border: none; background: transparent; padding: 3px 2px; color: {'#ff9a90' if kind == 'error' else EVENT_COLOR};")
         layout.addWidget(self.toggle)
         detail = dict(event)
         if "output" in detail and (detail.get("output_stream") == "combined" or not ("stdout" in detail or "stderr" in detail)):
             detail["output_stream"] = "Combined output supplied by backend; stdout/stderr separation unavailable."
-        self.body = QPlainTextEdit(plain(detail))
+        if request:
+            # The command or file as the backend will run it, not a JSON dump of it.
+            readable = request["command"] or request["path"] or plain(event.get("details") or {})
+            self.body = QPlainTextEdit(ANSI_ESCAPE.sub("", request["tool"] + "\n\n" + readable))
+        elif kind == "error" and isinstance(event.get("content"), str):
+            self.body = QPlainTextEdit(ANSI_ESCAPE.sub("", event["content"]).strip())
+        else:
+            self.body = QPlainTextEdit(ANSI_ESCAPE.sub("", plain(detail)))
         self.body.setReadOnly(True)
         self.body.setFont(QFont("Consolas", 9))
         self.body.setMaximumHeight(300)
@@ -270,12 +383,19 @@ class EventCard(QFrame):
         self.approval_actions = []
         self.historical = historical
         self.approval_resolved = False
-        if kind in ("approval", "approval_request", "tool_approval"):
+        if kind in APPROVAL_EVENTS:
+            self.setObjectName("event_approval")
             actions = QHBoxLayout()
-            actions.addWidget(label("Backend approval required. Review the request above.", True))
-            self.approval_actions = [button("Deny", lambda: window.approve(event, False)), button("Approve…", lambda: window.approve(event, True))]
+            actions.addStretch()
+            self.approval_actions = [button("Deny", lambda: window.approve(event, False)),
+                                     button("核准", lambda: window.approve(event, True, confirm=False))]
+            key = approvals.rule_key(request)
+            if key:
+                always = button("一律允許 " + approvals.rule_label(key), lambda: window.allow_always(event, key))
+                always.setToolTip("這次連線期間，同一個程式或工具不再詢問；危險操作仍會問")
+                self.approval_actions.append(always)
             for control in self.approval_actions:
-                control.setEnabled(not historical and window.mode.currentText() != 'Monitor' and bool(window.core.capabilities(event.get("agent", "")).get("supports_approval")))
+                control.setEnabled(not historical and window.mode.currentData() != 'Monitor' and bool(window.core.capabilities(event.get("agent", "")).get("supports_approval")))
                 actions.addWidget(control)
             layout.addLayout(actions)
             self.toggle.setChecked(True)
@@ -291,6 +411,54 @@ class EventCard(QFrame):
             control.setEnabled(False)
 
 
+class ActivityGroup(QFrame):
+    """Consecutive tool activity folded into one line, like the desktop apps do."""
+    CATEGORIES = (("指令", ("command", "command_output")), ("檔案變更", ("file", "file_edit", "diff")),
+                  ("測試", ("test",)), ("錯誤", ("error",)))
+
+    def __init__(self):
+        super().__init__()
+        self.setObjectName("activity")
+        self.cards = []
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 1, 4, 1)
+        layout.setSpacing(0)
+        self.toggle = QToolButton()
+        self.toggle.setObjectName("activity_toggle")
+        self.toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.toggle.setArrowType(Qt.RightArrow)
+        self.toggle.setCheckable(True)
+        self.toggle.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.toggle.toggled.connect(self.set_expanded)
+        layout.addWidget(self.toggle)
+        self.inner = QWidget()
+        self.inner_layout = QVBoxLayout(self.inner)
+        self.inner_layout.setContentsMargins(10, 0, 0, 2)
+        self.inner_layout.setSpacing(0)
+        self.inner.hide()
+        layout.addWidget(self.inner)
+
+    def add(self, card):
+        self.cards.append(card)
+        self.inner_layout.addWidget(card)
+        counts, other = [], len(self.cards)
+        for title, kinds in self.CATEGORIES:
+            number = sum(card.kind in kinds for card in self.cards)
+            other -= number
+            if number:
+                counts.append(f"{title} {number}")
+        if other:
+            counts.append(f"工具 {other}")
+        self.toggle.setText(" · ".join(counts))
+        failed = any(card.kind == "error" for card in self.cards)
+        self.toggle.setStyleSheet(f"text-align: left; border: none; background: transparent; padding: 4px 2px; color: {'#ff9a90' if failed else MUTED_COLOR};")
+
+    def set_expanded(self, expanded):
+        self.inner.setVisible(expanded)
+        self.toggle.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
+        self.updateGeometry()
+
+
 class AgentPanel(QFrame):
     def __init__(self, agent, window):
         super().__init__()
@@ -299,131 +467,321 @@ class AgentPanel(QFrame):
         self.cards = {}
         self.approvals = {}
         self.pending_approval_events = {}
+        self.approval_rules = set()  # "always allow" choices; they last until this role disconnects
         self.attachments = []
         self.connection_state = "Disconnected"
         self.monitor = False
+        self._effort_invalid = False
+        self._effort_error = ""
+        self._restoring_view = False
         self.setObjectName("panel")
-        self.setMinimumWidth(305)
+        self.setMinimumWidth(300)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(11, 11, 11, 10)
+        layout.setContentsMargins(16, 14, 16, 12)
+        layout.setSpacing(10)
         header = QHBoxLayout()
-        self.title = FocusLabel(agent.upper())
+        titles = QVBoxLayout()
+        titles.setSpacing(2)
+        self.title = FocusLabel(ROLE_NAMES[agent])
         self.title.setObjectName("agentTitle")
-        self.title.setToolTip("Double-click to focus this agent")
+        self.title.setToolTip("按兩下以專注此角色")
         self.title.double_clicked.connect(lambda: window.focus_agent(agent))
-        header.addWidget(self.title)
+        titles.addWidget(self.title)
+        titles.addWidget(label(ROLE_LABELS[agent], True))
+        header.addLayout(titles)
         header.addStretch()
-        self.state = label("Disconnected")
+        self.state = label("未連線")
         self.state.setObjectName("status")
         self.state.setWordWrap(False)
-        self.state.setMinimumWidth(self.state.fontMetrics().horizontalAdvance("Disconnected") + 8)
         self.state.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.state.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
         header.addWidget(self.state)
+        self.connect_button = button("Connect", self.connect_agent, f"connect_{agent}")
+        self.connect_button.setAccessibleName(f"Connect {ROLE_NAMES[agent]}")
+        header.addWidget(self.connect_button)
+        self.more_button = QToolButton()
+        self.more_button.setText("⋯")
+        self.more_button.setAccessibleName(f"{ROLE_NAMES[agent]} conversation actions")
+        self.more_button.setToolTip("對話、歷史、能力、原始事件與日誌")
+        self.more_button.setPopupMode(QToolButton.InstantPopup)
+        more = QMenu(self.more_button)
+        more.addAction("對話…", lambda: window.show_sessions(agent))
+        more.addAction("本機歷史…", self.show_session_history)
+        if agent == "codex":
+            more.addAction("Codex 本機對話…", lambda: window.show_desktop_sessions("codex"))
+        if agent == "claude":
+            more.addAction("Desktop 專案與對話…", lambda: window.show_desktop_sessions("claude"))
+        more.addAction("能力詳情…", self.show_capabilities)
+        more.addSeparator()
+        more.addAction("原始事件…", lambda: window.show_agent_events(agent))
+        more.addAction("日誌…", lambda: window.open_logs(agent))
+        more.addAction("專案檔案", window.open_project)
+        if agent != "dot":
+            more.addSeparator()
+            mode_menu = more.addMenu("核准方式")
+            self.approval_actions_menu = {}
+            for mode in approvals.MODES:
+                action = mode_menu.addAction(approvals.MODE_LABELS[mode], lambda checked=False, mode=mode: window.set_approval_mode(agent, mode))
+                action.setCheckable(True)
+                self.approval_actions_menu[mode] = action
+            mode_menu.aboutToShow.connect(lambda: [action.setChecked(mode == window.approval_mode(agent))
+                                                   for mode, action in self.approval_actions_menu.items()])
+        self.more_button.setMenu(more)
+        header.addWidget(self.more_button)
         layout.addLayout(header)
-        self.connect_button = button(f"Connect {agent.title()}", self.connect_agent, f"connect_{agent}")
-        layout.addWidget(self.connect_button)
-        if agent == 'dot':
-            dot_controls = QHBoxLayout()
-            self.dot_select = button('Select Dot...', self.select_dot, 'select_dot')
-            self.dot_refresh = button('Refresh', lambda: self.read_dot(False), 'refresh_dot')
-            self.dot_older = button('Older page', lambda: self.read_dot(True), 'older_dot')
-            for control in (self.dot_select, self.dot_refresh, self.dot_older): dot_controls.addWidget(control)
-            layout.addLayout(dot_controls)
-        self.notice = label("Official backend · connect to discover capabilities", True)
-        self.notice.setMaximumHeight(56)
+        self.notice = label("能力尚未偵測 · 請在準備好時連線", True)
+        # One quiet line; the full text stays in the tooltip.
+        self.notice.setWordWrap(False)
+        self.notice.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.notice.setToolTip(self.notice.text())
         layout.addWidget(self.notice)
-        form = QGridLayout()
-        form.setHorizontalSpacing(7)
-        form.addWidget(label("Model", True), 0, 0)
-        self.model = QComboBox()
-        self.model.setObjectName(f"model_{agent}")
-        self.model.currentIndexChanged.connect(self.model_changed)
-        form.addWidget(self.model, 0, 1, 1, 3)
-        form.addWidget(label("Effort", True), 1, 0)
-        self.effort = QComboBox()
-        self.effort.setObjectName(f"effort_{agent}")
-        form.addWidget(self.effort, 1, 1, 1, 3)
-        form.addWidget(label("Session", True), 2, 0)
-        self.session = QComboBox()
-        self.session.setObjectName(f"session_{agent}")
-        self.session.view().setMinimumWidth(700)
-        form.addWidget(self.session, 2, 1, 1, 2)
-        self.session_details = button("詳細 / ID", self.show_session_details, f"session_details_{agent}")
-        form.addWidget(self.session_details, 2, 3)
+
+        # These are the original session actions, moved together to the sidebar.
+        # Keeping the same widgets and callbacks retains backend/consent behavior.
+        self.session_controls = QWidget()
+        session_layout = QVBoxLayout(self.session_controls)
+        session_layout.setContentsMargins(0, 8, 0, 0)
+        session_layout.setSpacing(8)
         self.session_search = QLineEdit()
         self.session_search.setObjectName(f"session_search_{agent}")
-        self.session_search.setPlaceholderText("搜尋專案、對話名稱、路徑…（本機）")
+        self.session_search.setPlaceholderText("搜尋已保存的對話…")
+        self.session_search.setAccessibleName(f"Search {ROLE_NAMES[agent]} local sessions")
         self.session_search.textChanged.connect(self.filter_sessions)
-        form.addWidget(self.session_search, 4, 0, 1, 4)
-        self.current_session_label = label('目前對話：尚未建立或恢復', True)
-        self.current_session_label.setObjectName(f'current_session_{agent}')
-        form.addWidget(self.current_session_label, 5, 0, 1, 4)
+        session_layout.addWidget(self.session_search)
+        self.session = QComboBox()
+        self.session.setObjectName(f"session_{agent}")
+        self.session.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.session.setMinimumContentsLength(10)
+        self.session.setAccessibleName(f"{ROLE_NAMES[agent]} session")
+        session_layout.addWidget(self.session)
+        self.current_session_label = label("目前對話：尚未建立或恢復", True)
+        self.current_session_label.setObjectName(f"current_session_{agent}")
+        session_layout.addWidget(self.current_session_label)
+        session_buttons = QGridLayout()
+        self.session_details = button("詳細 / ID", self.show_session_details, f"session_details_{agent}")
         self.new_button = button("New", self.new_session, f"new_session_{agent}")
         self.resume_button = button("Resume", self.resume_session, f"resume_session_{agent}")
-        self.rename_button = button("Rename", self.rename_session)
+        self.rename_button = button("Rename", self.rename_session, f"rename_session_{agent}")
         self.discover_button = button("Discover…", self.discover_sessions, f"discover_sessions_{agent}")
-        self.discover_button.setToolTip("Explicitly list backend sessions; import metadata without resuming")
-        form.addWidget(self.discover_button, 3, 0)
-        form.addWidget(self.new_button, 3, 1)
-        form.addWidget(self.resume_button, 3, 2)
-        form.addWidget(self.rename_button, 3, 3)
-        layout.addLayout(form)
-        self.cwd_label = label("Project: none", True)
+        self.discover_button.setToolTip("Explicitly list native backend sessions; import metadata without resuming")
+        for index, control in enumerate((self.new_button, self.resume_button, self.rename_button, self.session_details)):
+            session_buttons.addWidget(control, index // 2, index % 2)
+        session_layout.addLayout(session_buttons)
+        session_layout.addWidget(self.discover_button)
+        if agent == "dot":
+            self.dot_select = button("Select G8毛…", self.select_dot, "select_dot")
+            self.dot_refresh = button("Refresh", lambda: self.read_dot(False), "refresh_dot")
+            self.dot_older = button("Older page", lambda: self.read_dot(True), "older_dot")
+            session_layout.addWidget(self.dot_select)
+            dot_controls = QHBoxLayout()
+            dot_controls.addWidget(self.dot_refresh)
+            dot_controls.addWidget(self.dot_older)
+            session_layout.addLayout(dot_controls)
+            session_layout.addWidget(label("Unofficial adapter · each live action needs your consent. No automatic reads or relay.", True))
+        self.cwd_label = label("工作目錄：尚未選擇", True)
         self.cwd_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        layout.addWidget(self.cwd_label)
-        self.branch_label = label("Branch: —", True)
-        layout.addWidget(self.branch_label)
-        utilities = QHBoxLayout()
-        utilities.setSpacing(4)
-        utilities.addWidget(button("Raw", lambda: window.show_agent_events(agent)))
-        utilities.addWidget(button("Logs", lambda: window.open_logs(agent)))
-        utilities.addWidget(button("Files", window.open_project))
-        utilities.addWidget(button("History", self.show_session_history))
-        layout.addLayout(utilities)
-        self.pending_review = button("Pending backend approval - Review...", self.review_pending_approval, f"pending_approval_{agent}")
+        # A long unbreakable path must not widen the sidebar past its viewport.
+        self.cwd_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.branch_label = label("分支：—", True)
+        session_layout.addWidget(self.cwd_label)
+        session_layout.addWidget(self.branch_label)
+        session_layout.addStretch()
+
+        self.pending_review = button("Pending backend approval · Review…", self.review_pending_approval, f"pending_approval_{agent}")
         self.pending_review.setToolTip("A human must review and explicitly confirm this request. New events do not hide this reminder.")
         self.pending_review.hide()
         layout.addWidget(self.pending_review)
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setObjectName(f"conversation_{agent}")
+        self.scroll.setProperty("well", True)
         self.transcript = QWidget()
         self.transcript_layout = QVBoxLayout(self.transcript)
-        self.transcript_layout.setContentsMargins(0, 4, 0, 4)
-        self.transcript_layout.setSpacing(7)
-        self.empty = label("Your conversation will appear here.\nConnect when you are ready.", True)
+        self.transcript_layout.setContentsMargins(8, 8, 8, 8)
+        self.transcript_layout.setSpacing(10)
+        self.empty = label("對話將顯示在這裡。\n請在準備好時連線。", True)
         self.empty.setAlignment(Qt.AlignCenter)
         self.transcript_layout.addWidget(self.empty)
         self.transcript_layout.addStretch()
         self.scroll.setWidget(self.transcript)
         layout.addWidget(self.scroll, 1)
+        self.new_messages = button("New messages ↓", self.jump_to_latest, f"new_messages_{agent}")
+        self.new_messages.hide()
+        layout.addWidget(self.new_messages)
         self.input = PromptEdit()
         self.input.setObjectName(f"input_{agent}")
-        self.input.setPlaceholderText(f"Message {agent.title()}…  Ctrl+Enter to send")
-        self.input.setMinimumHeight(66)
-        self.input.setMaximumHeight(110)
+        self.input.setAccessibleName(f"Message {ROLE_NAMES[agent]}")
+        self.input.setPlaceholderText(f"傳送訊息給 {ROLE_NAMES[agent]}…  Ctrl+Enter 傳送")
+        self.input.setMinimumHeight(56)
+        self.input.setMaximumHeight(96)
         self.input.submit.connect(self.send)
         self.input.files_dropped.connect(self.add_attachments)
-        layout.addWidget(self.input)
+        self.composer = QFrame()
+        self.composer.setObjectName("composer")
+        composer = QVBoxLayout(self.composer)
+        composer.setContentsMargins(10, 8, 10, 8)
+        composer.setSpacing(4)
+        layout.addWidget(self.composer)
+        composer.addWidget(self.input)
         self.attachment_label = label("", True)
         self.attachment_label.hide()
-        layout.addWidget(self.attachment_label)
+        composer.addWidget(self.attachment_label)
+        model_row = QHBoxLayout()
+        model_row.setSpacing(6)
+        self.model = QComboBox()
+        self.model.setObjectName(f"model_{agent}")
+        self.model.setAccessibleName(f"{ROLE_NAMES[agent]} 模型")
+        self.model.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.model.setMinimumContentsLength(7)
+        self.model.currentIndexChanged.connect(self.model_changed)
+        self.effort = QComboBox()
+        self.effort.setObjectName(f"effort_{agent}")
+        self.effort.setAccessibleName(f"{ROLE_NAMES[agent]} 思考強度")
+        self.effort.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.effort.setMinimumContentsLength(6)
+        self.effort.currentIndexChanged.connect(self.effort_selected)
+        model_row.addWidget(self.model, 3)
+        model_row.addWidget(self.effort, 2)
+        composer.addLayout(model_row)
         controls = QHBoxLayout()
         self.attach_button = button("Attach", self.attach)
+        self.attach_button.setAccessibleName(f"Attach files to {ROLE_NAMES[agent]}")
         self.clear_attach_button = button("Clear", self.clear_attachments)
         self.clear_attach_button.hide()
         controls.addWidget(self.attach_button)
         controls.addWidget(self.clear_attach_button)
+        self.approval_button = QToolButton()
+        self.approval_button.setObjectName("ghost")
+        self.approval_button.setAccessibleName(f"{ROLE_NAMES[agent]} 核准方式")
+        self.approval_button.setPopupMode(QToolButton.InstantPopup)
+        approval_menu = QMenu(self.approval_button)
+        for mode in approvals.MODES:
+            approval_menu.addAction(approvals.MODE_LABELS[mode], lambda checked=False, mode=mode: window.set_approval_mode(agent, mode))
+        self.approval_button.setMenu(approval_menu)
+        self.approval_button.setVisible(agent != "dot")
+        controls.addWidget(self.approval_button)
+        self._dot_follow = None
+        if agent == "dot":
+            self.dot_refresh_inline = button("Refresh", lambda: self.read_dot(False), "refresh_dot_inline")
+            self.dot_refresh_inline.setToolTip("讀取 G8毛 的最新回覆")
+            controls.addWidget(self.dot_refresh_inline)
+            self._dot_timer = QTimer(self)
+            self._dot_timer.timeout.connect(self._dot_follow_tick)
         controls.addStretch()
         self.stop_button = button("Stop", self.stop, "stop")
-        self.stop_button.setAccessibleName(f"Stop {agent.title()}")
+        self.stop_button.setAccessibleName(f"Stop {ROLE_NAMES[agent]}")
         controls.addWidget(self.stop_button)
         self.send_button = button("Send", self.send, "primary")
-        self.send_button.setAccessibleName(f"Send to {agent.title()}")
+        self.send_button.setAccessibleName(f"Send to {ROLE_NAMES[agent]}")
         controls.addWidget(self.send_button)
-        layout.addLayout(controls)
+        composer.addLayout(controls)
         self.update_capabilities({})
+
+    def show_capabilities(self):
+        self.window.show_detail(f"{ROLE_NAMES[self.agent]} capabilities", {
+            "connection_state": self.connection_state,
+            "model_selection": self.capability_status("supports_model_selection"),
+            "effort": self.capability_status("supports_effort"),
+            "capabilities": self.capabilities,
+            "note": "Disconnected metadata is not a live handshake. Unknown does not mean unsupported.",
+        })
+
+    def capability_status(self, key):
+        value = self.capabilities.get(key)
+        if value is None:
+            return "尚未偵測"
+        if self.agent != "dot" and self.connection_state not in ("Connected", "Busy"):
+            return "尚未偵測 · 需連線確認"
+        return "已確認支援" if value else "此後端不支援"
+
+    def capture_view_state(self):
+        cursor = self.input.textCursor()
+        selections = {}
+        for mid, card in self.cards.items():
+            selection = card.body.textCursor()
+            selections[mid] = (selection.anchor(), selection.position(), card.body.verticalScrollBar().value())
+        events = {}
+        for widget in self.event_cards():
+            events[widget.event_key] = widget.toggle.isChecked()
+        return {
+            "draft": self.input.toPlainText(), "draft_cursor": (cursor.anchor(), cursor.position()),
+            "attachments": list(self.attachments), "model": self.model.currentData(),
+            "effort": self.effort.currentData(), "effort_invalid": self._effort_invalid, "session": self.session.currentData(),
+            "session_search": self.session_search.text(), "scroll": self.scroll.verticalScrollBar().value(),
+            "selections": selections, "expanded_events": events,
+            "pending": dict(self.pending_approval_events),
+        }
+
+    def restore_view_state(self, state):
+        self._restoring_view = True
+        self.input.setPlainText(state.get("draft", ""))
+        self.attachments = list(state.get("attachments", []))
+        self.attachment_label.setText("附件：" + ", ".join(Path(value).name for value in self.attachments))
+        self.attachment_label.setVisible(bool(self.attachments))
+        self.clear_attach_button.setVisible(bool(self.attachments))
+        anchor, position = state.get("draft_cursor", (0, 0))
+        cursor = self.input.textCursor()
+        size = len(self.input.toPlainText())
+        cursor.setPosition(min(anchor, size))
+        cursor.setPosition(min(position, size), QTextCursor.KeepAnchor)
+        self.input.setTextCursor(cursor)
+        # A cached choice-required state is user intent, not a backend default.
+        # Capability refresh must not replace it with the first available value.
+        self._effort_invalid = bool(state.get("effort_invalid", False))
+        index = self.model.findData(state.get("model"))
+        if index >= 0:
+            self.model.setCurrentIndex(index)
+        if "effort" in state:
+            value = state["effort"]
+            index = self.effort.findData(value)
+            if self._effort_invalid or (value is not None and index < 0):
+                self._effort_invalid = True
+                self.model_changed()
+            elif index >= 0:
+                self.effort.setCurrentIndex(index)
+                # This restores a previously explicit, still-supported choice.
+                if value is not None:
+                    self._effort_invalid = False
+        else:
+            # A new context has no cached unresolved choice from another task.
+            self.model_changed()
+        self.session_search.setText(state.get("session_search", ""))
+        self._fill_sessions(state.get("session", self.session.currentData()))
+        for mid, selection in state.get("selections", {}).items():
+            card = self.cards.get(mid)
+            if card:
+                cursor = card.body.textCursor()
+                size = len(card.body.toPlainText())
+                cursor.setPosition(min(selection[0], size))
+                cursor.setPosition(min(selection[1], size), QTextCursor.KeepAnchor)
+                card.body.setTextCursor(cursor)
+                card.body.verticalScrollBar().setValue(selection[2])
+        for widget in self.event_cards():
+            if widget.event_key in state.get("expanded_events", {}):
+                widget.toggle.setChecked(state["expanded_events"][widget.event_key])
+        for group in self.activity_groups():
+            if any(card.toggle.isChecked() for card in group.cards):
+                group.toggle.setChecked(True)
+        self.update_controls()
+        def restore_scroll():
+            self.scroll.verticalScrollBar().setValue(state.get("scroll", 0))
+            self._restoring_view = False
+        QTimer.singleShot(0, self, restore_scroll)
+
+    def activity_groups(self):
+        widgets = (self.transcript_layout.itemAt(index).widget() for index in range(self.transcript_layout.count()))
+        return [widget for widget in widgets if isinstance(widget, ActivityGroup)]
+
+    def event_cards(self):
+        for index in range(self.transcript_layout.count()):
+            widget = self.transcript_layout.itemAt(index).widget()
+            if isinstance(widget, EventCard):
+                yield widget
+            elif isinstance(widget, ActivityGroup):
+                yield from widget.cards
+
+    def jump_to_latest(self):
+        self.scroll.verticalScrollBar().setValue(self.scroll.verticalScrollBar().maximum())
+        self.new_messages.hide()
 
     def connect_agent(self):
         if self.connection_state in ("Connected", "Busy"):
@@ -433,6 +791,10 @@ class AgentPanel(QFrame):
             self.window.run(lambda: self.window.core.disconnect(self.agent), lambda _: self.window.refresh_agent(self.agent), self.agent)
         else:
             if self.agent == 'dot' and not self.dot_consent('connect'): return
+            # Claude Code needs a working directory; guide instead of failing with a terse error.
+            if self.agent in ('claude', 'local') and not self.window.core.current_project:
+                self.window.require_project(ROLE_NAMES[self.agent] + " 需要先有專案資料夾才能連線。")
+                return
             self.set_state("Connecting")
             self.window.run(lambda: self.window.core.connect(self.agent), lambda _: self.window.refresh_agent(self.agent), self.agent)
 
@@ -443,7 +805,9 @@ class AgentPanel(QFrame):
         target = adapter.target_name+' ('+adapter.target+')' if adapter.target else 'Identifier/name enumeration only; select G8毛 next'
         box = QMessageBox(QMessageBox.Question, 'Unofficial Dot — explicit local action', '', QMessageBox.Yes | QMessageBox.No, self)
         box.setTextFormat(Qt.PlainText)
-        box.setText(DISCLOSURE+'\nAction: '+action+'\nTarget: '+target+'\nStreaming / server Stop / attachments / New chat: Unsupported.')
+        follow = ('\nAfter this send the workspace reads this Dot for replies automatically, about every 8 seconds '
+                  'for up to 5 minutes, then stops.') if action == 'send' else ''
+        box.setText(DISCLOSURE+'\nAction: '+action+'\nTarget: '+target+follow+'\nStreaming / server Stop / attachments / New chat: Unsupported.')
         box.setDefaultButton(QMessageBox.No)
         if box.exec() != QMessageBox.Yes: return False
         adapter.authorize_manual_action(action)
@@ -521,7 +885,7 @@ class AgentPanel(QFrame):
                 name = item.get("displayName") or item.get("display_name") or item.get("name") or item.get("model") or item.get("id", "")
                 self.model.addItem(name, item.get("id") or item.get("model") or item.get("value") or name)
         if not models:
-            self.model.addItem("Managed by ChatGPT / dot" if self.agent == "dot" else "Default backend model", None)
+            self.model.addItem("由 ChatGPT 管理" if self.agent == "dot" else ("尚未偵測" if "尚未偵測" in self.capability_status("supports_model_selection") else "模型清單暫不可用" if cap.get("supports_model_selection") else "後端預設 · 無模型選擇"), None)
         selected = self.model.findData(old)
         if selected < 0:
             saved = self.window.core.get_setting("agent." + self.agent, {}) or {}
@@ -529,14 +893,17 @@ class AgentPanel(QFrame):
         if selected >= 0:
             self.model.setCurrentIndex(selected)
         self.model.blockSignals(False)
+        self.model.setToolTip("模型 · " + self.capability_status("supports_model_selection") + " · 下次請求生效")
         self.model.setEnabled(bool(models) and not self.monitor)
         self.model_changed()
         if cap.get("detail"):
-            self.notice.setText(str(cap["detail"]))
+            self.notice.setText(compact(cap["detail"], 115))
             self.notice.setToolTip(str(cap["detail"]))
         self.update_controls()
 
     def model_changed(self):
+        choice_required = self._effort_invalid
+        self._effort_error = ""
         selected = self.model.currentData()
         efforts = self.capabilities.get("efforts", [])
         for model in self.capabilities.get("models", []):
@@ -549,8 +916,11 @@ class AgentPanel(QFrame):
                 # Both official adapters expose this from handshake metadata;
                 # selected-model efforts can differ from the default model.
                 efforts = self.window.core.list_efforts(self.agent, selected)
-            except Exception:
+            except Exception as exc:
+                self._effort_error = str(exc)
                 efforts = []
+        old_effort = self.effort.currentData()
+        signals_blocked = self.effort.blockSignals(True)
         self.effort.clear()
         if self.capabilities.get("supports_effort"):
             for item in efforts:
@@ -559,13 +929,26 @@ class AgentPanel(QFrame):
                     self.effort.addItem(str(value), value)
         available = self.effort.count() > 0
         if not available:
-            self.effort.addItem("Managed by ChatGPT / dot" if self.agent == "dot" else "Unsupported / backend default", None)
+            self.effort.addItem("由 ChatGPT 管理" if self.agent == "dot" else ("尚未偵測" if "尚未偵測" in self.capability_status("supports_effort") else "偵測失敗" if self._effort_error else "選項暫不可用 · 後端預設" if self.capabilities.get("supports_effort") else "不支援 · 後端預設"), None)
         else:
             saved = self.window.core.get_setting("agent." + self.agent, {}) or {}
-            index = self.effort.findData(saved.get("default_effort"))
-            if index >= 0:
+            index = self.effort.findData(old_effort if old_effort is not None else saved.get("default_effort"))
+            if choice_required or (index < 0 and old_effort is not None):
+                self.effort.insertItem(0, "請選擇支援的強度…", None)
+                self.effort.setCurrentIndex(0)
+                self._effort_invalid = True
+            elif index >= 0:
                 self.effort.setCurrentIndex(index)
+        self.effort.blockSignals(signals_blocked)
+        self.effort.setToolTip("思考強度 · " + self.capability_status("supports_effort") + (" · 偵測失敗：" + self._effort_error if self._effort_error else "") + (" · 此模型不支援先前的強度；請選擇支援值" if self._effort_invalid else " · 下次請求生效"))
         self.effort.setEnabled(available and not self.monitor)
+        self.update_controls()
+
+    def effort_selected(self, index=0):
+        # Only a selection outside capability rebuilding/restore chooses a value.
+        # The rebuild blocks this signal, so refresh cannot act as user input.
+        if self.effort.currentData() is not None:
+            self._effort_invalid = False
         self.update_controls()
 
     def attachment_supported(self):
@@ -578,12 +961,21 @@ class AgentPanel(QFrame):
         return bool(self.capabilities.get('supports_files'))
 
     def set_state(self, state):
+        old_state = self.connection_state
         self.connection_state = state
-        self.state.setText(state)
-        color = "#80cbaa" if state == "Connected" else "#e4bd73" if state in ("Busy", "Connecting") else "#f29f95" if state in ("Error", "Blocked") else "#9facbe"
+        self.state.setText(STATE_LABELS.get(state, "狀態待確認（" + state + "）"))
+        color = STATE_COLORS.get(state, STATE_IDLE)
         self.state.setStyleSheet(f"color: {color};")
-        self.connect_button.setText("Disconnect" if state in ("Connected", "Busy") else ("Reconnect" if state in ("Error", "Offline") else f"Connect {self.agent.title()}"))
+        if state in ("Disconnected", "Offline"):
+            self.approval_rules.clear()
+            if self._dot_follow is not None:
+                self.stop_dot_follow()
+        if (old_state in ("Connected", "Busy")) != (state in ("Connected", "Busy")):
+            self.update_capabilities(self.capabilities)
+        self.connect_button.setText("中斷連線" if state in ("Connected", "Busy") else ("重新連線" if state in ("Error", "Offline") else "連線"))
         self.update_controls()
+        if hasattr(self.window, "role_tabs"):
+            self.window.update_role_tabs()
         if state == 'Error':
             adapter=getattr(self.window.core,'adapters',{}).get(self.agent)
             error=getattr(adapter,'last_error','') if adapter is not None else ''
@@ -597,10 +989,12 @@ class AgentPanel(QFrame):
         cap = self.capabilities
         files_supported = self.attachment_supported()
         blocked = self.agent == "dot" and not cap.get("supports_sessions")
-        enabled = (self.window.core.get_setting("agent." + self.agent, {}) or {}).get("enabled", True)
-        self.connect_button.setEnabled(enabled and not blocked and not busy and self.connection_state != "Connecting")
-        self.send_button.setEnabled(ready and not blocked and not (self.attachments and not files_supported))
-        self.send_button.setToolTip('Remove queued attachments or select a supported model before sending.' if self.attachments and not files_supported else 'Send message')
+        settings = self.window.core.get_setting("agent." + self.agent, {}) or {}
+        enabled = settings.get("enabled", True)
+        local_missing = self.agent == 'local' and not (str(settings.get('base_url') or '').strip() and str(settings.get('model') or '').strip())
+        self.connect_button.setEnabled(enabled and not blocked and not busy and self.connection_state != "Connecting" and (not local_missing or self.connection_state == 'Connected'))
+        self.send_button.setEnabled(ready and not blocked and not (self.attachments and not files_supported) and not (self._effort_invalid and self.effort.currentData() is None))
+        self.send_button.setToolTip("請移除暫存附件或選擇支援的模型" if self.attachments and not files_supported else "請先選擇此模型支援的強度" if self._effort_invalid and self.effort.currentData() is None else "傳送訊息")
         self.input.setReadOnly(self.monitor or blocked)
         self.stop_button.setEnabled(busy and cap.get("supports_cancel", False))
         self.new_button.setEnabled(ready and cap.get("supports_sessions", False) and cap.get('supports_create_session') is not False)
@@ -614,6 +1008,7 @@ class AgentPanel(QFrame):
             self.connect_button.setEnabled(self.connect_button.isEnabled() and not self.monitor)
             self.dot_select.setEnabled(enabled and not self.monitor and self.connection_state not in ('Busy','Connected','Connecting'))
             self.dot_refresh.setEnabled(ready)
+            self.dot_refresh_inline.setEnabled(ready)
             self.dot_older.setEnabled(ready)
             self.stop_button.setToolTip('Unsupported: no server cancellation; manual reads are not streaming')
             self.new_button.setToolTip('Unsupported: map an existing Dot identity with Resume')
@@ -621,18 +1016,26 @@ class AgentPanel(QFrame):
         self.attach_button.setEnabled(ready and files_supported)
         self.input.setAcceptDrops(files_supported and not self.monitor)
         self.pending_review.setEnabled(bool(cap.get("supports_approval")) and not self.monitor)
+        self.approval_button.setText({"ask": "每次都問", "edits": "自動核准編輯", "all": "自動核准全部"}[self.window.approval_mode(self.agent)])
         for card in self.approvals.values():
             for control in card.approval_actions:
                 control.setEnabled(bool(cap.get('supports_approval')) and not self.monitor and not card.historical and not card.approval_resolved)
-        if blocked:
+        if local_missing:
+            self.notice.setText("請先在設定填入本地端點與模型名稱")
+            self.notice.setToolTip(self.notice.text())
+        elif blocked:
             if self.connection_state != 'Error':
-                self.state.setText("Blocked")
-                self.notice.setText(cap.get("detail") or "Official dot bridge unavailable. History remains readable.")
-            self.input.setPlaceholderText("Select G8毛 first. Unofficial integration; manual Refresh, no streaming.")
+                self.state.setText("受阻")
+                self.notice.setText("請先選擇 G8毛 · 非官方整合 · 僅手動操作")
+                self.notice.setToolTip(cap.get("detail") or "Dot bridge unavailable. History remains readable.")
+            self.input.setPlaceholderText("請先選擇 G8毛。非官方整合；手動重新整理，無串流。")
         elif not enabled:
-            self.notice.setText("Agent disabled in Settings.")
+            self.notice.setText("此角色已在設定中停用")
+        elif self.agent == 'local' and self.connection_state in ('Disconnected', 'Offline'):
+            self.notice.setText("本地模型設定已備妥 · 請按「連線」")
+            self.notice.setToolTip(self.notice.text())
         elif self.agent == 'dot':
-            self.input.setPlaceholderText('Manual text send; Refresh reads replies. No streaming / server Stop.')
+            self.input.setPlaceholderText("手動傳送文字；按重新整理讀取回覆。無串流／伺服器停止。")
 
     def set_monitor(self, monitor):
         self.monitor = monitor
@@ -707,7 +1110,7 @@ class AgentPanel(QFrame):
             self.window.show_error("This backend does not support attachments.")
             return
         self.attachments.extend(path for path in paths if path and path not in self.attachments)
-        self.attachment_label.setText("Attachments: " + ", ".join(Path(path).name for path in self.attachments))
+        self.attachment_label.setText("附件：" + ", ".join(Path(path).name for path in self.attachments))
         self.attachment_label.setVisible(bool(self.attachments))
         self.clear_attach_button.setVisible(bool(self.attachments))
 
@@ -726,15 +1129,74 @@ class AgentPanel(QFrame):
         if not content.strip() or not self.send_button.isEnabled():
             return
         if not self.window.core.current_task:
-            self.window.show_error("Create or select a task before sending a message.")
+            self.window.require_task()
             return
         model, effort, attachments = self.model.currentData(), self.effort.currentData(), list(self.attachments)
         if self.agent == 'dot' and not self.dot_consent('send'): return
         self.set_state("Busy")
         self.input.clear()
         self.clear_attachments()
-        self.window.run(lambda: self.window.core.send_message(self.agent, content, model=model, effort=effort, attachments=attachments or None), agent=self.agent,
-                        on_error=lambda _: self.input.setPlainText(content) if not self.input.toPlainText() else None)
+        def failed(_):
+            if not self.input.toPlainText():
+                self.input.setPlainText(content)
+            if self.agent == 'dot':
+                # A network timeout does not tell whether G8毛 received it; sending again may duplicate.
+                self.window.footer.setText("傳送沒有得到確認：訊息可能已經送出。請先按「重新整理」確認，再決定要不要重送。")
+        self.window.run(lambda: self.window.core.send_message(self.agent, content, model=model, effort=effort, attachments=attachments or None),
+                        (lambda _: self.follow_dot_replies()) if self.agent == 'dot' else None, agent=self.agent, on_error=failed)
+
+    def _dot_replies(self):
+        return tuple((m["id"], len(str(m["content"]))) for m in self.window.core.messages(agent="dot") if m.get("role") == "assistant")
+
+    def follow_dot_replies(self):
+        """After a consented send, read G8毛 for its reply for a few minutes so the answer shows up here."""
+        adapter = self.window.core.adapters.get("dot")
+        run = self.window.orchestrator
+        task = self.window.core.current_task or {}
+        if not hasattr(adapter, "grant_run") or (run and run.active) or task.get("dot_session") != getattr(adapter, "target", None):
+            return
+        try:
+            adapter.grant_run(45)
+        except Exception:
+            return
+        self._dot_follow = {"until": time.monotonic() + 300, "baseline": self._dot_replies(), "seen": None, "stable": 0, "task": task.get("id")}
+        self._dot_timer.start(8000)
+        self.notice.setText("已送出 · 正在自動讀取 G8毛 的回覆（最多 5 分鐘）")
+
+    def stop_dot_follow(self, note=""):
+        if self._dot_follow is None:
+            return
+        self._dot_follow = None
+        self._dot_timer.stop()
+        adapter, run = self.window.core.adapters.get("dot"), self.window.orchestrator
+        if hasattr(adapter, "revoke_run") and not (run and run.active):
+            adapter.revoke_run()
+        if note:
+            self.notice.setText(note)
+            self.notice.setToolTip(note)
+
+    def _dot_follow_tick(self):
+        follow = self._dot_follow
+        if follow is None:
+            return self._dot_timer.stop()
+        if self.connection_state == "Busy":
+            return
+        if self.monitor or self.connection_state != "Connected" or (self.window.core.current_task or {}).get("id") != follow["task"]:
+            return self.stop_dot_follow()
+        if time.monotonic() > follow["until"]:
+            return self.stop_dot_follow("已停止自動讀取 · 需要時請按「重新整理」")
+        def done(_):
+            if self._dot_follow is not follow:
+                return
+            current = self._dot_replies()
+            if current != follow["baseline"]:
+                # G8毛 may answer in several messages; it is finished once two reads in a row match.
+                follow["stable"] = follow["stable"] + 1 if current == follow["seen"] else 0
+                follow["seen"] = current
+                if follow["stable"] >= 2:
+                    self.stop_dot_follow("G8毛 已回覆")
+        self.window.run(lambda: self.window.core.adapters["dot"].refresh_messages(False), done, agent="dot",
+                        on_error=lambda _: self.stop_dot_follow("讀取回覆失敗 · 請按「重新整理」再試"))
 
     def stop(self):
         self.window.run(lambda: self.window.core.stop(self.agent), agent=self.agent)
@@ -747,8 +1209,9 @@ class AgentPanel(QFrame):
         while self.transcript_layout.count() > 1:
             item = self.transcript_layout.takeAt(0)
             if item.widget():
+                item.widget().hide()
                 item.widget().deleteLater()
-        self.empty = label("No messages in this task yet.", True)
+        self.empty = label("這個任務尚無訊息", True)
         self.empty.setAlignment(Qt.AlignCenter)
         self.transcript_layout.insertWidget(0, self.empty)
 
@@ -766,19 +1229,39 @@ class AgentPanel(QFrame):
         self.scroll_bottom()
 
     def add_event(self, event, historical=False):
+        event = {**(event.get("payload") or {}), **event}
         self.empty.hide()
         card = EventCard(event, self.window, historical)
-        self.transcript_layout.insertWidget(self.transcript_layout.count() - 1, card)
-        # A live insertion must be exposed before it can receive pointer input.
-        # Layout geometry is still allowed to settle in the normal event loop.
-        card.show()
-        if event.get("type") in ("approval", "approval_request", "tool_approval"):
-            request_id = event.get("request_id") or (event.get("payload") or {}).get("request_id")
+        approval = event.get("type") in APPROVAL_EVENTS
+        request_id = event.get("request_id") or (event.get("payload") or {}).get("request_id")
+        automatic = approval and not historical and bool(request_id) and self.window.auto_approve(self.agent, event, request_id)
+        if approval and (historical or automatic):
+            # Already answered: it belongs with the rest of the tool activity, not in the user's way.
+            card.resolve_approval()
+            card.toggle.setChecked(False)
+            if automatic:
+                card.toggle.setText("已自動核准  " + card.toggle.text().split("  ", 1)[-1])
+        if approval and not (historical or automatic):
+            self.transcript_layout.insertWidget(self.transcript_layout.count() - 1, card)
+            # A live insertion must be exposed before it can receive pointer input.
+            # Layout geometry is still allowed to settle in the normal event loop.
+            card.show()
+        else:
+            # Tool activity folds into the group that ends the transcript, or starts a new one.
+            last = self.transcript_layout.itemAt(self.transcript_layout.count() - 2)
+            group = last.widget() if last else None
+            if not isinstance(group, ActivityGroup):
+                group = ActivityGroup()
+                self.transcript_layout.insertWidget(self.transcript_layout.count() - 1, group)
+                group.show()
+            group.add(card)
+        if approval:
             if request_id:
                 self.approvals[request_id] = card
-                if not historical:
+                if not historical and not automatic:
                     self.pending_approval_events[request_id] = event
                     self.pending_review.show()
+                    self.window.update_role_tabs()
         self.scroll_bottom()
 
     def review_pending_approval(self):
@@ -792,11 +1275,16 @@ class AgentPanel(QFrame):
             card.resolve_approval()
         self.pending_approval_events.pop(request_id, None)
         self.pending_review.setVisible(bool(self.pending_approval_events))
+        self.window.update_role_tabs()
 
     def scroll_bottom(self):
+        if self._restoring_view:
+            return
         bar = self.scroll.verticalScrollBar()
         if bar.maximum() - bar.value() < 100:
-            QTimer.singleShot(0, lambda: bar.setValue(bar.maximum()))
+            QTimer.singleShot(0, self, lambda: bar.setValue(bar.maximum()) if not self._restoring_view else None)
+        else:
+            self.new_messages.show()
 
 
 class ScreenshotReviewDialog(QDialog):
@@ -1238,6 +1726,231 @@ class NativeSessionDialog(QDialog):
         self.window.run(lambda: self.window.core.import_session(self.agent, record), imported, on_error=failed)
 
 
+class SessionNavigator(QWidget):
+    """Sidebar list of locally saved Claude desktop and Codex conversations, grouped by repository.
+
+    Nothing is read until this page is first shown. Rename and archive are kept in this
+    workspace's own settings; the source apps' files are never written."""
+    SOURCES = (("Claude", "claude"), ("Codex", "codex"))
+
+    def __init__(self, window):
+        super().__init__()
+        self.window = window
+        self.sessions = {agent: None for _, agent in self.SOURCES}
+        self.collapsed = set()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        self.source = QTabBar()
+        self.source.setObjectName("nav_source")
+        self.source.setDrawBase(False)
+        self.source.setExpanding(True)
+        for title, _ in self.SOURCES:
+            self.source.addTab(title)
+        self.source.currentChanged.connect(lambda _: self.ensure_loaded())
+        layout.addWidget(self.source)
+        self.search = QLineEdit()
+        self.search.setObjectName("nav_search")
+        self.search.setPlaceholderText("搜尋對話或專案…")
+        self.search.setClearButtonEnabled(True)
+        self.search.textChanged.connect(self.fill)
+        layout.addWidget(self.search)
+        self.tree = QTreeWidget()
+        self.tree.setObjectName("nav_tree")
+        self.tree.setColumnCount(2)
+        self.tree.setHeaderHidden(True)
+        self.tree.setRootIsDecorated(False)
+        self.tree.setIndentation(12)
+        self.tree.setUniformRowHeights(True)
+        self.tree.setTextElideMode(Qt.ElideRight)
+        self.tree.header().setStretchLastSection(False)
+        self.tree.header().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.tree.header().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(lambda point: self.menu.exec(self.tree.viewport().mapToGlobal(point)))
+        self.tree.currentItemChanged.connect(lambda *_: self.selection_changed())
+        self.tree.itemClicked.connect(self.toggle_group)
+        self.tree.itemActivated.connect(lambda *_: self.open_selected(True))
+        layout.addWidget(self.tree, 1)
+        self.status = label("", True)
+        self.status.setObjectName("nav_status")
+        layout.addWidget(self.status)
+        actions = QHBoxLayout()
+        actions.setSpacing(6)
+        self.open_button = button("接續對話", lambda: self.open_selected(True), "primary")
+        self.open_button.setToolTip("切換到該專案、載入紀錄並接續同一個對話（也可按兩下）")
+        actions.addWidget(self.open_button, 1)
+        self.more = QToolButton()
+        self.more.setText("⋯")
+        self.more.setAccessibleName("對話操作")
+        self.more.setPopupMode(QToolButton.InstantPopup)
+        self.menu = QMenu(self.more)
+        self.load_action = self.menu.addAction("只載入紀錄", lambda: self.open_selected(False))
+        self.new_action = self.menu.addAction("在此專案開新對話", self.new_conversation)
+        self.menu.addSeparator()
+        self.rename_action = self.menu.addAction("重新命名…", self.rename)
+        self.archive_action = self.menu.addAction("封存", self.toggle_archive)
+        self.menu.addSeparator()
+        self.archived_action = self.menu.addAction("顯示已封存與系統對話")
+        self.archived_action.setCheckable(True)
+        self.archived_action.toggled.connect(self.fill)
+        self.refresh_action = self.menu.addAction("重新整理", self.load)
+        self.more.setMenu(self.menu)
+        actions.addWidget(self.more)
+        layout.addLayout(actions)
+        self.selection_changed()
+
+    @property
+    def agent(self):
+        return self.SOURCES[max(0, self.source.currentIndex())][1]
+
+    def ensure_loaded(self):
+        if self.sessions[self.agent] is None:
+            self.load()
+        else:
+            self.fill()
+
+    def load(self):
+        agent = self.agent
+        self.status.setText("正在讀取對話清單…")
+        def failed(error):
+            self.status.setText("無法讀取對話清單：" + error)
+        self.window.run(lambda: self.window.core.desktop_sessions(agent), lambda rows: self.set_sessions(agent, rows), on_error=failed)
+
+    def set_sessions(self, agent, rows):
+        self.sessions[agent] = list(rows or [])
+        if agent == self.agent:
+            self.fill()
+
+    @staticmethod
+    def when(value):
+        try:
+            moment = datetime.fromisoformat(value).astimezone()
+        except (TypeError, ValueError):
+            return ""
+        minutes = (datetime.now().astimezone() - moment).total_seconds() / 60
+        if minutes < 1:
+            return "剛剛"
+        if minutes < 60:
+            return f"{int(minutes)} 分"
+        if minutes < 1440:
+            return f"{int(minutes // 60)} 小時"
+        if minutes < 10080:
+            return f"{int(minutes // 1440)} 天"
+        return moment.strftime("%m-%d")
+
+    def title_of(self, session):
+        if session["title"].startswith("（未命名"):
+            return "未命名對話 " + self.when(session["created"] or session["last_activity"])
+        return session["title"]
+
+    def fill(self, *_):
+        from .desktop_sessions import group_by_project
+        agent, query = self.agent, self.search.text().casefold().strip()
+        selected = (self.selected() or {}).get("id")
+        current = (self.window.core.current_task or {}).get(agent + "_session")
+        self.tree.clear()
+        shown, focus = 0, None
+        for group in group_by_project(self.sessions[agent] or []):
+            rows = [s for s in group["sessions"] if (self.archived_action.isChecked() or not (s["archived"] or s.get("system")))
+                    and (not query or query in (s["title"] + " " + group["name"] + " " + s["cwd"]).casefold())]
+            if not rows:
+                continue
+            key = rows[0].get("project_key") or group["cwd"]
+            parent = QTreeWidgetItem(["", str(len(rows))])
+            parent.setData(0, Qt.UserRole, {"kind": "project", "key": key, "name": group["name"], "agent": agent,
+                                            "cwd": group["cwd"], "cwd_exists": group["cwd_exists"]})
+            parent.setToolTip(0, group["cwd"])
+            heading = parent.font(0)
+            heading.setBold(True)
+            parent.setFont(0, heading)
+            parent.setForeground(1, QColor(MUTED_COLOR))
+            self.tree.addTopLevelItem(parent)
+            for session in rows:
+                child = QTreeWidgetItem([self.title_of(session) + ("（已封存）" if session["archived"] else ""),
+                                         self.when(session["last_activity"])])
+                child.setData(0, Qt.UserRole, dict(session, kind="session"))
+                child.setToolTip(0, session["title"] + "\n" + session["cwd"] + ("" if session["cwd_exists"] else "\n資料夾已不存在"))
+                child.setForeground(1, QColor(MUTED_COLOR))
+                if not session["cwd_exists"] or session["archived"]:
+                    child.setForeground(0, QColor(MUTED_COLOR))
+                if session["id"] == current:
+                    font = child.font(0)
+                    font.setBold(True)
+                    child.setFont(0, font)
+                    child.setForeground(0, QColor(HEADING_COLOR))
+                parent.addChild(child)
+                if session["id"] == (selected or current):
+                    focus = child
+            parent.setExpanded(bool(query) or key not in self.collapsed)
+            self.label_group(parent)
+            shown += len(rows)
+        if focus is not None:
+            self.tree.setCurrentItem(focus)
+        if self.sessions[agent] is None:
+            self.status.setText("")
+        else:
+            self.status.setText(f"{shown} 個對話" if self.sessions[agent] else "這台電腦上沒有找到本機對話")
+        self.selection_changed()
+
+    @staticmethod
+    def label_group(item):
+        item.setText(0, ("▾ " if item.isExpanded() else "▸ ") + item.data(0, Qt.UserRole)["name"])
+
+    def toggle_group(self, item, _column=0):
+        record = item.data(0, Qt.UserRole) or {}
+        if record.get("kind") != "project":
+            return
+        item.setExpanded(not item.isExpanded())
+        (self.collapsed.discard if item.isExpanded() else self.collapsed.add)(record["key"])
+        self.label_group(item)
+
+    def selected(self):
+        item = self.tree.currentItem()
+        return item.data(0, Qt.UserRole) if item else None
+
+    def selection_changed(self):
+        record = self.selected() or {}
+        session = record.get("kind") == "session"
+        usable = bool(record.get("cwd_exists")) and self.window.mode.currentData() != "Monitor"
+        self.open_button.setEnabled(usable and session)
+        self.load_action.setEnabled(usable and session)
+        self.new_action.setEnabled(usable)
+        self.rename_action.setEnabled(session)
+        self.archive_action.setEnabled(session)
+        self.archive_action.setText("取消封存" if record.get("archived") else "封存")
+
+    def open_selected(self, resume):
+        record = self.selected() or {}
+        if record.get("kind") == "session" and self.open_button.isEnabled():
+            self.window.open_desktop_session(record, resume)
+
+    def new_conversation(self):
+        record = self.selected() or {}
+        if self.new_action.isEnabled():
+            self.window.new_desktop_conversation(record["cwd"], record.get("agent", self.agent))
+
+    def _override(self, record, **changes):
+        agent = record.get("agent", self.agent)
+        def done(_):
+            self.window.reload_context()
+            self.load()
+        self.window.run(lambda: self.window.core.set_desktop_override(agent, record["id"], **changes), done)
+
+    def rename(self):
+        record = self.selected() or {}
+        if record.get("kind") != "session":
+            return
+        title, ok = QInputDialog.getText(self, "重新命名對話", "名稱（留空則恢復原名；只影響這個程式）", text=record["title"])
+        if ok:
+            self._override(record, title=title.strip())
+
+    def toggle_archive(self):
+        record = self.selected() or {}
+        if record.get("kind") == "session":
+            self._override(record, archived=not record.get("archived"))
+
+
 class HandoffDialog(QDialog):
     def __init__(self, window, message, target):
         super().__init__(window)
@@ -1246,7 +1959,7 @@ class HandoffDialog(QDialog):
         self.resize(760, 630)
         self.preview = window.core.prepare_handoff(identifier(message), target)
         layout = QVBoxLayout(self)
-        layout.addWidget(label(f"{message.get('agent', '').title()} → {target.title()}", False))
+        layout.addWidget(label(f"{ROLE_NAMES.get(message.get('agent'), message.get('agent', ''))} → {ROLE_NAMES[target]}", False))
         task = window.core.current_task or {}
         project = window.core.current_project or {}
         projects = window.core.list_projects()
@@ -1271,14 +1984,14 @@ class HandoffDialog(QDialog):
         self.outgoing.setObjectName("handoff_outgoing")
         layout.addWidget(self.outgoing, 1)
         self.update_preview()
-        layout.addWidget(label("Automatic orchestration is OFF. Send requires this explicit confirmation.", True))
+        layout.addWidget(label("自動協作已關閉。必須由你確認後才能傳送。", True))
         actions = QDialogButtonBox(QDialogButtonBox.Cancel)
         self.send_button = actions.addButton("Confirm and send", QDialogButtonBox.AcceptRole)
         self.send_button.setObjectName("handoff_send")
         ready = window.panels[target].connection_state == "Connected"
         self.send_button.setEnabled(ready)
         if not ready:
-            layout.addWidget(label(f"{target.title()} is not connected. This preview has not been sent.", True))
+            layout.addWidget(label(f"{ROLE_NAMES[target]} 尚未連線。此預覽尚未傳送。", True))
         actions.rejected.connect(self.reject)
         actions.accepted.connect(self.accept)
         layout.addWidget(actions)
@@ -1304,86 +2017,192 @@ class MainWindow(QMainWindow):
         self._legacy_clock = 0
         self._git_busy = False
         self._git_clock = 0
+        self._context_views = {}
+        self._loaded_context_key = None
+        self._layout_updating = False
+        self._grid_sizes = [400] * len(AGENTS)
+        self._preferred_agent = "claude"
         self.setWindowTitle("AI Collaboration Workspace")
         self.setObjectName("ai_collaboration_workspace")
-        self.resize(1510, 940)
+        self.resize(1530, 920)
         self.setMinimumSize(640, 420)
-        self.setStyleSheet(STYLE)
+        QApplication.instance().setPalette(metal_palette())
+        self.setStyleSheet(build_style(str(core.get_setting("ui.theme", "desktop"))))
         root = QWidget()
+        root.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
         layout = QVBoxLayout(root)
-        layout.setContentsMargins(17, 14, 17, 10)
+        layout.setContentsMargins(12, 10, 12, 8)
         layout.setSpacing(10)
         heading = QHBoxLayout()
-        title = label("AI Collaboration Workspace")
-        title.setObjectName("brand")
-        title.setWordWrap(False)
-        heading.addWidget(title)
-        heading.addStretch()
-        heading.addWidget(label("LOCAL WORKSPACE  ·  AUTOMATION OFF", True))
-        heading.addWidget(button("Settings", self.settings))
-        heading.addWidget(button("Diagnostics", self.diagnostics))
+        self.sidebar_toggle = button("☰", self.toggle_sidebar, "sidebar_toggle")
+        self.sidebar_toggle.setAccessibleName("切換專案與對話側欄")
+        self.sidebar_toggle.setToolTip("專案與對話 · Ctrl+B")
+        self.sidebar_toggle.setCheckable(True)
+        self.sidebar_toggle.setChecked(True)
+        heading.addWidget(self.sidebar_toggle)
+        self.context_title = label("AI 協作工作區")
+        self.context_title.setObjectName("brand")
+        self.context_title.setWordWrap(False)
+        self.context_title.setMinimumWidth(0)
+        self.context_title.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        heading.addWidget(self.context_title, 1)
+        self.layout_mode = QComboBox()
+        self.layout_mode.setObjectName("layout_mode")
+        for title, value in (("自動布局", "Auto"), ("並排", "Three panes"), ("專注", "Focus")):
+            self.layout_mode.addItem(title, value)
+        self.layout_mode.setAccessibleName("對話布局")
+        self.layout_mode.setToolTip("自動布局：窄視窗顯示一個角色，空間足夠時顯示三欄")
+        self.layout_mode.currentIndexChanged.connect(self.update_workspace_layout)
+        heading.addWidget(self.layout_mode)
+        self.auto_button = button("自動協作…", self.start_auto_collab, "auto_collab")
+        self.auto_button.setToolTip("Claude 規劃與最終審查 · G8毛 轉交並審查 · Codex 實作")
+        heading.addWidget(self.auto_button)
+        self.details_toggle = button("Work details", self.toggle_details, "details_toggle")
+        self.details_toggle.setCheckable(True)
+        self.details_toggle.setToolTip("工具、命令、變更、測試、時間線與交接 · Ctrl+Shift+D")
+        heading.addWidget(self.details_toggle)
+        workspace_menu = QToolButton()
+        workspace_menu.setObjectName("workspace_actions")
+        workspace_menu.setText("⋯")
+        workspace_menu.setAccessibleName("工作區操作")
+        workspace_menu.setPopupMode(QToolButton.InstantPopup)
+        menu = QMenu(workspace_menu)
+        for text, callback in (("任務筆記…", self.notes), ("比較回覆…", self.compare),
+                               ("差異／測試／附件…", self.inspect_artifacts), ("匯出…", self.export),
+                               ("同步專案至角色", self.sync_project), ("設定…", self.settings),
+                               ("診斷…", self.diagnostics), ("停止目前任務…", self.stop_task)):
+            menu.addAction(text, callback)
+        workspace_menu.setMenu(menu)
+        heading.addWidget(workspace_menu)
         layout.addLayout(heading)
-        context = QHBoxLayout()
-        context.addWidget(label("Project", True))
+        self.orchestrator = None
+        self.run_bar = QFrame()
+        self.run_bar.setObjectName("run_bar")
+        run_row = QHBoxLayout(self.run_bar)
+        run_row.setContentsMargins(12, 6, 8, 6)
+        self.run_status = label("")
+        self.run_status.setObjectName("run_status")
+        self.run_status.setWordWrap(False)
+        self.run_status.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        run_row.addWidget(self.run_status, 1)
+        self.run_stop = button("Stop", self.stop_auto_collab, "stop")
+        run_row.addWidget(self.run_stop)
+        self.run_close = button("Close", self.run_bar.hide)
+        run_row.addWidget(self.run_close)
+        self.run_bar.hide()
+        layout.addWidget(self.run_bar)
+        self.run_timer = QTimer(self)
+        self.run_timer.timeout.connect(self.tick_auto_collab)
+        self.workspace_splitter = QSplitter(Qt.Horizontal)
+        self.workspace_splitter.setChildrenCollapsible(False)
+        self.sidebar = QFrame()
+        self.sidebar.setObjectName("sidebar")
+        self.sidebar.setMinimumWidth(230)
+        self.sidebar.setMaximumWidth(310)
+        side = QVBoxLayout(self.sidebar)
+        side.setContentsMargins(12, 12, 12, 12)
+        side.setSpacing(8)
+        self.sidebar_pages = QTabBar()
+        self.sidebar_pages.setObjectName("sidebar_pages")
+        self.sidebar_pages.setDrawBase(False)
+        self.sidebar_pages.setExpanding(True)
+        self.sidebar_pages.setAccessibleName("側欄頁面")
+        self.sidebar_pages.addTab("對話")
+        self.sidebar_pages.addTab("工作區")
+        side.addWidget(self.sidebar_pages)
+        self.sidebar_stack = QStackedWidget()
+        self.navigator = SessionNavigator(self)
+        self.sidebar_stack.addWidget(self.navigator)
+        work_page = QWidget()
+        work = QVBoxLayout(work_page)
+        work.setContentsMargins(0, 0, 0, 0)
+        work.setSpacing(8)
+        self.sidebar_stack.addWidget(work_page)
+        side.addWidget(self.sidebar_stack, 1)
+        work.addWidget(label("專案與任務", True))
+        project_row = QHBoxLayout()
         self.project_combo = QComboBox()
         self.project_combo.setObjectName("global_project")
-        self.project_combo.setMinimumWidth(150)
+        self.project_combo.setAccessibleName("目前專案")
+        self.project_combo.setMinimumContentsLength(10)
+        self.project_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.project_combo.currentIndexChanged.connect(self.project_changed)
-        context.addWidget(self.project_combo, 1)
-        context.addWidget(button("+ Project", self.new_project))
-        context.addWidget(button("Sync to agents", self.sync_project, "sync_project"))
-        context.addSpacing(12)
-        context.addWidget(label("Task", True))
+        project_row.addWidget(self.project_combo, 1)
+        create_project = button("+", self.new_project, "new_project")
+        create_project.setAccessibleName("新增專案")
+        create_project.setToolTip("新增專案")
+        project_row.addWidget(create_project)
+        work.addLayout(project_row)
+        task_row = QHBoxLayout()
         self.task_combo = QComboBox()
         self.task_combo.setObjectName("global_task")
-        self.task_combo.setMinimumWidth(170)
+        self.task_combo.setAccessibleName("目前任務")
+        self.task_combo.setMinimumContentsLength(10)
+        self.task_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.task_combo.currentIndexChanged.connect(self.task_changed)
-        context.addWidget(self.task_combo, 1)
-        context.addWidget(button("+ Task", self.new_task))
+        task_row.addWidget(self.task_combo, 1)
+        create_task = button("+", self.new_task, "new_task")
+        create_task.setAccessibleName("新增任務")
+        create_task.setToolTip("新增任務")
+        task_row.addWidget(create_task)
+        work.addLayout(task_row)
         self.task_status = QComboBox()
-        self.task_status.addItems(STATUSES)
+        self.task_status.addItem("尚未選擇任務", None)
+        for value in STATUSES:
+            self.task_status.addItem(STATUS_LABELS[value], value)
         self.task_status.setObjectName("task_status")
-        self.task_status.currentTextChanged.connect(self.status_changed)
-        context.addWidget(self.task_status)
-        layout.addLayout(context)
-        navigation = QHBoxLayout()
+        self.task_status.setAccessibleName("任務狀態")
+        self.task_status.currentIndexChanged.connect(lambda _: self.status_changed(self.task_status.currentData()))
+        work.addWidget(label("任務狀態", True))
+        work.addWidget(self.task_status)
         self.mode = QComboBox()
-        self.mode.addItems(["Workspace", "Monitor", "Timeline", "History"])
+        for title, value in (("對話", "Workspace"), ("監看（唯讀）", "Monitor"), ("時間線", "Timeline"), ("歷史", "History")):
+            self.mode.addItem(title, value)
         self.mode.setObjectName("view_mode")
-        self.mode.currentTextChanged.connect(self.change_mode)
-        navigation.addWidget(self.mode)
-        navigation.addWidget(button("Task notes", self.notes))
-        navigation.addWidget(button("Compare", self.compare))
-        navigation.addWidget(button("Diff / Tests", self.inspect_artifacts))
-        navigation.addWidget(button("Export", self.export))
-        self.handoff_mode = QComboBox()
-        self.handoff_mode.setObjectName("handoff_mode")
-        self.handoff_mode.addItems(["Assisted", "Manual"])
-        saved_mode = str(self.core.get_setting("handoff.mode", "assisted")).title()
-        self.handoff_mode.setCurrentText(saved_mode if saved_mode in ("Assisted", "Manual") else "Assisted")
-        self.handoff_mode.setToolTip("Assisted: review a preview before sending. Manual: your Forward click sends original content and metadata directly. Automatic is OFF.")
-        self.handoff_mode.currentTextChanged.connect(lambda value: self.core.set_setting("handoff.mode", value.lower()))
-        navigation.addWidget(self.handoff_mode)
-        self.flow_button = QToolButton()
-        self.flow_button.setObjectName("collaboration_flow")
-        self.flow_button.setText("Flow ▾")
-        self.flow_button.setToolTip("Claude → Dot → Codex: two independent, explicit handoff steps")
-        self.flow_button.setPopupMode(QToolButton.InstantPopup)
-        flow_menu = QMenu(self.flow_button)
-        flow_menu.aboutToShow.connect(lambda: self.populate_flow_menu(flow_menu))
-        self.flow_button.setMenu(flow_menu)
-        navigation.addWidget(self.flow_button)
-        self.unfocus_button = button("← Three panels", lambda: self.focus_agent(None))
+        self.mode.setAccessibleName("工作區檢視")
+        self.mode.currentIndexChanged.connect(lambda _: self.change_mode(self.mode.currentData()))
+        work.addWidget(label("檢視", True))
+        work.addWidget(self.mode)
+        self.session_tabs = QTabWidget()
+        self.session_tabs.setObjectName("sidebar_sessions")
+        self.session_tabs.setDocumentMode(True)
+        self.session_tabs.setAccessibleName("各角色對話")
+        work.addWidget(self.session_tabs, 1)
+        side.addWidget(button("Settings…", self.settings, "settings"))
+        self.workspace_splitter.addWidget(self.sidebar)
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(8)
+        roles = QHBoxLayout()
+        self.role_tabs = QTabBar()
+        self.role_tabs.setObjectName("role_tabs")
+        self.role_tabs.setExpanding(False)
+        self.role_tabs.setUsesScrollButtons(True)
+        self.role_tabs.setElideMode(Qt.ElideRight)
+        self.role_tabs.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        self.role_tabs.setDrawBase(False)
+        self.role_tabs.setAccessibleName("對話角色")
+        for agent in AGENTS:
+            self.role_tabs.addTab(ROLE_NAMES[agent] + " · " + ROLE_LABELS[agent])
+        self.role_tabs.currentChanged.connect(self.select_role)
+        roles.addWidget(self.role_tabs, 1)
+        self.unfocus_button = button("四欄並排", lambda: self.focus_agent(None), "unfocus")
         self.unfocus_button.hide()
-        navigation.addWidget(self.unfocus_button)
-        navigation.addStretch()
-        navigation.addWidget(button("Stop current task…", self.stop_task, "stop"))
-        layout.addLayout(navigation)
+        roles.addWidget(self.unfocus_button)
+        content_layout.addLayout(roles)
         self.stack = QStackedWidget()
+        self.stack.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         self.splitter = QSplitter(Qt.Horizontal)
         self.panels = {agent: AgentPanel(agent, self) for agent in AGENTS}
-        for panel in self.panels.values():
+        for agent, panel in self.panels.items():
             self.splitter.addWidget(panel)
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.NoFrame)
+            scroll.setWidget(panel.session_controls)
+            self.session_tabs.addTab(scroll, ROLE_NAMES[agent])
+        self.session_tabs.currentChanged.connect(self.sidebar_role_changed)
         self.splitter.setChildrenCollapsible(False)
         self.stack.addWidget(self.splitter)
         self.timeline = QTreeWidget()
@@ -1393,28 +2212,100 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.timeline)
         self.history_page = self.build_history()
         self.stack.addWidget(self.history_page)
-        layout.addWidget(self.stack, 1)
-        self.footer = label("Ready · Agents connect only when requested · Per-user data", True)
+        content_layout.addWidget(self.stack, 1)
+        self.details_panel = QFrame()
+        self.details_panel.setObjectName("work_details")
+        self.details_panel.setMinimumHeight(140)
+        self.details_panel.setMaximumHeight(300)
+        detail_layout = QVBoxLayout(self.details_panel)
+        detail_layout.setContentsMargins(12, 8, 12, 8)
+        self.details_tabs = QTabWidget()
+        self.details_tabs.setObjectName("details_tabs")
+        self.detail_trees = {}
+        for title in ("Tools", "Commands", "Changes", "Tests", "Timeline", "Handoffs"):
+            page = QWidget()
+            page_layout = QVBoxLayout(page)
+            page_layout.setContentsMargins(0, 6, 0, 0)
+            tree = QTreeWidget()
+            tree.setObjectName("details_" + title.lower())
+            tree.setHeaderLabels(["來源", "事件／狀態", "摘要"])
+            tree.setAlternatingRowColors(True)
+            tree.setColumnWidth(0, 90)
+            tree.setColumnWidth(1, 175)
+            tree.itemDoubleClicked.connect(lambda item: self.show_detail("Recorded detail", item.data(0, Qt.UserRole)))
+            page_layout.addWidget(tree, 1)
+            self.detail_trees[title] = tree
+            if title in ("Changes", "Tests"):
+                page_layout.addWidget(button("Open Diff / Tests / Artifacts…", self.inspect_artifacts))
+            if title == "Timeline":
+                page_layout.addWidget(button("Open full timeline", lambda: self.mode.setCurrentIndex(self.mode.findData("Timeline"))))
+            if title == "Handoffs":
+                handoff_row = QHBoxLayout()
+                self.handoff_mode = QComboBox()
+                self.handoff_mode.setObjectName("handoff_mode")
+                self.handoff_mode.addItem("預覽後傳送", "assisted")
+                self.handoff_mode.addItem("手動直接傳送", "manual")
+                saved = str(core.get_setting("handoff.mode", "assisted"))
+                self.handoff_mode.setCurrentIndex(max(0, self.handoff_mode.findData(saved)))
+                self.handoff_mode.setToolTip("Assisted previews each handoff. Manual sends on your explicit Forward click. Automatic is OFF.")
+                self.handoff_mode.currentIndexChanged.connect(lambda _: core.set_setting("handoff.mode", self.handoff_mode.currentData()))
+                handoff_row.addWidget(self.handoff_mode)
+                self.flow_button = QToolButton()
+                self.flow_button.setObjectName("collaboration_flow")
+                self.flow_button.setText("交接流程 ▾")
+                self.flow_button.setToolTip("Claude → G8毛 → Codex · each step is an explicit user action")
+                self.flow_button.setPopupMode(QToolButton.InstantPopup)
+                flow_menu = QMenu(self.flow_button)
+                flow_menu.aboutToShow.connect(lambda: self.populate_flow_menu(flow_menu))
+                self.flow_button.setMenu(flow_menu)
+                handoff_row.addWidget(self.flow_button)
+                handoff_row.addWidget(label("自動協作關閉", True))
+                handoff_row.addStretch()
+                page_layout.addLayout(handoff_row)
+            self.details_tabs.addTab(page, {"Tools": "工具", "Commands": "命令", "Changes": "變更", "Tests": "測試", "Timeline": "時間線", "Handoffs": "交接"}[title])
+        detail_layout.addWidget(self.details_tabs)
+        self.details_panel.hide()
+        self.details_dialog = None
+        content_layout.addWidget(self.details_panel)
+        self.workspace_splitter.addWidget(content)
+        self.workspace_splitter.setStretchFactor(0, 0)
+        self.workspace_splitter.setStretchFactor(1, 1)
+        self.workspace_splitter.setSizes([260, 1230])
+        self.workspace_splitter.splitterMoved.connect(lambda *_: self.update_workspace_layout())
+        layout.addWidget(self.workspace_splitter, 1)
+        self.footer = label("本機工作區 · 自動協作關閉 · 僅在手動要求時連線", True)
+        self.footer.setMaximumHeight(36)
         layout.addWidget(self.footer)
-        # High-DPI secondary screens can have less logical space than the
-        # three-column content. Keep every control reachable by scrolling,
-        # instead of forcing the native window below the screen boundary.
-        root.setMinimumSize(1070, 710)
         self.workspace_scroll = QScrollArea()
         self.workspace_scroll.setObjectName("workspace_viewport")
         self.workspace_scroll.setWidgetResizable(True)
         self.workspace_scroll.setFrameShape(QFrame.NoFrame)
         self.workspace_scroll.setWidget(root)
         self.setCentralWidget(self.workspace_scroll)
-        fullscreen = QAction("Fullscreen", self)
-        fullscreen.setShortcut(QKeySequence("F11"))
-        fullscreen.triggered.connect(lambda: self.showNormal() if self.isFullScreen() else self.showFullScreen())
-        self.addAction(fullscreen)
-        escape = QAction("Return to three panels", self)
-        escape.setShortcut(QKeySequence("Escape"))
-        escape.triggered.connect(lambda: self.focus_agent(None))
-        self.addAction(escape)
+        for text, shortcut, callback in (
+            ("Fullscreen", "F11", lambda: self.showNormal() if self.isFullScreen() else self.showFullScreen()),
+            ("Return to auto layout", "Escape", lambda: self.focus_agent(None)),
+            ("Toggle sidebar", "Ctrl+B", self.toggle_sidebar),
+            ("Toggle work details", "Ctrl+Shift+D", self.toggle_details),
+            ("Settings", "Ctrl+,", self.settings),
+            ("新增任務", "Ctrl+N", self.new_task),
+        ):
+            action = QAction(text, self)
+            action.setShortcut(QKeySequence(shortcut))
+            action.triggered.connect(callback)
+            self.addAction(action)
+        for index, agent in enumerate(AGENTS, 1):
+            action = QAction("Focus " + ROLE_NAMES[agent], self)
+            action.setShortcut(QKeySequence(f"Ctrl+{index}"))
+            action.triggered.connect(lambda checked=False, agent=agent: self.focus_agent(agent))
+            self.addAction(action)
         self.reload_context()
+        self.sidebar_pages.currentChanged.connect(self.sidebar_page_changed)
+        # Local conversations are read only once this page is shown, never during construction.
+        self.sidebar_pages.setCurrentIndex(0 if core.get_setting("ui.sidebar_page", "work") == "nav" else 1)
+        self.sidebar_stack.setCurrentIndex(self.sidebar_pages.currentIndex())
+        if self.sidebar_pages.currentIndex() == 0:
+            QTimer.singleShot(0, self.navigator, self.navigator.ensure_loaded)
         geometry = core.get_setting("ui.geometry", "")
         if geometry:
             self.restoreGeometry(QByteArray.fromBase64(str(geometry).encode()))
@@ -1424,6 +2315,178 @@ class MainWindow(QMainWindow):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.poll_events)
         self.timer.start(100)
+        QTimer.singleShot(0, self, self.update_workspace_layout)
+
+    def context_key(self):
+        task = self.core.current_task or {}
+        return (identifier(self.core.current_project or {}), identifier(task),
+                tuple(task.get(agent + "_session") or "" for agent in AGENTS))
+
+    def save_context_state(self):
+        if self._loaded_context_key is not None:
+            self._context_views[self._loaded_context_key] = {
+                "panels": {agent: panel.capture_view_state() for agent, panel in self.panels.items()},
+                "role": self._preferred_agent,
+                "session_tab": self.session_tabs.currentIndex(),
+                "details_tab": self.details_tabs.currentIndex(),
+                "detail_selections": {name: tree.currentItem().data(0, Qt.UserRole) if tree.currentItem() else None
+                                      for name, tree in self.detail_trees.items()},
+            }
+
+    def toggle_sidebar(self, checked=False):
+        visible = self.sidebar.isHidden()
+        self.sidebar.setVisible(visible)
+        self.sidebar_toggle.setChecked(visible)
+        if not visible:
+            self.sidebar_toggle.setFocus()
+        QTimer.singleShot(0, self, self.update_workspace_layout)
+
+    def sidebar_page_changed(self, index):
+        self.sidebar_stack.setCurrentIndex(index)
+        self.core.set_setting("ui.sidebar_page", "nav" if index == 0 else "work")
+        if index == 0:
+            self.navigator.ensure_loaded()
+
+    def show_sessions(self, agent):
+        self.sidebar.show()
+        self.sidebar_toggle.setChecked(True)
+        self.sidebar_pages.setCurrentIndex(1)
+        self.session_tabs.setCurrentIndex(AGENTS.index(agent))
+        self.panels[agent].session.setFocus()
+        QTimer.singleShot(0, self, self.update_workspace_layout)
+
+    def sidebar_role_changed(self, index):
+        if index >= 0 and hasattr(self, "role_tabs"):
+            self.role_tabs.setCurrentIndex(index)
+
+    def select_role(self, index):
+        if index < 0 or not hasattr(self, "panels"):
+            return
+        self._preferred_agent = AGENTS[index]
+        self.session_tabs.setCurrentIndex(index)
+        if self.focused_agent is not None:
+            self.update_workspace_layout()
+
+    def update_role_tabs(self):
+        if not hasattr(self, "panels"):
+            return
+        for index, agent in enumerate(AGENTS):
+            panel = self.panels[agent]
+            pending = len(panel.pending_approval_events)
+            self.role_tabs.setTabText(index, ROLE_NAMES[agent] + " · " + ("待核准" if pending else ROLE_LABELS[agent]))
+            self.role_tabs.setTabToolTip(index, f"{ROLE_NAMES[agent]} · {ROLE_LABELS[agent]} · {panel.state.text()}")
+
+    def update_workspace_layout(self, *_):
+        if not hasattr(self, "panels") or self._layout_updating:
+            return
+        self._layout_updating = True
+        try:
+            if self.height() < 700 and not self.details_panel.isHidden():
+                self.show_details_dialog()
+            if hasattr(self, "workspace_scroll"):
+                self.workspace_scroll.widget().setMaximumHeight(max(450, self.workspace_scroll.viewport().height()))
+            available = self.splitter.width()
+            narrow = available < len(AGENTS) * 300 + (len(AGENTS) - 1) * self.splitter.handleWidth()
+            focused = self.layout_mode.currentData() == "Focus" or narrow
+            was_focused = self.focused_agent is not None
+            if focused and not was_focused and all(not panel.isHidden() for panel in self.panels.values()):
+                self._grid_sizes = self.splitter.sizes()
+            self.focused_agent = self._preferred_agent if focused else None
+            for agent, panel in self.panels.items():
+                panel.setVisible(not focused or agent == self._preferred_agent)
+            if not focused and was_focused:
+                self.splitter.setSizes(self._grid_sizes)
+            self.unfocus_button.setVisible(focused and not narrow)
+            self.role_tabs.setToolTip("窄視窗 · 一次顯示一個可讀的對話" if narrow else "選擇角色，或按兩下角色標題以專注")
+            self.update_role_tabs()
+        finally:
+            self._layout_updating = False
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self, self.update_workspace_layout)
+
+    def toggle_details(self, checked=False):
+        if self.details_dialog is not None and self.details_dialog.isVisible():
+            self.details_dialog.reject()
+            return
+        visible = self.details_panel.isHidden()
+        if visible:
+            self.refresh_work_details()
+            if self.height() < 700:
+                self.show_details_dialog()
+            else:
+                self.details_panel.show()
+                self.details_toggle.setChecked(True)
+        else:
+            self.details_panel.hide()
+            self.details_toggle.setChecked(False)
+            self.details_toggle.setFocus()
+        QTimer.singleShot(0, self, self.update_workspace_layout)
+
+    def show_details_dialog(self):
+        """Short screens keep the chat readable while inspecting local records."""
+        if self.details_dialog is None:
+            self.details_dialog = QDialog(self)
+            self.details_dialog.setWindowTitle("工作詳情 · 本機紀錄")
+            dialog_layout = QVBoxLayout(self.details_dialog)
+            dialog_layout.setContentsMargins(12, 12, 12, 12)
+            self.details_dialog.finished.connect(self.return_details_tabs)
+        self.details_panel.hide()
+        self.details_panel.layout().removeWidget(self.details_tabs)
+        self.details_dialog.layout().addWidget(self.details_tabs)
+        self.details_dialog.resize(max(600, min(900, self.width() - 40)), max(300, min(480, self.height() - 60)))
+        self.details_toggle.setChecked(True)
+        self.details_dialog.show()
+        self.details_dialog.raise_()
+
+    def return_details_tabs(self, result=0):
+        self.details_dialog.layout().removeWidget(self.details_tabs)
+        self.details_panel.layout().addWidget(self.details_tabs)
+        self.details_panel.hide()
+        self.details_toggle.setChecked(False)
+        self.details_toggle.setFocus()
+
+    def refresh_work_details(self):
+        groups = {name: [] for name in self.detail_trees}
+        for event in reversed(self.core.events(limit=500)):
+            kind = event.get("type", "unknown")
+            groups["Timeline"].append(event)
+            if kind in ("tool_start", "tool_result", "approval", "approval_request", "tool_approval"):
+                groups["Tools"].append(event)
+            if kind in ("command", "command_output"):
+                groups["Commands"].append(event)
+            if kind in ("file", "file_edit", "diff", "patch"):
+                groups["Changes"].append(event)
+            if kind in ("test", "test_result"):
+                groups["Tests"].append(event)
+        handoffs = getattr(self.core, "handoffs", None)
+        groups["Handoffs"] = handoffs() if callable(handoffs) else []
+        for name, rows in groups.items():
+            tree = self.detail_trees[name]
+            selected = tree.currentItem().data(0, Qt.UserRole) if tree.currentItem() else None
+            selected_id = identifier(selected or {})
+            scroll = tree.verticalScrollBar().value()
+            tree.clear()
+            if not rows:
+                row = QTreeWidgetItem(["", "尚無" + {"Tools":"工具","Commands":"命令","Changes":"變更","Tests":"測試","Timeline":"時間線","Handoffs":"交接"}[name] + "紀錄", "尚無結果"])
+                row.setFlags(row.flags() & ~Qt.ItemIsSelectable)
+                tree.addTopLevelItem(row)
+            for event in rows:
+                payload = event.get("payload") or {}
+                status = event.get("status") or payload.get("status") or "狀態待確認"
+                kind = event.get("type") or "handoff"
+                source = event.get("agent") or event.get("source_agent") or "workspace"
+                target = event.get("target_agent")
+                summary = event.get("summary") or payload.get("command") or payload.get("tool") or event.get("annotation") or ""
+                item = QTreeWidgetItem([ROLE_NAMES.get(source, source) + (" → " + ROLE_NAMES.get(target, target) if target else ""),
+                                        kind.replace("_", " ") + " · " + str(status), compact(summary, 140)])
+                item.setData(0, Qt.UserRole, event)
+                item.setToolTip(2, plain(event))
+                tree.addTopLevelItem(item)
+                if selected_id and identifier(event) == selected_id:
+                    tree.setCurrentItem(item)
+            tree.verticalScrollBar().setValue(scroll)
 
     def ensure_visible(self):
         screens = QApplication.screens()
@@ -1478,42 +2541,117 @@ class MainWindow(QMainWindow):
     def show_detail(self, title, content):
         DetailDialog(title, content, self).exec()
 
+    def resolve_cached_approval(self, event):
+        """Apply a real terminal event even when its task is not being viewed."""
+        event = {**(event.get("payload") or {}), **event}
+        agent, task_id = event.get("agent"), event.get("task_id")
+        request_id = event.get("request_id") or event.get("approval_id")
+        if not request_id or agent not in self.panels:
+            return
+        for key, view in self._context_views.items():
+            if task_id and key[1] != task_id:
+                continue
+            if not task_id and key != self._loaded_context_key:
+                continue
+            view.get("panels", {}).get(agent, {}).get("pending", {}).pop(request_id, None)
+        current_task_id = identifier(self.core.current_task or {})
+        if not task_id or task_id == current_task_id:
+            self.panels[agent].resolve_pending_approval(request_id)
+
+    def reconcile_pending_approvals(self, view, agent, task_id):
+        """Restore only cached live requests still current in the local ledger."""
+        pending = view.get("pending", {})
+        if not pending or not task_id:
+            return
+        kinds = ("approval", "approval_request", "tool_approval", "approval_response", "approval_cancelled")
+        store = getattr(self.core, "store", None)
+        if store is not None and callable(getattr(store, "query", None)):
+            rows = store.query(
+                "SELECT * FROM events WHERE task_id=? AND agent=? AND type IN (?,?,?,?,?) ORDER BY timestamp,rowid",
+                (task_id, agent, *kinds))
+        else:
+            rows = reversed(self.core.events(task_id=task_id, agent=agent, limit=100000))
+        latest = {}
+        for row in rows:
+            event = {**(row.get("payload") or {}), **row}
+            request_id = event.get("request_id") or event.get("approval_id")
+            if request_id and event.get("type") in kinds:
+                latest[request_id] = event
+        for request_id, cached in list(pending.items()):
+            event = latest.get(request_id)
+            if event and (event.get("type") in ("approval_response", "approval_cancelled")
+                          or (identifier(cached) and identifier(event) != identifier(cached))):
+                pending.pop(request_id, None)
+
     def reload_context(self):
+        self.save_context_state()
+        key = self.context_key()
+        saved_view = self._context_views.get(key, {})
         self._loading = True
         try:
             project = self.core.current_project or {}
             task = self.core.current_task or {}
             self.project_combo.clear()
-            self.project_combo.addItem("Select project…", None)
+            self.project_combo.addItem("選擇專案…", None)
             projects = self.core.list_projects()
             for item in projects:
                 self.project_combo.addItem(project_label(item, projects), identifier(item))
                 self.project_combo.setItemData(self.project_combo.count()-1, plain(item), Qt.ToolTipRole)
             self.project_combo.setCurrentIndex(max(0, self.project_combo.findData(identifier(project))))
             self.task_combo.clear()
-            self.task_combo.addItem("Select task…", None)
+            self.task_combo.addItem("選擇任務…", None)
             for item in self.core.list_tasks():
                 if not project or item.get("project_id") == identifier(project):
                     self.task_combo.addItem(task_label(item, projects), identifier(item))
                     self.task_combo.setItemData(self.task_combo.count()-1, plain(item), Qt.ToolTipRole)
             self.task_combo.setCurrentIndex(max(0, self.task_combo.findData(identifier(task))))
-            self.task_status.setCurrentText(task.get("status", "NEW"))
+            self.task_status.setCurrentIndex(max(0, self.task_status.findData(task.get("status"))))
             self.task_status.setEnabled(bool(task))
+            full_title = (project.get("name") or "選擇專案") + " › " + (task.get("title") or "選擇任務")
+            self.context_title.setText(compact(full_title, 90))
+            self.context_title.setToolTip(full_title)
             for agent, panel in self.panels.items():
+                view = saved_view.get("panels", {}).get(agent, {})
+                self.reconcile_pending_approvals(view, agent, identifier(task))
+                panel._restoring_view = True
                 panel.clear_conversation()
-                for message in self.core.messages(agent=agent):
-                    if message.get("role") in ("user", "assistant"):
-                        panel.add_message(message)
-                for event in reversed(self.core.events(agent=agent, limit=100)):
-                    if event.get("type") in ("tool_start", "tool_result", "command", "command_output", "file", "file_edit", "error", "test", "approval", "approval_request", "tool_approval"):
-                        panel.add_event(event, historical=True)
-                panel.cwd_label.setText(("Metadata only: " if agent == "dot" else "cwd: ") + (project.get("name", "None") if agent == "dot" else project.get(f"{agent}_cwd") or project.get("repo_path") or project.get("repo") or "Not selected"))
+                shown = TRANSCRIPT_EVENTS
+                history = [(str(message.get("timestamp") or ""), 0, message) for message in self.core.messages(agent=agent)
+                           if message.get("role") in ("user", "assistant")]
+                history += [(str(event.get("timestamp") or ""), 1, event) for event in reversed(self.core.events(agent=agent, limit=400))
+                            if event.get("type") in shown]
+                # Stable sort: equal timestamps keep messages before events, as before.
+                for _, is_event, row in sorted(history, key=lambda entry: entry[:2]):
+                    if is_event:
+                        pending_id = row.get("request_id") or (row.get("payload") or {}).get("request_id")
+                        panel.add_event(row, historical=pending_id not in view.get("pending", {}))
+                    else:
+                        panel.add_message(row)
+                panel.cwd_label.setText(("中繼資料：" if agent == "dot" else "工作目錄：") + (project.get("name", "尚未選擇") if agent == "dot" else project.get(f"{agent}_cwd") or project.get("repo_path") or project.get("repo") or "尚未選擇"))
                 panel.cwd_label.setToolTip(panel.cwd_label.text())
-                panel.branch_label.setText("Branch: " + (task.get("branch") or project.get("active_branch") or "—"))
+                panel.branch_label.setText("分支：" + (task.get("branch") or project.get("active_branch") or "—"))
                 self.refresh_agent(agent)
-            if self.mode.currentText() == "Timeline":
+                panel.restore_view_state(view)
+            self._loaded_context_key = key
+            if hasattr(self, "navigator") and self.navigator.sessions[self.navigator.agent] is not None:
+                self.navigator.fill()
+            self._preferred_agent = saved_view.get("role", self._preferred_agent)
+            self.role_tabs.setCurrentIndex(AGENTS.index(self._preferred_agent))
+            self.session_tabs.setCurrentIndex(saved_view.get("session_tab", AGENTS.index(self._preferred_agent)))
+            self.details_tabs.setCurrentIndex(saved_view.get("details_tab", 0))
+            self.refresh_work_details()
+            for name, selected in saved_view.get("detail_selections", {}).items():
+                tree = self.detail_trees.get(name)
+                if tree is not None and selected:
+                    for index in range(tree.topLevelItemCount()):
+                        item = tree.topLevelItem(index)
+                        if identifier(item.data(0, Qt.UserRole) or {}) == identifier(selected):
+                            tree.setCurrentItem(item)
+                            break
+            self.update_workspace_layout()
+            if self.mode.currentData() == "Timeline":
                 self.refresh_timeline()
-            if self.mode.currentText() == "History":
+            if self.mode.currentData() == "History":
                 self.refresh_history()
         except Exception as exc:
             self.show_error(str(exc), False)
@@ -1537,7 +2675,7 @@ class MainWindow(QMainWindow):
     def poll_events(self):
         self._legacy_clock += 1
         self._git_clock += 1
-        if self.mode.currentText() == "Monitor" and self._legacy_clock >= 10 and not self._legacy_busy and not self._close_pending:
+        if self.mode.currentData() == "Monitor" and self._legacy_clock >= 10 and not self._legacy_busy and not self._close_pending:
             self._legacy_clock = 0
             self._legacy_busy = True
             def loaded_legacy(entries):
@@ -1556,7 +2694,7 @@ class MainWindow(QMainWindow):
             self._git_busy = True
             def loaded_git(snapshot):
                 self._git_busy = False
-                for agent in ("claude", "codex"):
+                for agent in ("claude", "codex", "local"):
                     self.panels[agent].branch_label.setText(self.branch_text(snapshot))
             self.run(self.core.git_snapshot, loaded_git, on_error=lambda _: setattr(self, "_git_busy", False))
         try:
@@ -1576,12 +2714,12 @@ class MainWindow(QMainWindow):
                 panel.set_state(event.get("state") or event.get("status", "Disconnected"))
             if panel and kind in ("capabilities", "connected", "session", "session_started", "session_changed"):
                 self.refresh_agent(agent)
+            if panel and kind in ("approval_response", "approval_cancelled"):
+                self.resolve_cached_approval(event)
             if event.get("task_id") and event.get("task_id") != current_task_id:
                 continue
             if kind == "message_delta" and latest_delta.get(event.get("message_id")) != index:
                 continue
-            if panel and kind in ("approval_response", "approval_cancelled"):
-                panel.resolve_pending_approval(event.get("request_id"))
             if panel and kind in ("message_start", "message_delta", "message_end", "message_snapshot", "message", "assistant", "user", "prompt_sent"):
                 mid = event.get("message_id") or event.get("id")
                 content = event.get("full_content", event.get("content", ""))
@@ -1591,16 +2729,219 @@ class MainWindow(QMainWindow):
                     # concatenate raw backend fragments across secret boundaries.
                     continue
                 panel.add_message(dict(event, id=mid, role=role, content=content))
-            elif panel and kind not in ("raw", "state", "connection_state", "heartbeat", "message_delta", "legacy"):
+            elif panel and kind in TRANSCRIPT_EVENTS:
                 panel.add_event(event)
-            if self.mode.currentText() == "Timeline":
+            if self.mode.currentData() == "Timeline":
                 self.add_timeline_event(event)
+        if self.details_toggle.isChecked():
+            self.refresh_work_details()
         error_panel=next((panel for panel in self.panels.values() if panel.connection_state=='Error'),None)
         self.footer.setText('Error · '+error_panel.agent+' · '+error_panel.notice.text() if error_panel else self.last_event)
 
+    def show_desktop_sessions(self, agent="claude"):
+        self.sidebar.show()
+        self.sidebar_toggle.setChecked(True)
+        self.navigator.source.setCurrentIndex([value for _, value in SessionNavigator.SOURCES].index(agent))
+        self.sidebar_pages.setCurrentIndex(0)
+        self.navigator.ensure_loaded()
+        self.navigator.search.setFocus()
+        QTimer.singleShot(0, self, self.update_workspace_layout)
+
+    def _agent_ready(self, agent):
+        if self.core.adapters[agent].state != "Connected":
+            self.core.connect(agent)
+
+    def _opening_done(self, *_):
+        self._opening = False
+        if not (self.orchestrator and self.orchestrator.active):
+            for control in (self.project_combo, self.task_combo, self.navigator):
+                control.setEnabled(True)
+
+    def _opening_begin(self):
+        # One open at a time: a second one landing mid-resume would attach the conversation to the wrong task.
+        if getattr(self, "_opening", False) or not self.confirm_context_change():
+            return False
+        self._opening = True
+        for control in (self.project_combo, self.task_combo, self.navigator):
+            control.setEnabled(False)
+        return True
+
+    def open_desktop_session(self, record, resume=True):
+        if not self._opening_begin():
+            return
+        agent = record.get("agent", "claude")
+        def opened(result):
+            self.reload_context()
+            self.focus_role(agent)
+            if not resume:
+                self._opening_done()
+            self.footer.setText(f"已載入「{record.get('title', '')}」· {result['imported']} 則訊息、{result['tools']} 筆工具紀錄")
+            # A conversation opens at its latest message, like the desktop apps.
+            QTimer.singleShot(150, self.panels[agent], self.panels[agent].jump_to_latest)
+            if resume:
+                self.panels[agent].set_state("Connecting")
+                def continue_session():
+                    self._agent_ready(agent)
+                    return self.core.resume_session(agent, result["session_id"])
+                self.run(continue_session, lambda _: (self._opening_done(), self.reload_context(), self.refresh_agent(agent)),
+                         agent, on_error=self._opening_done)
+        self.run(lambda: self.core.open_desktop_session(record), opened, on_error=self._opening_done)
+
+    def new_desktop_conversation(self, directory, agent="claude"):
+        if not self._opening_begin():
+            return
+        title = "新對話 " + datetime.now().strftime("%m-%d %H:%M")
+        def opened(_):
+            self.reload_context()
+            self.focus_role(agent)
+            self.panels[agent].set_state("Connecting")
+            def start():
+                self._agent_ready(agent)
+                return self.core.create_session(agent)
+            self.run(start, lambda _: (self._opening_done(), self.reload_context(), self.refresh_agent(agent)),
+                     agent, on_error=self._opening_done)
+        self.run(lambda: self.core.open_desktop_project(directory, title), opened, on_error=self._opening_done)
+
+    def focus_role(self, agent):
+        self._preferred_agent = agent
+        self.role_tabs.setCurrentIndex(AGENTS.index(agent))
+        self.session_tabs.setCurrentIndex(AGENTS.index(agent))
+
+    def start_auto_collab(self):
+        if self.orchestrator and self.orchestrator.active:
+            self.show_error("已有一個自動協作正在執行。")
+            return
+        if self.mode.currentData() == "Monitor":
+            self.show_error("監看模式下不能啟動自動協作。")
+            return
+        from .adapters.dot import DISCLOSURE
+        dialog = QDialog(self)
+        dialog.setObjectName("auto_collab_dialog")
+        dialog.setWindowTitle("自動協作")
+        dialog.resize(680, 560)
+        form = QVBoxLayout(dialog)
+        form.addWidget(label("Claude 規劃 → G8毛 審查並轉交 → Codex 實作 → G8毛 審查 → Claude 最終審查。"
+                             "不通過會自動再來一輪，直到通過或達到回合上限。", True))
+        task = QPlainTextEdit()
+        task.setObjectName("auto_task")
+        task.setPlaceholderText("要完成的任務…")
+        form.addWidget(task, 1)
+        row = QHBoxLayout()
+        row.addWidget(label("回合上限"))
+        rounds = QSpinBox()
+        rounds.setObjectName("auto_rounds")
+        rounds.setRange(1, 10)
+        rounds.setValue(3)
+        row.addWidget(rounds)
+        row.addSpacing(16)
+        row.addWidget(label("Local LLM"))
+        local_role = QComboBox()
+        local_role.setObjectName("auto_local_role")
+        local_role.addItem("不加入", None)
+        local_role.addItem("第二意見（實作後多審一次，不會擋流程）", "reviewer")
+        local_role.addItem("擔任實作者（取代 Codex）", "implementer")
+        row.addWidget(local_role, 1)
+        form.addLayout(row)
+        form.addWidget(label("工具核准不會自動：任何角色要求核准時流程會暫停等你。任何錯誤、逾時或回覆格式不符也會暫停。", True))
+        form.addWidget(label("G8毛 授權（僅限這一次執行）\n" + DISCLOSURE +
+                             "\nDuring this run the workspace sends to and reads from the selected Dot automatically, "
+                             "reading about every 10 seconds, up to 400 requests. This is automated use of an unofficial "
+                             "interface with your ChatGPT login and may lead to rate limiting or account restrictions.", True))
+        consent = QCheckBox("我了解上述風險，授權這一次執行自動對 G8毛 傳送與讀取")
+        consent.setObjectName("auto_consent")
+        form.addWidget(consent)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        start = buttons.button(QDialogButtonBox.Ok)
+        start.setText("開始")
+        buttons.button(QDialogButtonBox.Cancel).setText("取消")
+        def ready():
+            start.setEnabled(consent.isChecked() and bool(task.toPlainText().strip()))
+        consent.toggled.connect(ready)
+        task.textChanged.connect(ready)
+        ready()
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addWidget(buttons)
+        if dialog.exec() == QDialog.Accepted:
+            self.run_auto_collab(task.toPlainText(), rounds.value(), local_role=local_role.currentData())
+
+    def run_auto_collab(self, task, rounds, consented=True, local_role=None):
+        """Start one bounded run. `consented` is the user's run-scoped G8毛 authorisation from the dialog."""
+        if not consented:
+            return
+        dot = self.core.adapters["dot"]
+        def dispatch(operation, done, failed):
+            self.run(operation, done, on_error=failed)
+        try:
+            run = Orchestrator(self.core, task, dispatch, max_rounds=rounds, local_role=local_role,
+                               has_pending_approval=lambda: any(panel.pending_approval_events for panel in self.panels.values()))
+            if getattr(dot, "state", "") == "Connected" and hasattr(dot, "grant_run"):
+                dot.grant_run(400)
+            self.orchestrator = run
+            run.start()
+        except Exception as exc:
+            self.orchestrator = None
+            if hasattr(dot, "revoke_run"):
+                dot.revoke_run()
+            self.show_error(str(exc))
+            return
+        self.set_auto_collab_lock(True)
+        self.run_bar.show()
+        self.run_timer.start(500)
+        self.tick_auto_collab()
+
+    def set_auto_collab_lock(self, locked):
+        # A run must keep talking to the same task; switching context mid-run would misroute messages.
+        for control in (self.project_combo, self.task_combo, self.navigator, self.auto_button):
+            control.setEnabled(not locked)
+        self.run_stop.setVisible(locked)
+        self.run_close.setVisible(not locked)
+
+    def tick_auto_collab(self):
+        run = self.orchestrator
+        if not run:
+            return
+        if run.active:
+            run.tick()
+        self.run_status.setText(run.status())
+        self.run_status.setToolTip(run.status())
+        if not run.active:
+            self.run_timer.stop()
+            dot = self.core.adapters.get("dot")
+            if hasattr(dot, "revoke_run"):
+                dot.revoke_run()
+            self.set_auto_collab_lock(False)
+            self.reload_context()
+
+    def stop_auto_collab(self):
+        if self.orchestrator and self.orchestrator.active:
+            self.orchestrator.stop()
+        self.tick_auto_collab()
+
+    def require_project(self, reason):
+        box = QMessageBox(QMessageBox.Question, "需要專案", "", QMessageBox.Yes | QMessageBox.No, self)
+        box.setTextFormat(Qt.PlainText)
+        box.setText(reason + "\n專案就是這個角色工作時所在的資料夾。\n\n要現在建立專案嗎？建立後請再按一次「連線」。")
+        box.button(QMessageBox.Yes).setText("建立專案…")
+        box.button(QMessageBox.No).setText("稍後")
+        if box.exec() == QMessageBox.Yes:
+            self.new_project()
+
+    def require_task(self):
+        if not self.core.current_project:
+            self.require_project("傳送訊息前需要先有專案與任務。")
+            return
+        box = QMessageBox(QMessageBox.Question, "需要任務", "", QMessageBox.Yes | QMessageBox.No, self)
+        box.setTextFormat(Qt.PlainText)
+        box.setText("傳送訊息前需要先建立或選擇一個任務；草稿會保留。\n\n要現在建立任務嗎？")
+        box.button(QMessageBox.Yes).setText("建立任務…")
+        box.button(QMessageBox.No).setText("稍後")
+        if box.exec() == QMessageBox.Yes:
+            self.new_task()
+
     def new_project(self):
         dialog = QDialog(self)
-        dialog.setWindowTitle("Create project")
+        dialog.setWindowTitle("建立專案")
         dialog.resize(640, 320)
         layout = QFormLayout(dialog)
         name, repo, branch, notes = QLineEdit(), QLineEdit(), QLineEdit(), QPlainTextEdit()
@@ -1610,18 +2951,18 @@ class MainWindow(QMainWindow):
         row_layout = QHBoxLayout(row)
         row_layout.setContentsMargins(0, 0, 0, 0)
         row_layout.addWidget(repo)
-        row_layout.addWidget(button("Browse…", lambda: repo.setText(QFileDialog.getExistingDirectory(dialog, "Project directory") or repo.text())))
-        layout.addRow("Name", name)
-        layout.addRow("Repository / directory", row)
-        layout.addRow("Default branch (optional)", branch)
-        layout.addRow("Notes", notes)
+        row_layout.addWidget(button("瀏覽…", lambda: repo.setText(QFileDialog.getExistingDirectory(dialog, "選擇專案資料夾") or repo.text())))
+        layout.addRow("名稱", name)
+        layout.addRow("專案資料夾", row)
+        layout.addRow("預設分支（選填）", branch)
+        layout.addRow("備註", notes)
         actions = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         actions.accepted.connect(dialog.accept)
         actions.rejected.connect(dialog.reject)
         layout.addRow(actions)
         if dialog.exec() == QDialog.Accepted:
             if not name.text().strip() or not repo.text().strip():
-                self.show_error("Project name and directory are required.")
+                self.show_error("請填寫專案名稱與資料夾。")
                 return
             if not self.confirm_context_change():
                 return
@@ -1634,9 +2975,9 @@ class MainWindow(QMainWindow):
 
     def new_task(self):
         if not self.core.current_project:
-            self.show_error("Create or select a project first.")
+            self.require_project("建立任務前需要先有專案。")
             return
-        title, ok = QInputDialog.getText(self, "Create task", "Task title")
+        title, ok = QInputDialog.getText(self, "建立任務", "任務名稱")
         if ok and title.strip():
             if not self.confirm_context_change():
                 return
@@ -1649,14 +2990,8 @@ class MainWindow(QMainWindow):
         if any(panel.connection_state == "Busy" for panel in self.panels.values()):
             self.show_error("Wait for or stop active turns before changing project or task.")
             return False
-        drafts = [panel for panel in self.panels.values() if panel.input.toPlainText().strip() or panel.attachments]
-        if drafts:
-            answer = QMessageBox.question(self, "Unsent input", "Changing context clears unsent input and attachments. Continue?", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-            if answer != QMessageBox.Yes:
-                return False
-            for panel in drafts:
-                panel.input.clear()
-                panel.clear_attachments()
+        # Navigation saves drafts locally in memory. It never sends or discards them.
+        self.save_context_state()
         return True
 
     def project_changed(self):
@@ -1714,12 +3049,13 @@ class MainWindow(QMainWindow):
             self.core.update_task(identifier(task), notes=editor.toPlainText())
 
     def focus_agent(self, agent):
-        if agent == self.focused_agent:
-            agent = None
-        self.focused_agent = agent
-        for name, panel in self.panels.items():
-            panel.setVisible(agent is None or name == agent)
-        self.unfocus_button.setVisible(agent is not None)
+        if agent is None or (agent == self.focused_agent and self.layout_mode.currentData() == "Focus"):
+            self.layout_mode.setCurrentIndex(self.layout_mode.findData("Auto"))
+        else:
+            self._preferred_agent = agent
+            self.role_tabs.setCurrentIndex(AGENTS.index(agent))
+            self.layout_mode.setCurrentIndex(self.layout_mode.findData("Focus"))
+        self.update_workspace_layout()
 
     def change_mode(self, mode):
         for panel in self.panels.values():
@@ -1738,9 +3074,9 @@ class MainWindow(QMainWindow):
 
     def forward(self, message, target):
         try:
-            if self.handoff_mode.currentText() == "Manual":
+            if self.handoff_mode.currentData() == "manual":
                 if self.panels[target].connection_state != "Connected":
-                    self.show_error(f"{target.title()} is not connected. No handoff was sent.")
+                    self.show_error(f"{ROLE_NAMES[target]} 尚未連線。未傳送交接。")
                     return
                 preview = self.core.prepare_handoff(identifier(message), target)
                 if target == 'dot' and not self.panels['dot'].dot_consent('send'): return
@@ -1760,21 +3096,59 @@ class MainWindow(QMainWindow):
                         if message.get("role") == "assistant" and message.get("status", "complete") == "complete"]
             state = self.panels[target].connection_state
             blocked = target == "dot" and not self.panels[target].capabilities.get("supports_sessions")
-            reason = " · Blocked" if blocked else " · Connect target first" if state != "Connected" else " · No source response" if not messages else ""
-            action = menu.addAction(f"Step {number}: latest {source.title()} → {target.title()}{reason}")
+            reason = " · 受阻" if blocked else " · 請先連線目標角色" if state != "Connected" else " · 尚無來源回覆" if not messages else ""
+            action = menu.addAction(f"第 {number} 步：最新 {ROLE_NAMES[source]} 回覆 → {ROLE_NAMES[target]}{reason}")
             action.setEnabled(bool(messages) and state == "Connected" and not blocked)
             if messages:
                 action.triggered.connect(lambda checked=False, message=messages[-1], target=target: self.forward(message, target))
         menu.addSeparator()
-        explanation = menu.addAction("Each step requires a user action · Automatic OFF")
+        explanation = menu.addAction("每一步都需你手動操作 · 自動協作關閉")
         explanation.setEnabled(False)
 
     def stop_task(self):
-        if QMessageBox.question(self, "Stop current task", "Request cancellation from all three adapters for the current task?", QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes:
+        if QMessageBox.question(self, "Stop current task", "Request cancellation from all four adapters for the current task?", QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes:
             self.run(lambda: self.core.stop_task(confirmed=True))
 
-    def approve(self, event, approved):
-        if approved:
+    def approval_mode(self, agent):
+        mode = (self.core.get_setting("agent." + agent, {}) or {}).get("approval_mode", "ask")
+        return mode if mode in approvals.MODES else "ask"
+
+    def set_approval_mode(self, agent, mode):
+        if mode == "all" and self.approval_mode(agent) != "all":
+            box = QMessageBox(QMessageBox.Warning, "自動核准全部", "", QMessageBox.Yes | QMessageBox.No, self)
+            box.setTextFormat(Qt.PlainText)
+            box.setText(ROLE_NAMES[agent] + " 之後執行指令、修改專案內的檔案都不會再問你。\n\n"
+                        "仍然會問的：刪除資料夾、git push、強制覆寫、修改系統設定、下載後直接執行、修改專案資料夾以外的檔案。\n\n"
+                        "這份清單擋得住常見的危險操作，但不保證擋得住全部。要開啟嗎？")
+            box.setDefaultButton(QMessageBox.No)
+            if box.exec() != QMessageBox.Yes:
+                return
+        self.core.set_setting("agent." + agent, dict(self.core.get_setting("agent." + agent, {}) or {}, approval_mode=mode))
+        self.footer.setText(ROLE_NAMES[agent] + " 核准方式：" + approvals.MODE_LABELS[mode])
+        self.panels[agent].update_controls()
+
+    def auto_approve(self, agent, event, request_id):
+        """Answer a request without asking when the user's chosen mode or an "always allow" rule covers it."""
+        if self.mode.currentData() == "Monitor" or not self.core.capabilities(agent).get("supports_approval"):
+            return False
+        cwd = getattr(self.core.adapters.get(agent), "cwd", "") or (self.core.current_project or {}).get("repo_path", "")
+        if not approvals.decide(self.approval_mode(agent), event.get("details"), cwd, self.panels[agent].approval_rules):
+            return False
+        self.run(lambda: self.core.approve(agent, request_id, True), agent=agent)
+        return True
+
+    def allow_always(self, event, key):
+        event = {**(event.get("payload") or {}), **event}
+        self.panels[event["agent"]].approval_rules.add(key)
+        self.approve(event, True, confirm=False)
+
+    def approve(self, event, approved, confirm=True):
+        event = {**(event.get("payload") or {}), **event}
+        request_id = event.get("request_id") or event.get("approval_id")
+        if not request_id:
+            self.show_error("核准要求缺少後端識別碼。未傳送回覆。")
+            return
+        if approved and confirm:
             box = QMessageBox(QMessageBox.Question, "Backend tool approval", "", QMessageBox.Yes | QMessageBox.No, self)
             box.setTextFormat(Qt.PlainText)
             box.setText("Approve this specific backend request?")
@@ -1782,7 +3156,6 @@ class MainWindow(QMainWindow):
             box.setDefaultButton(QMessageBox.No)
             if box.exec() != QMessageBox.Yes:
                 return
-        request_id = event.get("request_id") or event.get("approval_id") or event.get("id")
         self.run(lambda: self.core.approve(event["agent"], request_id, approved), agent=event["agent"])
 
     def open_raw(self, message):
@@ -1862,14 +3235,16 @@ class MainWindow(QMainWindow):
         self.search.returnPressed.connect(self.refresh_history)
         filters.addWidget(self.search, 2)
         self.history_agent = QComboBox()
-        self.history_agent.addItems(["All agents", *AGENTS])
+        self.history_agent.addItem("All agents", None)
+        for agent in AGENTS:
+            self.history_agent.addItem(ROLE_NAMES[agent], agent)
         self.history_agent.currentIndexChanged.connect(self.refresh_history)
         filters.addWidget(self.history_agent)
         self.history_status = QComboBox()
         self.history_status.addItems(["All statuses", *STATUSES])
         self.history_status.currentIndexChanged.connect(self.refresh_history)
         filters.addWidget(self.history_status)
-        self.history_project = QCheckBox("Current project")
+        self.history_project = QCheckBox("目前專案")
         self.history_project.toggled.connect(self.refresh_history)
         filters.addWidget(self.history_project)
         filters.addWidget(button("Search", self.refresh_history))
@@ -1894,8 +3269,8 @@ class MainWindow(QMainWindow):
 
     def show_history(self, agent=None):
         if agent:
-            self.history_agent.setCurrentText(agent)
-        self.mode.setCurrentText("History")
+            self.history_agent.setCurrentIndex(self.history_agent.findData(agent))
+        self.mode.setCurrentIndex(self.mode.findData("History"))
 
     def refresh_history(self):
         if not hasattr(self, "history_table"):
@@ -1904,7 +3279,7 @@ class MainWindow(QMainWindow):
         query = self.search.text().strip()
         filters = {}
         if self.history_agent.currentIndex():
-            filters["agent"] = self.history_agent.currentText()
+            filters["agent"] = self.history_agent.currentData()
         if self.history_status.currentIndex():
             filters["status"] = self.history_status.currentText()
         if self.history_project.isChecked() and self.core.current_project:
@@ -1941,7 +3316,7 @@ class MainWindow(QMainWindow):
     def open_history_item(self, item):
         kind, row = item.data(0, Qt.UserRole)
         if kind == "task" and self.confirm_context_change():
-            self.run(lambda: self.core.select_task(identifier(row)), lambda _: (self.reload_context(), self.mode.setCurrentText("Workspace")))
+            self.run(lambda: self.core.select_task(identifier(row)), lambda _: (self.reload_context(), self.mode.setCurrentIndex(self.mode.findData("Workspace"))))
         elif kind == "result":
             self.show_detail("Search result", row)
 
@@ -2081,7 +3456,7 @@ class MainWindow(QMainWindow):
     def branch_text(snapshot):
         if not snapshot.get("is_git", True):
             return "Git: not a repository"
-        return f"Branch: {snapshot.get('branch') or '—'}  ·  Dirty: {snapshot.get('dirty', '—')}  ·  ↑{snapshot.get('ahead', '—')} ↓{snapshot.get('behind', '—')}"
+        return f"分支：{snapshot.get('branch') or '—'}  ·  未提交變更：{snapshot.get('dirty', '—')}  ·  ↑{snapshot.get('ahead', '—')} ↓{snapshot.get('behind', '—')}"
 
     def open_changed_file(self, files):
         item = files.currentItem()
@@ -2144,24 +3519,27 @@ class MainWindow(QMainWindow):
 
     def settings(self):
         dialog = QDialog(self)
-        dialog.setWindowTitle("Settings")
+        dialog.setWindowTitle("設定")
         dialog.resize(800, 660)
         layout = QVBoxLayout(dialog)
         tabs = QTabWidget()
         layout.addWidget(tabs)
         agent_page = QWidget()
         agent_layout = QVBoxLayout(agent_page)
-        agent_layout.addWidget(label("Backend settings take effect on the next connection. Model and effort options come from the connected backend.", True))
+        agent_layout.addWidget(label("後端設定於下次連線生效。模型與思考強度選項來自實際連線的後端。", True))
         fields = {}
+        local_fields = {}
         for agent in AGENTS:
             form = QFormLayout()
-            form.addRow(label(agent.upper()))
+            form.addRow(label(ROLE_NAMES[agent] + " · " + ROLE_LABELS[agent]))
             diag = self.core.diagnostics(agent)
             saved = self.core.get_setting("agent." + agent, {}) or {}
-            enabled = QCheckBox("Enabled")
+            enabled = QCheckBox("啟用")
             enabled.setObjectName(f"default_enabled_{agent}")
             enabled.setChecked(saved.get("enabled", True))
-            executable = QLineEdit(saved.get("executable", diag.get("executable", "")))
+            executable = QLineEdit(saved.get("executable", "" if agent == 'local' else diag.get("executable", "")))
+            if agent == 'local':
+                executable.setPlaceholderText('留空時依 Harness 自動偵測官方 CLI')
             executable.setObjectName(f"executable_{agent}")
             timeout = QSpinBox()
             timeout.setObjectName(f"timeout_{agent}")
@@ -2171,7 +3549,7 @@ class MainWindow(QMainWindow):
             model.setObjectName(f"default_model_{agent}")
             effort.setObjectName(f"default_effort_{agent}")
             project.setObjectName(f"default_project_{agent}")
-            model.addItem("Default backend model", None)
+            model.addItem("由 ChatGPT 管理" if agent == "dot" else "後端預設 · " + self.panels[agent].capability_status("supports_model_selection"), None)
             cap = self.core.capabilities(agent)
             for choice in cap.get("models", []) if cap.get("supports_model_selection") else []:
                 if isinstance(choice, str):
@@ -2183,7 +3561,7 @@ class MainWindow(QMainWindow):
             model.setCurrentIndex(max(0, model.findData(saved.get("default_model"))))
             def set_efforts(index=0, agent=agent, model=model, effort=effort, saved=saved):
                 effort.clear()
-                effort.addItem("Backend default / Unsupported", None)
+                effort.addItem("由 ChatGPT 管理" if agent == "dot" else "後端預設 · " + self.panels[agent].capability_status("supports_effort"), None)
                 if self.core.capabilities(agent).get("supports_effort"):
                     for choice in self.core.list_efforts(agent, model.currentData()):
                         value = choice if isinstance(choice, str) else choice.get("reasoningEffort") or choice.get("effort") or choice.get("value")
@@ -2193,51 +3571,79 @@ class MainWindow(QMainWindow):
                 effort.setCurrentIndex(max(0, effort.findData(saved.get("default_effort"))))
             model.currentIndexChanged.connect(set_efforts)
             set_efforts()
-            project.addItem("Current workspace project", None)
+            project.addItem("目前工作區專案", None)
             for item in self.core.list_projects():
                 project.addItem(project_label(item, self.core.list_projects()), identifier(item))
             project.setCurrentIndex(max(0, project.findData(saved.get("default_project"))))
             form.addRow("", enabled)
-            form.addRow("Backend", label(diag.get("backend", "Unknown"), True))
-            form.addRow("Executable", executable)
-            form.addRow("Timeout (seconds)", timeout)
-            form.addRow("Default model", model)
-            form.addRow("Default effort", effort)
-            form.addRow("Default project", project)
-            form.addRow("Streaming", label("Enabled when backend supports streaming (required)", True))
-            form.addRow("Raw log", label("Safety-filtered audit always enabled (required)", True))
-            agent_layout.addLayout(form)
+            form.addRow("後端", label(diag.get("backend", "Unknown"), True))
+            form.addRow("執行檔", executable)
+            if agent == 'local':
+                harness = QComboBox()
+                harness.setObjectName('local_harness')
+                harness.addItem('Codex', 'codex')
+                harness.addItem('Claude Code', 'claude')
+                harness.setCurrentIndex(max(0, harness.findData(saved.get('harness', 'codex'))))
+                base_url = QLineEdit(saved.get('base_url', ''))
+                base_url.setObjectName('local_base_url')
+                local_model = QLineEdit(saved.get('model', ''))
+                local_model.setObjectName('local_model')
+                api_key_env = QLineEdit(saved.get('api_key_env', ''))
+                api_key_env.setObjectName('local_api_key_env')
+                form.addRow('Harness', harness)
+                form.addRow('端點 Base URL', base_url)
+                form.addRow('模型名稱', local_model)
+                form.addRow('API key 環境變數名稱', api_key_env)
+                form.addRow(label('Codex 需要 Responses API；Claude Code 需要 Anthropic Messages API。儲存後請中斷連線再重新連線。', True))
+                local_fields = dict(harness=harness, base_url=base_url, model=local_model, api_key_env=api_key_env)
+            form.addRow("逾時（秒）", timeout)
+            form.addRow("預設模型", model)
+            form.addRow("預設強度", effort)
+            form.addRow("預設專案", project)
+            form.addRow("串流", label(self.panels[agent].capability_status("supports_streaming"), True))
+            form.addRow("原始日誌", label("安全過濾後的稽核紀錄固定啟用", True))
+            if agent == 'local':
+                local_page = QWidget()
+                local_layout = QVBoxLayout(local_page)
+                local_layout.addLayout(form)
+                local_layout.addStretch()
+                local_scroll = QScrollArea()
+                local_scroll.setWidgetResizable(True)
+                local_scroll.setWidget(local_page)
+            else:
+                agent_layout.addLayout(form)
             fields[agent] = (saved, enabled, executable, timeout, model, effort, project)
         agent_scroll = QScrollArea()
         agent_scroll.setWidgetResizable(True)
         agent_scroll.setWidget(agent_page)
-        tabs.addTab(agent_scroll, "Agents")
+        tabs.addTab(agent_scroll, "角色與模型")
+        tabs.addTab(local_scroll, "Local LLM")
         for name, text in (
-            ("Projects", "Use the project selector to choose a working directory. Sync sets Claude and Codex cwd; dot receives metadata only. Git integration is read only."),
+            ("Projects", "Use the project selector to choose a working directory. Sync sets Claude, Codex and Local LLM cwd; dot receives metadata only. Git integration is read only."),
             ("Logs", "Raw JSONL and structured events are retained locally. Safety filtering redacts credentials and excludes hidden reasoning before persistence. Open per-agent logs from each panel."),
-            ("Permissions", "Original backend permission and sandbox settings remain authoritative. Tool approval requires an explicit user action. Automatic approval and sandbox bypass are not available."),
+            ("Permissions", "Original backend permission and sandbox settings remain authoritative. Tool approval asks every time by default. Each role's ⋯ menu can loosen this to file edits inside the project, or to everything except destructive and outward-facing commands. Sandbox bypass is not available."),
             ("Advanced", "Automatic orchestration: OFF\nNo agents connect automatically at startup. Unsupported capabilities remain unavailable. Use Diagnostics for executable, backend, session, cwd, last event and last error."),
         ):
             page = QWidget()
             page_layout = QVBoxLayout(page)
             page_layout.addWidget(label(text))
             page_layout.addStretch()
-            tabs.addTab(page, name)
+            tabs.addTab(page, {"Projects":"專案", "Logs":"日誌", "Permissions":"權限", "Advanced":"進階"}.get(name, name))
         paths = QWidget()
         paths_form = QFormLayout(paths)
-        paths_form.addRow("Application data", label(str(getattr(self.core, "data_dir", "Per-user app data")), True))
+        paths_form.addRow("應用程式資料", label(str(getattr(self.core, "data_dir", "Per-user app data")), True))
         legacy_root = QLineEdit(self.core.get_setting("legacy.root", r"C:\Users\ryant\Desktop\AI-Collab-Monitor"))
-        paths_form.addRow("Legacy Monitor root", legacy_root)
+        paths_form.addRow("舊版監看根目錄", legacy_root)
         paths_form.addRow(label("Monitor reads the existing four log files incrementally. It does not write, reset or control the original Monitor sessions.", True))
-        tabs.addTab(paths, "Paths")
+        tabs.addTab(paths, "路徑")
         appearance = QWidget()
         appearance_layout = QVBoxLayout(appearance)
-        topmost = QCheckBox("Always on top")
+        topmost = QCheckBox("保持在最上層")
         topmost.setChecked(self.core.get_setting("ui.always_on_top", False))
         appearance_layout.addWidget(topmost)
-        appearance_layout.addWidget(label("F11 toggles fullscreen. Double-click an agent heading to focus it. Window position and size are restored across launches.", True))
+        appearance_layout.addWidget(label("Ctrl+B toggles projects/sessions. Ctrl+1/2/3/4 focuses a role. Ctrl+Shift+D opens work details. Ctrl+Enter sends after IME composition. F11 toggles fullscreen. Drafts and view state survive navigation during this app run; window geometry restores across launches.", True))
         appearance_layout.addStretch()
-        tabs.addTab(appearance, "Appearance")
+        tabs.addTab(appearance, "外觀")
         retention = QWidget()
         retention_form = QFormLayout(retention)
         days, size = QSpinBox(), QSpinBox()
@@ -2245,23 +3651,29 @@ class MainWindow(QMainWindow):
         size.setRange(1, 1024)
         days.setValue(int(self.core.get_setting("retention.days", 90)))
         size.setValue(int(self.core.get_setting("retention.max_mb", 20)))
-        archive = QCheckBox("Archive rotated logs")
+        archive = QCheckBox("封存輪替日誌")
         archive.setChecked(self.core.get_setting("retention.archive", True))
-        retention_form.addRow("Retention days", days)
-        retention_form.addRow("Maximum raw log size (MB)", size)
+        retention_form.addRow("保留天數", days)
+        retention_form.addRow("原始日誌上限（MB）", size)
         retention_form.addRow(archive)
-        tabs.addTab(retention, "Retention")
+        tabs.addTab(retention, "保留")
         actions = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        actions.button(QDialogButtonBox.Save).setText("儲存")
+        actions.button(QDialogButtonBox.Cancel).setText("取消")
         actions.accepted.connect(dialog.accept)
         actions.rejected.connect(dialog.reject)
         layout.addWidget(actions)
         if dialog.exec() == QDialog.Accepted:
             for agent, (saved, enabled, executable, timeout, model, effort, project) in fields.items():
                 values = dict(saved, enabled=enabled.isChecked(), executable=executable.text().strip(), timeout=timeout.value(), default_project=project.currentData())
+                if agent == 'local':
+                    values.update({key: field.currentData() if key == 'harness' else field.text().strip() for key, field in local_fields.items()})
                 if model.isEnabled():
                     values["default_model"] = model.currentData()
                 if effort.isEnabled():
                     values["default_effort"] = effort.currentData()
+                if agent == 'local':
+                    values['default_model'] = values['model']
                 self.core.set_setting("agent." + agent, values)
                 self.panels[agent].update_controls()
             self.core.set_setting("legacy.root", legacy_root.text().strip())
@@ -2295,18 +3707,20 @@ class MainWindow(QMainWindow):
                         self._close_pending = False
                         self.show_error("Cancellation is still pending. The workspace remains open so history can be retained.", False)
                         return
-                    QTimer.singleShot(100, ready_to_close)
+                    QTimer.singleShot(100, self, ready_to_close)
                     return
                 self._close_pending = False
                 self.close()
             def cancelled(_):
-                QTimer.singleShot(0, ready_to_close)
+                QTimer.singleShot(0, self, ready_to_close)
             def failed(_):
                 self._close_pending = False
             self.run(lambda: self.core.stop_task(confirmed=True), cancelled, on_error=failed)
             event.ignore()
             return
+        self.save_context_state()
         self.core.set_setting("ui.geometry", bytes(self.saveGeometry().toBase64()).decode())
         self.timer.stop()
         self._closed = True
         event.accept()
+

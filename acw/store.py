@@ -46,13 +46,13 @@ class Store:
         CREATE TABLE IF NOT EXISTS projects (
           id TEXT PRIMARY KEY, name TEXT NOT NULL, repo_path TEXT NOT NULL,
           default_branch TEXT DEFAULT '', active_branch TEXT DEFAULT '',
-          claude_cwd TEXT DEFAULT '', codex_cwd TEXT DEFAULT '', dot_metadata TEXT DEFAULT '',
+          claude_cwd TEXT DEFAULT '', codex_cwd TEXT DEFAULT '', local_cwd TEXT DEFAULT '', dot_metadata TEXT DEFAULT '',
           notes TEXT DEFAULT '', created_at TEXT NOT NULL, metadata TEXT DEFAULT '{}');
         CREATE TABLE IF NOT EXISTS tasks (
           id TEXT PRIMARY KEY, title TEXT NOT NULL, project_id TEXT REFERENCES projects(id),
           repo TEXT DEFAULT '', branch TEXT DEFAULT '', created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'NEW',
-          claude_session TEXT DEFAULT '', dot_session TEXT DEFAULT '', codex_session TEXT DEFAULT '',
+          claude_session TEXT DEFAULT '', dot_session TEXT DEFAULT '', codex_session TEXT DEFAULT '', local_session TEXT DEFAULT '',
           created_by TEXT DEFAULT 'user', current_owner TEXT DEFAULT 'user', notes TEXT DEFAULT '',
           metadata TEXT DEFAULT '{}');
         CREATE TABLE IF NOT EXISTS sessions (
@@ -87,6 +87,10 @@ class Store:
         CREATE INDEX IF NOT EXISTS tasks_project_status ON tasks(project_id,status,created_at);
         CREATE INDEX IF NOT EXISTS artifacts_task ON artifacts(task_id);
         ''')
+        for table, column in (('projects', 'local_cwd'), ('tasks', 'local_session')):
+            columns = {row['name'] for row in self.db.execute(f'PRAGMA table_info({table})')}
+            if column not in columns:
+                self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT DEFAULT ''")
         self.db.commit()
         self.max_raw_bytes = 10 * 1024 * 1024
         self.retention_days = 30
@@ -158,7 +162,7 @@ class Store:
 
     def append_raw(self, agent, event):
         """Append a redacted audit record. References include relative path and byte offset."""
-        if agent not in {"claude","dot","codex","workspace"}:
+        if agent not in {"claude","dot","codex","local","workspace"}:
             agent = "workspace"
         record = sanitize(event)
         data = (json.dumps(record,ensure_ascii=False,separators=(',',':'))+'\n').encode('utf-8')
@@ -213,12 +217,14 @@ class Store:
             active = set(self._raw_paths.values())
             expired = self.get_setting('raw.expired_segments',{})
             for path in self.raw_dir.iterdir():
-                if not re.fullmatch(r'(?:claude|dot|codex|workspace)(?:-\d+(?:-[0-9a-f]{8})?)?\.jsonl(?:\.gz)?',path.name):
+                if not re.fullmatch(r'(?:claude|dot|codex|local|workspace)(?:-\d+(?:-[0-9a-f]{8})?)?\.jsonl(?:\.gz)?',path.name):
                     continue
                 if path in active or path.is_symlink() or not path.is_file():
                     continue
-                if not path.resolve().is_relative_to(self.raw_dir):
-                    raise PermissionError('Retention path escaped workspace raw directory')
+                if not path.resolve().is_relative_to(self.raw_dir.resolve()):
+                    # Never touch a segment that resolves elsewhere. This also happens harmlessly when
+                    # Windows redirects AppData for a packaged parent app, so skip instead of failing startup.
+                    continue
                 source_name = path.name[:-3] if path.name.endswith('.gz') else path.name
                 reference = 'raw/'+source_name
                 if path.stat().st_mtime < cutoff:
