@@ -16,7 +16,7 @@ def main():
     from acw.adapters.claude import ClaudeAdapter
     from acw.adapters.codex import CodexAdapter
     from acw.adapters.dot import DotAdapter
-    app=QApplication(sys.argv[:1]);app.setApplicationName('AI Collaboration Workspace');app.setOrganizationName('AI Collaboration Workspace')
+    app=QApplication(sys.argv[:1]);app.setStyle('Fusion');app.setApplicationName('AI Collaboration Workspace');app.setOrganizationName('AI Collaboration Workspace')
     args.data_dir.mkdir(parents=True,exist_ok=True)
     lock=QLockFile(str(args.data_dir/'workspace.lock'));lock.setStaleLockTime(30000)
     if not lock.tryLock(100):
