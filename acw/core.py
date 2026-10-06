@@ -10,7 +10,7 @@ from pathlib import Path
 from .security import sanitize, safe_file, is_secret_path, is_hidden_reasoning, safe_export_path, verify_screenshot, reject_link_ancestors
 from .store import Store, now, uid
 
-AGENTS = ('claude','dot','codex')
+AGENTS = ('claude','dot','codex','local')
 TASK_STATUSES = ('NEW','PLANNING','REVIEWING','READY','IMPLEMENTING','VERIFYING','WAITING_USER','BLOCKED','DONE','FAILED','CANCELLED')
 ARTIFACT_TYPES = {'diff','patch','test','test log','report','screenshot','jsonl','markdown'}
 ARTIFACT_SUFFIXES={'diff':'.diff','patch':'.patch','test':'.log','test log':'.log','report':'.txt','jsonl':'.jsonl','markdown':'.md'}
@@ -79,6 +79,18 @@ class WorkspaceCore:
         adapter=self._adapter(agent)
         settings=self.get_setting('agent.'+agent,{})
         if not settings.get('enabled',True): raise RuntimeError(f'{agent}: disabled in Settings')
+        if agent=='local' and hasattr(adapter,'local_harness'):
+            if adapter.state in ('Connected','Busy','Connecting'):
+                raise RuntimeError('請先中斷本地模型連線，再套用設定')
+            from .adapters.local import make_local_adapter
+            defaults={key:adapter.settings[key] for key in ('codex_executable','claude_executable','attachment_roots') if key in adapter.settings}
+            replacement=make_local_adapter(self.make_emitter(agent),**dict(defaults,**settings))
+            if replacement.local_harness==adapter.local_harness:
+                replacement.session_id=adapter.session_id
+                if hasattr(adapter,'_resume'): replacement._resume=adapter._resume
+            if adapter._process:
+                adapter.disconnect()
+            adapter=self.set_adapter(agent,replacement)
         if not self.current_project and settings.get('default_project'):
             self.select_project(settings['default_project'])
         if settings.get('executable'): adapter.executable=settings['executable']
@@ -120,7 +132,7 @@ class WorkspaceCore:
         if not str(name).strip(): raise ValueError('Project name is required')
         project=dict(id=metadata.pop('id',uid('project-')),name=name,repo_path=str(repo),created_at=now(),
                      default_branch=metadata.pop('default_branch',''),active_branch=metadata.pop('active_branch',''),
-                     claude_cwd=str(repo),codex_cwd=str(repo),dot_metadata='',notes=metadata.pop('notes',''),metadata=metadata)
+                     claude_cwd=str(repo),codex_cwd=str(repo),local_cwd=str(repo),dot_metadata='',notes=metadata.pop('notes',''),metadata=metadata)
         self.store.insert('projects',project)
         return self.get_project(project['id'])
 
@@ -338,6 +350,9 @@ class WorkspaceCore:
         identity={'agent':agent,'id':session_id}
         fields={'task_id':task['id'] if task else None,'project_id':project['id'] if project else None,
                 'cwd':getattr(self.adapters.get(agent),'cwd',''),'updated_at':now()}
+        if agent=='local' and hasattr(self.adapters.get(agent),'local_harness'):
+            existing=self.store.get('sessions',identity) or {}
+            fields['metadata']=dict(existing.get('metadata') or {},local_harness=self.adapters[agent].local_harness)
         if self.store.get('sessions',identity): self.store.update('sessions',identity,fields)
         else: self.store.insert('sessions',dict(identity,**fields,title=session_id,created_at=now()))
         if task: self.store.update('tasks',{'id':task['id']},{agent+'_session':session_id,'updated_at':now()})
@@ -360,6 +375,9 @@ class WorkspaceCore:
         if not self.capabilities(agent).get('supports_sessions'): raise NotImplementedError(f'{agent}: sessions Unsupported')
         if getattr(adapter,'state','')=='Busy': raise RuntimeError('Wait for the active turn before resuming a session')
         saved=self.store.get('sessions',{'agent':agent,'id':session_id})
+        if agent=='local' and saved and hasattr(adapter,'local_harness'):
+            if (saved.get('metadata') or {}).get('local_harness',adapter.local_harness)!=adapter.local_harness:
+                raise ValueError('此本地對話使用不同 Harness；請切回原 Harness 或建立新對話')
         if saved and agent!='dot':
             project=self.current_project
             expected=project.get(agent+'_cwd') or project['repo_path']

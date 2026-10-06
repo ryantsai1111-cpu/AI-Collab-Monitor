@@ -25,11 +25,11 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
-AGENTS = ("claude", "dot", "codex")
+AGENTS = ("claude", "dot", "codex", "local")
 STATUSES = ("NEW", "PLANNING", "REVIEWING", "READY", "IMPLEMENTING", "VERIFYING",
             "WAITING_USER", "BLOCKED", "DONE", "FAILED", "CANCELLED")
-ROLE_NAMES = {"claude": "Claude", "dot": "G8毛", "codex": "Codex"}
-ROLE_LABELS = {"claude": "主審", "dot": "轉接／複核", "codex": "實作"}
+ROLE_NAMES = {"claude": "Claude", "dot": "G8毛", "codex": "Codex", "local": "Local LLM"}
+ROLE_LABELS = {"claude": "主審", "dot": "轉接／複核", "codex": "實作", "local": "本地模型"}
 STATE_LABELS = {"Disconnected": "未連線", "Connected": "已連線", "Busy": "處理中", "Connecting": "連線中",
                 "Error": "錯誤", "Blocked": "受阻", "Offline": "離線", "Stopping": "停止中", "Interrupted": "已中斷"}
 STATUS_LABELS = dict(zip(STATUSES, ("新任務", "規劃中", "主審中", "可實作", "實作中", "驗證中",
@@ -756,8 +756,10 @@ class AgentPanel(QFrame):
         cap = self.capabilities
         files_supported = self.attachment_supported()
         blocked = self.agent == "dot" and not cap.get("supports_sessions")
-        enabled = (self.window.core.get_setting("agent." + self.agent, {}) or {}).get("enabled", True)
-        self.connect_button.setEnabled(enabled and not blocked and not busy and self.connection_state != "Connecting")
+        settings = self.window.core.get_setting("agent." + self.agent, {}) or {}
+        enabled = settings.get("enabled", True)
+        local_missing = self.agent == 'local' and not (str(settings.get('base_url') or '').strip() and str(settings.get('model') or '').strip())
+        self.connect_button.setEnabled(enabled and not blocked and not busy and self.connection_state != "Connecting" and (not local_missing or self.connection_state == 'Connected'))
         self.send_button.setEnabled(ready and not blocked and not (self.attachments and not files_supported) and not (self._effort_invalid and self.effort.currentData() is None))
         self.send_button.setToolTip("請移除暫存附件或選擇支援的模型" if self.attachments and not files_supported else "請先選擇此模型支援的強度" if self._effort_invalid and self.effort.currentData() is None else "傳送訊息")
         self.input.setReadOnly(self.monitor or blocked)
@@ -783,7 +785,10 @@ class AgentPanel(QFrame):
         for card in self.approvals.values():
             for control in card.approval_actions:
                 control.setEnabled(bool(cap.get('supports_approval')) and not self.monitor and not card.historical and not card.approval_resolved)
-        if blocked:
+        if local_missing:
+            self.notice.setText("請先在設定填入本地端點與模型名稱")
+            self.notice.setToolTip(self.notice.text())
+        elif blocked:
             if self.connection_state != 'Error':
                 self.state.setText("受阻")
                 self.notice.setText("請先選擇 G8毛 · 非官方整合 · 僅手動操作")
@@ -791,6 +796,9 @@ class AgentPanel(QFrame):
             self.input.setPlaceholderText("請先選擇 G8毛。非官方整合；手動重新整理，無串流。")
         elif not enabled:
             self.notice.setText("此角色已在設定中停用")
+        elif self.agent == 'local' and self.connection_state in ('Disconnected', 'Offline'):
+            self.notice.setText("本地模型設定已備妥 · 請按「連線」")
+            self.notice.setToolTip(self.notice.text())
         elif self.agent == 'dot':
             self.input.setPlaceholderText("手動傳送文字；按重新整理讀取回覆。無串流／伺服器停止。")
 
@@ -1475,7 +1483,7 @@ class MainWindow(QMainWindow):
         self._context_views = {}
         self._loaded_context_key = None
         self._layout_updating = False
-        self._grid_sizes = [400, 400, 400]
+        self._grid_sizes = [400] * len(AGENTS)
         self._preferred_agent = "claude"
         self.setWindowTitle("AI Collaboration Workspace")
         self.setObjectName("ai_collaboration_workspace")
@@ -1604,7 +1612,7 @@ class MainWindow(QMainWindow):
             self.role_tabs.addTab(ROLE_NAMES[agent] + " · " + ROLE_LABELS[agent])
         self.role_tabs.currentChanged.connect(self.select_role)
         roles.addWidget(self.role_tabs, 1)
-        self.unfocus_button = button("Three panes", lambda: self.focus_agent(None), "unfocus")
+        self.unfocus_button = button("四欄並排", lambda: self.focus_agent(None), "unfocus")
         self.unfocus_button.hide()
         roles.addWidget(self.unfocus_button)
         content_layout.addLayout(roles)
@@ -1790,7 +1798,7 @@ class MainWindow(QMainWindow):
             if hasattr(self, "workspace_scroll"):
                 self.workspace_scroll.widget().setMaximumHeight(max(450, self.workspace_scroll.viewport().height()))
             available = self.splitter.width()
-            narrow = available < 1080
+            narrow = available < len(AGENTS) * 300 + (len(AGENTS) - 1) * self.splitter.handleWidth()
             focused = self.layout_mode.currentData() == "Focus" or narrow
             was_focused = self.focused_agent is not None
             if focused and not was_focused and all(not panel.isHidden() for panel in self.panels.values()):
@@ -2091,7 +2099,7 @@ class MainWindow(QMainWindow):
             self._git_busy = True
             def loaded_git(snapshot):
                 self._git_busy = False
-                for agent in ("claude", "codex"):
+                for agent in ("claude", "codex", "local"):
                     self.panels[agent].branch_label.setText(self.branch_text(snapshot))
             self.run(self.core.git_snapshot, loaded_git, on_error=lambda _: setattr(self, "_git_busy", False))
         try:
@@ -2302,7 +2310,7 @@ class MainWindow(QMainWindow):
         explanation.setEnabled(False)
 
     def stop_task(self):
-        if QMessageBox.question(self, "Stop current task", "Request cancellation from all three adapters for the current task?", QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes:
+        if QMessageBox.question(self, "Stop current task", "Request cancellation from all four adapters for the current task?", QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes:
             self.run(lambda: self.core.stop_task(confirmed=True))
 
     def approve(self, event, approved):
@@ -2398,7 +2406,9 @@ class MainWindow(QMainWindow):
         self.search.returnPressed.connect(self.refresh_history)
         filters.addWidget(self.search, 2)
         self.history_agent = QComboBox()
-        self.history_agent.addItems(["All agents", *AGENTS])
+        self.history_agent.addItem("All agents", None)
+        for agent in AGENTS:
+            self.history_agent.addItem(ROLE_NAMES[agent], agent)
         self.history_agent.currentIndexChanged.connect(self.refresh_history)
         filters.addWidget(self.history_agent)
         self.history_status = QComboBox()
@@ -2430,7 +2440,7 @@ class MainWindow(QMainWindow):
 
     def show_history(self, agent=None):
         if agent:
-            self.history_agent.setCurrentText(agent)
+            self.history_agent.setCurrentIndex(self.history_agent.findData(agent))
         self.mode.setCurrentIndex(self.mode.findData("History"))
 
     def refresh_history(self):
@@ -2440,7 +2450,7 @@ class MainWindow(QMainWindow):
         query = self.search.text().strip()
         filters = {}
         if self.history_agent.currentIndex():
-            filters["agent"] = self.history_agent.currentText()
+            filters["agent"] = self.history_agent.currentData()
         if self.history_status.currentIndex():
             filters["status"] = self.history_status.currentText()
         if self.history_project.isChecked() and self.core.current_project:
@@ -2689,6 +2699,7 @@ class MainWindow(QMainWindow):
         agent_layout = QVBoxLayout(agent_page)
         agent_layout.addWidget(label("後端設定於下次連線生效。模型與思考強度選項來自實際連線的後端。", True))
         fields = {}
+        local_fields = {}
         for agent in AGENTS:
             form = QFormLayout()
             form.addRow(label(ROLE_NAMES[agent] + " · " + ROLE_LABELS[agent]))
@@ -2697,7 +2708,9 @@ class MainWindow(QMainWindow):
             enabled = QCheckBox("啟用")
             enabled.setObjectName(f"default_enabled_{agent}")
             enabled.setChecked(saved.get("enabled", True))
-            executable = QLineEdit(saved.get("executable", diag.get("executable", "")))
+            executable = QLineEdit(saved.get("executable", "" if agent == 'local' else diag.get("executable", "")))
+            if agent == 'local':
+                executable.setPlaceholderText('留空時依 Harness 自動偵測官方 CLI')
             executable.setObjectName(f"executable_{agent}")
             timeout = QSpinBox()
             timeout.setObjectName(f"timeout_{agent}")
@@ -2736,20 +2749,48 @@ class MainWindow(QMainWindow):
             form.addRow("", enabled)
             form.addRow("後端", label(diag.get("backend", "Unknown"), True))
             form.addRow("執行檔", executable)
+            if agent == 'local':
+                harness = QComboBox()
+                harness.setObjectName('local_harness')
+                harness.addItem('Codex', 'codex')
+                harness.addItem('Claude Code', 'claude')
+                harness.setCurrentIndex(max(0, harness.findData(saved.get('harness', 'codex'))))
+                base_url = QLineEdit(saved.get('base_url', ''))
+                base_url.setObjectName('local_base_url')
+                local_model = QLineEdit(saved.get('model', ''))
+                local_model.setObjectName('local_model')
+                api_key_env = QLineEdit(saved.get('api_key_env', ''))
+                api_key_env.setObjectName('local_api_key_env')
+                form.addRow('Harness', harness)
+                form.addRow('端點 Base URL', base_url)
+                form.addRow('模型名稱', local_model)
+                form.addRow('API key 環境變數名稱', api_key_env)
+                form.addRow(label('Codex 需要 Responses API；Claude Code 需要 Anthropic Messages API。儲存後請中斷連線再重新連線。', True))
+                local_fields = dict(harness=harness, base_url=base_url, model=local_model, api_key_env=api_key_env)
             form.addRow("逾時（秒）", timeout)
             form.addRow("預設模型", model)
             form.addRow("預設強度", effort)
             form.addRow("預設專案", project)
             form.addRow("串流", label(self.panels[agent].capability_status("supports_streaming"), True))
             form.addRow("原始日誌", label("安全過濾後的稽核紀錄固定啟用", True))
-            agent_layout.addLayout(form)
+            if agent == 'local':
+                local_page = QWidget()
+                local_layout = QVBoxLayout(local_page)
+                local_layout.addLayout(form)
+                local_layout.addStretch()
+                local_scroll = QScrollArea()
+                local_scroll.setWidgetResizable(True)
+                local_scroll.setWidget(local_page)
+            else:
+                agent_layout.addLayout(form)
             fields[agent] = (saved, enabled, executable, timeout, model, effort, project)
         agent_scroll = QScrollArea()
         agent_scroll.setWidgetResizable(True)
         agent_scroll.setWidget(agent_page)
         tabs.addTab(agent_scroll, "角色與模型")
+        tabs.addTab(local_scroll, "Local LLM")
         for name, text in (
-            ("Projects", "Use the project selector to choose a working directory. Sync sets Claude and Codex cwd; dot receives metadata only. Git integration is read only."),
+            ("Projects", "Use the project selector to choose a working directory. Sync sets Claude, Codex and Local LLM cwd; dot receives metadata only. Git integration is read only."),
             ("Logs", "Raw JSONL and structured events are retained locally. Safety filtering redacts credentials and excludes hidden reasoning before persistence. Open per-agent logs from each panel."),
             ("Permissions", "Original backend permission and sandbox settings remain authoritative. Tool approval requires an explicit user action. Automatic approval and sandbox bypass are not available."),
             ("Advanced", "Automatic orchestration: OFF\nNo agents connect automatically at startup. Unsupported capabilities remain unavailable. Use Diagnostics for executable, backend, session, cwd, last event and last error."),
@@ -2771,7 +2812,7 @@ class MainWindow(QMainWindow):
         topmost = QCheckBox("保持在最上層")
         topmost.setChecked(self.core.get_setting("ui.always_on_top", False))
         appearance_layout.addWidget(topmost)
-        appearance_layout.addWidget(label("Ctrl+B toggles projects/sessions. Ctrl+1/2/3 focuses a role. Ctrl+Shift+D opens work details. Ctrl+Enter sends after IME composition. F11 toggles fullscreen. Drafts and view state survive navigation during this app run; window geometry restores across launches.", True))
+        appearance_layout.addWidget(label("Ctrl+B toggles projects/sessions. Ctrl+1/2/3/4 focuses a role. Ctrl+Shift+D opens work details. Ctrl+Enter sends after IME composition. F11 toggles fullscreen. Drafts and view state survive navigation during this app run; window geometry restores across launches.", True))
         appearance_layout.addStretch()
         tabs.addTab(appearance, "外觀")
         retention = QWidget()
@@ -2796,10 +2837,14 @@ class MainWindow(QMainWindow):
         if dialog.exec() == QDialog.Accepted:
             for agent, (saved, enabled, executable, timeout, model, effort, project) in fields.items():
                 values = dict(saved, enabled=enabled.isChecked(), executable=executable.text().strip(), timeout=timeout.value(), default_project=project.currentData())
+                if agent == 'local':
+                    values.update({key: field.currentData() if key == 'harness' else field.text().strip() for key, field in local_fields.items()})
                 if model.isEnabled():
                     values["default_model"] = model.currentData()
                 if effort.isEnabled():
                     values["default_effort"] = effort.currentData()
+                if agent == 'local':
+                    values['default_model'] = values['model']
                 self.core.set_setting("agent." + agent, values)
                 self.panels[agent].update_controls()
             self.core.set_setting("legacy.root", legacy_root.text().strip())

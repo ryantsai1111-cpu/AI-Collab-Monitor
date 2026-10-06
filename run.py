@@ -16,6 +16,7 @@ def main():
     from acw.adapters.claude import ClaudeAdapter
     from acw.adapters.codex import CodexAdapter
     from acw.adapters.dot import DotAdapter
+    from acw.adapters.local import make_local_adapter
     app=QApplication(sys.argv[:1]);app.setStyle('Fusion');app.setApplicationName('AI Collaboration Workspace');app.setOrganizationName('AI Collaboration Workspace')
     args.data_dir.mkdir(parents=True,exist_ok=True)
     lock=QLockFile(str(args.data_dir/'workspace.lock'));lock.setStaleLockTime(30000)
@@ -26,10 +27,13 @@ def main():
     claudes=list((local/'Packages'/'Claude_pzs8sxrjxfjjc'/'LocalCache'/'Roaming'/'Claude'/'claude-code').glob('*/*/claude.exe'))
     codexes=list((local/'OpenAI'/'Codex'/'bin').glob('*/codex.exe'))
     def newest(paths): return str(max(paths,key=lambda p:p.stat().st_mtime)) if paths else ''
-    for agent, cls, default in [('claude',ClaudeAdapter,newest(claudes)),('dot',DotAdapter,''),('codex',CodexAdapter,newest(codexes))]:
+    for agent, cls, default in [('claude',ClaudeAdapter,newest(claudes)),('dot',DotAdapter,''),('codex',CodexAdapter,newest(codexes)),('local',make_local_adapter,'')]:
         settings=core.get_setting('agent.'+agent,{}) or {}
         exe=settings.pop('executable',default)
         settings.setdefault('attachment_roots',[str(core.store.artifact_dir)])
+        if agent=='local':
+            settings.setdefault('codex_executable',newest(codexes))
+            settings.setdefault('claude_executable',newest(claudes))
         core.set_adapter(agent,cls(core.make_emitter(agent),executable=exe,**settings))
     window=MainWindow(core);window.show()
     result=app.exec()

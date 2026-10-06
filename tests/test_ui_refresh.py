@@ -305,11 +305,12 @@ class WorkspaceUiRefreshTests(unittest.TestCase):
 
     def test_three_independent_agent_panels_and_default_roles(self):
         self.assertEqual(set(AGENTS), set(self.window.panels))
-        self.assertEqual(3, self.window.role_tabs.count())
+        self.assertEqual(4, self.window.role_tabs.count())
         labels = [self.window.role_tabs.tabText(i) for i in range(3)]
         self.assertIn("Claude", labels[0])
         self.assertIn("G8毛", labels[1])
         self.assertIn("Codex", labels[2])
+        self.assertIn("Local LLM", self.window.role_tabs.tabText(3))
         role_text = [self.window.panels[a].title.toolTip().casefold() + " " +
                      " ".join(l.text() for l in self.window.panels[a].findChildren(QLabel)).casefold()
                      for a in AGENTS]
@@ -1323,7 +1324,7 @@ class WorkspaceUiRefreshTests(unittest.TestCase):
         card.copy(False)
         self.assertEqual(text, self.app.clipboard().text())
         forward_labels = [action.text() for action in card.forward_button.menu().actions()]
-        self.assertEqual(["G8毛", "Codex"], forward_labels)
+        self.assertEqual(["G8毛", "Codex", "Local LLM"], forward_labels)
         self.assert_no_adapter_actions()
 
 

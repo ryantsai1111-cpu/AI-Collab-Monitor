@@ -21,7 +21,7 @@ class HumanSessionLabels(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='acw-readable-sessions-')
         self.root = Path(self.temp.name)
-        self.adapters = {a: SyntheticAdapter(a) for a in ('claude','dot','codex')}
+        self.adapters = {a: SyntheticAdapter(a) for a in ('claude','dot','codex','local')}
         self.core = WorkspaceCore(self.root/'data', self.adapters)
         self.core.set_setting('legacy.root', str(self.root/'no-legacy'))
         self.projects=[]
