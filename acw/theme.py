@@ -1,7 +1,8 @@
-"""Brushed-metal theme: palette, generated textures and the workspace stylesheet.
+"""Workspace themes: the default flat dark look modelled on the desktop apps, and the earlier
+brushed-metal look (setting `ui.theme` = "metal").
 
-Presentation only. Textures are drawn locally with a fixed seed; nothing is
-downloaded and a missing or unwritable asset folder only drops the texture.
+Presentation only. Small images are drawn locally; nothing is downloaded and a missing or
+unwritable asset folder only drops the image.
 """
 from __future__ import annotations
 
@@ -14,11 +15,13 @@ from PySide6.QtGui import QColor, QImage, QPainter, QPalette, QPen, QPolygonF
 ASSETS = Path(__file__).resolve().parent / "assets"
 
 # Indicator colours for the black-glass status readout and transcript headings.
-STATE_COLORS = {"Connected": "#5fe08a", "Busy": "#ffc857", "Connecting": "#ffc857",
-                "Error": "#ff7468", "Blocked": "#ff7468"}
-STATE_IDLE = "#aeb7c1"
-HEADING_COLOR = "#8ec3ff"
-EVENT_COLOR = "#d5dbe1"
+STATE_COLORS = {"Connected": "#6fcf8e", "Busy": "#e3b341", "Connecting": "#e3b341",
+                "Error": "#ef6b63", "Blocked": "#ef6b63"}
+STATE_IDLE = "#a3a29b"
+HEADING_COLOR = "#e08a6d"
+EVENT_COLOR = "#c9c7c0"
+MUTED_COLOR = "#8f8e87"
+CODE_BLOCK_BG, CODE_INLINE_BG, CODE_INLINE_FG = "#1a1a19", "#3a3936", "#e8b98a"
 
 CHROME = "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #f6f8fa, stop:0.46 #d0d5db, stop:0.52 #b6bcc4, stop:1 #d6dbe0)"
 CHROME_HOVER = "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #ffffff, stop:0.46 #e0e5ea, stop:0.52 #c6ccd4, stop:1 #e6eaee)"
@@ -32,7 +35,7 @@ ANODIZED_HOVER = "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #a3cdfa, stop:0
 HANDLE_V = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #7f8790, stop:0.5 #e3e7eb, stop:1 #7f8790)"
 HANDLE_H = "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #7f8790, stop:0.5 #e3e7eb, stop:1 #7f8790)"
 
-STYLE = """
+METAL_STYLE = """
 QWidget { color: #eef1f4; font-family: 'Segoe UI', 'Microsoft JhengHei UI', 'Noto Sans CJK TC'; font-size: 13px; }
 QMainWindow, QDialog { background-color: @CHASSIS@; background-image: url("@BRUSHED@"); }
 QLabel { background: transparent; }
@@ -119,20 +122,114 @@ QMenu::separator { height: 1px; background: #8d959e; margin: 4px 8px; }
 QToolTip { color: #12161a; background: #e6e9ec; border: 1px solid #0d0f11; padding: 3px 5px; }
 """
 
+DESKTOP_STYLE = """
+QWidget { color: #ececea; font-family: 'Segoe UI', 'Microsoft JhengHei UI', 'Noto Sans CJK TC'; font-size: 13px; }
+QMainWindow, QDialog { background: #262624; }
+QLabel { background: transparent; }
+QLabel#brand { font-size: 15px; font-weight: 600; color: #ececea; }
+QLabel#subtitle, QLabel#muted { color: #a3a29b; }
+QLabel#agentTitle { font-size: 15px; font-weight: 600; color: #ececea; }
+QLabel#status { color: #a3a29b; font-size: 12px; background: transparent; border: none; padding: 0 4px; }
+QFrame#panel { background: #262624; border: 1px solid #3a3936; border-radius: 12px; }
+QFrame#sidebar { background: #1f1e1d; border: none; border-radius: 12px; }
+QFrame#work_details { background: #1f1e1d; border: 1px solid #3a3936; border-radius: 12px; }
+QFrame#composer { background: #30302e; border: 1px solid #45443f; border-radius: 14px; }
+QFrame#composer QPlainTextEdit { background: transparent; border: none; padding: 2px; font-size: 14px; }
+QFrame#composer QComboBox { background: transparent; border: none; color: #a3a29b; padding: 3px 22px 3px 6px; }
+QFrame#composer QComboBox:hover { color: #ececea; background: #3a3936; }
+QFrame#message { border: none; background: transparent; }
+QFrame#message_user { background: #1a1a19; border: none; border-radius: 12px; margin-left: 40px; }
+QLabel#message_meta { color: #7c7b75; font-size: 11px; }
+QToolButton#ghost { color: #8f8e87; background: transparent; border: none; border-radius: 6px; padding: 2px 7px; min-height: 0; font-size: 12px; }
+QToolButton#ghost:hover, QToolButton#ghost:pressed { color: #ececea; background: #3a3936; padding: 2px 7px; }
+QFrame#event { border: none; background: transparent; }
+QFrame#event_approval { border: 1px solid #6b5a33; border-radius: 10px; background: #2b2820; }
+QFrame#run_bar { background: #2b2420; border: 1px solid #d97757; border-radius: 10px; }
+QLabel#run_status { color: #f0c4b3; font-weight: 600; }
+QFrame#activity { border: none; border-left: 2px solid #3a3936; background: transparent; }
+QFrame#event QPlainTextEdit, QFrame#event_approval QPlainTextEdit { background: #1a1a19; border: 1px solid #3a3936; border-radius: 6px; }
+
+QPushButton, QToolButton { color: #ececea; background: transparent; border: 1px solid #45443f; border-radius: 8px; padding: 5px 10px; min-height: 19px; }
+QPushButton:hover, QToolButton:hover { background: #30302e; border-color: #5a5953; }
+QPushButton:pressed, QToolButton:pressed, QPushButton:checked, QToolButton:checked { background: #3a3936; }
+QPushButton:focus, QToolButton:focus { border-color: #d97757; }
+QPushButton:disabled, QToolButton:disabled { color: #6f6e68; background: transparent; border-color: #353431; }
+QPushButton#primary { color: #ffffff; background: #d97757; border-color: #d97757; font-weight: 600; }
+QPushButton#primary:hover { background: #e08a6d; border-color: #e08a6d; }
+QPushButton#stop { color: #f08a80; }
+QPushButton#primary:disabled { color: #8f8e87; background: #3a3936; border-color: #3a3936; font-weight: 400; }
+QPushButton#stop:disabled { color: #6f6e68; }
+QToolButton::menu-indicator { image: none; }
+
+QLineEdit, QComboBox, QPlainTextEdit, QTextBrowser, QSpinBox { color: #ececea; background: #30302e; border: 1px solid #45443f; border-radius: 8px; padding: 6px; selection-background-color: #5a4a42; selection-color: #ffffff; }
+QLineEdit:focus, QComboBox:focus, QPlainTextEdit:focus, QSpinBox:focus { border-color: #d97757; }
+QLineEdit:disabled, QComboBox:disabled, QPlainTextEdit:disabled, QSpinBox:disabled { color: #7c7b75; background: #2b2b29; }
+QComboBox { padding: 5px 24px 5px 8px; }
+QComboBox::drop-down { subcontrol-origin: border; subcontrol-position: top right; width: 20px; background: transparent; border: none; }
+QComboBox::down-arrow { image: url("@ARROW_DOWN_LIGHT@"); width: 10px; height: 6px; }
+QComboBox QAbstractItemView { color: #ececea; background: #30302e; border: 1px solid #45443f; outline: 0; selection-background-color: #45443f; selection-color: #ffffff; }
+QSpinBox { padding-right: 22px; }
+QSpinBox::up-button, QSpinBox::down-button { subcontrol-origin: border; width: 20px; background: transparent; border: none; }
+QSpinBox::up-button { subcontrol-position: top right; }
+QSpinBox::down-button { subcontrol-position: bottom right; }
+QSpinBox::up-arrow { image: url("@ARROW_UP_LIGHT@"); width: 10px; height: 6px; }
+QSpinBox::down-arrow { image: url("@ARROW_DOWN_LIGHT@"); width: 10px; height: 6px; }
+QCheckBox { background: transparent; spacing: 7px; }
+QCheckBox::indicator { width: 14px; height: 14px; background: #30302e; border: 1px solid #5a5953; border-radius: 4px; }
+QCheckBox::indicator:checked { background: #d97757; border-color: #d97757; }
+QCheckBox::indicator:disabled { border-color: #3a3936; }
+
+QScrollArea { border: none; background: transparent; }
+QScrollArea > QWidget > QWidget { background: transparent; }
+QScrollArea[well="true"] { background: transparent; border: none; }
+QScrollBar:vertical { width: 8px; background: transparent; margin: 0; }
+QScrollBar::handle:vertical { background: #4a4946; border-radius: 4px; min-height: 28px; }
+QScrollBar:horizontal { height: 8px; background: transparent; margin: 0; }
+QScrollBar::handle:horizontal { background: #4a4946; border-radius: 4px; min-width: 28px; }
+QScrollBar::handle:hover { background: #5f5e59; }
+QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
+QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
+
+QTabWidget::pane { border: none; }
+QTabBar { background: transparent; }
+QTabBar::tab { color: #a3a29b; background: transparent; border: none; border-radius: 7px; padding: 6px 11px; margin-right: 2px; }
+QTabBar::tab:hover { color: #ececea; background: #30302e; }
+QTabBar::tab:selected { color: #ececea; background: #3a3936; font-weight: 600; }
+QHeaderView::section { color: #a3a29b; background: #262624; padding: 7px; border: none; border-bottom: 1px solid #3a3936; font-weight: 600; }
+QTreeWidget, QTableWidget { color: #ececea; background: #262624; border: 1px solid #3a3936; border-radius: 8px; alternate-background-color: #2b2b29; selection-background-color: #45443f; selection-color: #ffffff; gridline-color: #3a3936; }
+QTreeWidget::item { padding: 5px; }
+QTableCornerButton::section { background: #262624; border: none; }
+QSplitter::handle { background: transparent; width: 8px; }
+QTabBar#sidebar_pages::tab, QTabBar#nav_source::tab { padding: 5px 10px; }
+QTreeWidget#nav_tree { background: transparent; border: none; padding: 0; outline: 0; }
+QTreeWidget#nav_tree::item { padding: 6px 6px; border-radius: 7px; }
+QTreeWidget#nav_tree::item:hover { background: #2b2b29; }
+QTreeWidget#nav_tree::item:selected { color: #ffffff; background: #141413; }
+QLabel#nav_status { color: #7c7b75; font-size: 11px; }
+QFrame#sidebar QLineEdit { background: #262624; border-color: #3a3936; }
+
+QMenu { color: #ececea; background: #30302e; border: 1px solid #45443f; border-radius: 8px; padding: 5px; }
+QMenu::item { color: #ececea; background: transparent; padding: 6px 18px; border-radius: 6px; }
+QMenu::item:selected { background: #45443f; }
+QMenu::item:disabled { color: #7c7b75; background: transparent; }
+QMenu::separator { height: 1px; background: #45443f; margin: 4px 8px; }
+QToolTip { color: #ececea; background: #1a1a19; border: 1px solid #45443f; padding: 3px 5px; }
+"""
+
 
 def metal_palette() -> QPalette:
     """Fallback colours for anything the stylesheet does not reach."""
     palette = QPalette()
-    for role, value in ((QPalette.Window, "#2a2e33"), (QPalette.WindowText, "#eef1f4"),
-                        (QPalette.Base, "#0f1215"), (QPalette.AlternateBase, "#171b1f"),
-                        (QPalette.Text, "#e9eef3"), (QPalette.PlaceholderText, "#8c959f"),
-                        (QPalette.Button, "#c9ced4"), (QPalette.ButtonText, "#12161a"),
-                        (QPalette.Highlight, "#2f6fb8"), (QPalette.HighlightedText, "#ffffff"),
-                        (QPalette.ToolTipBase, "#e6e9ec"), (QPalette.ToolTipText, "#12161a"),
-                        (QPalette.Link, "#8ec3ff"), (QPalette.BrightText, "#ffffff")):
+    for role, value in ((QPalette.Window, "#262624"), (QPalette.WindowText, "#ececea"),
+                        (QPalette.Base, "#30302e"), (QPalette.AlternateBase, "#2b2b29"),
+                        (QPalette.Text, "#ececea"), (QPalette.PlaceholderText, "#7c7b75"),
+                        (QPalette.Button, "#30302e"), (QPalette.ButtonText, "#ececea"),
+                        (QPalette.Highlight, "#5a4a42"), (QPalette.HighlightedText, "#ffffff"),
+                        (QPalette.ToolTipBase, "#1a1a19"), (QPalette.ToolTipText, "#ececea"),
+                        (QPalette.Link, "#8fb4e8"), (QPalette.BrightText, "#ffffff")):
         palette.setColor(role, QColor(value))
     for role in (QPalette.WindowText, QPalette.Text, QPalette.ButtonText):
-        palette.setColor(QPalette.Disabled, role, QColor("#98a1ab"))
+        palette.setColor(QPalette.Disabled, role, QColor("#7c7b75"))
     return palette
 
 
@@ -153,23 +250,25 @@ def _brushed(path: Path, size: int = 256) -> None:
     image.save(str(path), "PNG")
 
 
-def _arrow(path: Path, up: bool) -> None:
+def _arrow(path: Path, up: bool, color: str = "#12161a") -> None:
     image = QImage(10, 6, QImage.Format_ARGB32_Premultiplied)
     image.fill(Qt.transparent)
     painter = QPainter(image)
     painter.setRenderHint(QPainter.Antialiasing)
     painter.setPen(Qt.NoPen)
-    painter.setBrush(QColor("#12161a"))
+    painter.setBrush(QColor(color))
     points = [(0, 6), (10, 6), (5, 0)] if up else [(0, 0), (10, 0), (5, 6)]
     painter.drawPolygon(QPolygonF([QPointF(x, y) for x, y in points]))
     painter.end()
     image.save(str(path), "PNG")
 
 
-def build_style() -> str:
+def build_style(theme: str = "desktop") -> str:
     assets = {"BRUSHED": ("brushed.png", _brushed), "ARROW_DOWN": ("arrow_down.png", lambda p: _arrow(p, False)),
-              "ARROW_UP": ("arrow_up.png", lambda p: _arrow(p, True))}
-    style = STYLE
+              "ARROW_UP": ("arrow_up.png", lambda p: _arrow(p, True)),
+              "ARROW_DOWN_LIGHT": ("arrow_down_light.png", lambda p: _arrow(p, False, "#a3a29b")),
+              "ARROW_UP_LIGHT": ("arrow_up_light.png", lambda p: _arrow(p, True, "#a3a29b"))}
+    style = METAL_STYLE if theme == "metal" else DESKTOP_STYLE
     for key, (name, draw) in assets.items():
         path = ASSETS / name
         try:

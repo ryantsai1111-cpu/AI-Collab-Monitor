@@ -15,7 +15,8 @@ from .presentation import (session_identity, session_display, local_session_disp
                            project_label, task_label, compact)
 from . import approvals
 from .orchestrator import Orchestrator
-from .theme import EVENT_COLOR, HEADING_COLOR, STATE_COLORS, STATE_IDLE, build_style, metal_palette
+from .theme import (CODE_BLOCK_BG, CODE_INLINE_BG, CODE_INLINE_FG, EVENT_COLOR, HEADING_COLOR, MUTED_COLOR,
+                    STATE_COLORS, STATE_IDLE, build_style, metal_palette)
 
 from PySide6.QtCore import Qt, Signal, QObject, QRunnable, QThreadPool, QTimer, QUrl, QByteArray
 from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont, QKeySequence, QPixmap, QTextCharFormat,
@@ -228,14 +229,14 @@ class MessageBody(QTextBrowser):
                 cursor = QTextCursor(block)
                 if block.blockFormat().hasProperty(QTextFormat.BlockCodeFence) or block.blockFormat().hasProperty(QTextFormat.BlockCodeLanguage):
                     shaded = block.blockFormat()
-                    shaded.setBackground(QColor("#07090b"))
+                    shaded.setBackground(QColor(CODE_BLOCK_BG))
                     shaded.setLeftMargin(8)
                     shaded.setRightMargin(8)
                     cursor.setBlockFormat(shaded)
                     cursor.movePosition(QTextCursor.EndOfBlock, QTextCursor.KeepAnchor)
                     mono = QTextCharFormat()
                     mono.setFontFamilies(["Cascadia Mono", "Consolas"])
-                    mono.setForeground(QColor("#d5dbe1"))
+                    mono.setForeground(QColor(EVENT_COLOR))
                     cursor.mergeCharFormat(mono)
                 else:
                     if block.textList() is None:
@@ -249,8 +250,8 @@ class MessageBody(QTextBrowser):
                             cursor.setPosition(fragment.position())
                             cursor.setPosition(fragment.position() + fragment.length(), QTextCursor.KeepAnchor)
                             inline = QTextCharFormat()
-                            inline.setBackground(QColor("#20262d"))
-                            inline.setForeground(QColor("#f0c987"))
+                            inline.setBackground(QColor(CODE_INLINE_BG))
+                            inline.setForeground(QColor(CODE_INLINE_FG))
                             inline.setFontFamilies(["Cascadia Mono", "Consolas"])
                             cursor.mergeCharFormat(inline)
                         part += 1
@@ -447,7 +448,7 @@ class ActivityGroup(QFrame):
             counts.append(f"工具 {other}")
         self.toggle.setText(" · ".join(counts))
         failed = any(card.kind == "error" for card in self.cards)
-        self.toggle.setStyleSheet(f"text-align: left; border: none; background: transparent; padding: 4px 2px; color: {'#ff9a90' if failed else '#aeb7c1'};")
+        self.toggle.setStyleSheet(f"text-align: left; border: none; background: transparent; padding: 4px 2px; color: {'#ff9a90' if failed else MUTED_COLOR};")
 
     def set_expanded(self, expanded):
         self.inner.setVisible(expanded)
@@ -607,14 +608,20 @@ class AgentPanel(QFrame):
         self.input.setObjectName(f"input_{agent}")
         self.input.setAccessibleName(f"Message {ROLE_NAMES[agent]}")
         self.input.setPlaceholderText(f"傳送訊息給 {ROLE_NAMES[agent]}…  Ctrl+Enter 傳送")
-        self.input.setMinimumHeight(82)
-        self.input.setMaximumHeight(125)
+        self.input.setMinimumHeight(56)
+        self.input.setMaximumHeight(96)
         self.input.submit.connect(self.send)
         self.input.files_dropped.connect(self.add_attachments)
-        layout.addWidget(self.input)
+        self.composer = QFrame()
+        self.composer.setObjectName("composer")
+        composer = QVBoxLayout(self.composer)
+        composer.setContentsMargins(10, 8, 10, 8)
+        composer.setSpacing(4)
+        layout.addWidget(self.composer)
+        composer.addWidget(self.input)
         self.attachment_label = label("", True)
         self.attachment_label.hide()
-        layout.addWidget(self.attachment_label)
+        composer.addWidget(self.attachment_label)
         model_row = QHBoxLayout()
         model_row.setSpacing(6)
         self.model = QComboBox()
@@ -631,7 +638,7 @@ class AgentPanel(QFrame):
         self.effort.currentIndexChanged.connect(self.effort_selected)
         model_row.addWidget(self.model, 3)
         model_row.addWidget(self.effort, 2)
-        layout.addLayout(model_row)
+        composer.addLayout(model_row)
         controls = QHBoxLayout()
         self.attach_button = button("Attach", self.attach)
         self.attach_button.setAccessibleName(f"Attach files to {ROLE_NAMES[agent]}")
@@ -639,6 +646,16 @@ class AgentPanel(QFrame):
         self.clear_attach_button.hide()
         controls.addWidget(self.attach_button)
         controls.addWidget(self.clear_attach_button)
+        self.approval_button = QToolButton()
+        self.approval_button.setObjectName("ghost")
+        self.approval_button.setAccessibleName(f"{ROLE_NAMES[agent]} 核准方式")
+        self.approval_button.setPopupMode(QToolButton.InstantPopup)
+        approval_menu = QMenu(self.approval_button)
+        for mode in approvals.MODES:
+            approval_menu.addAction(approvals.MODE_LABELS[mode], lambda checked=False, mode=mode: window.set_approval_mode(agent, mode))
+        self.approval_button.setMenu(approval_menu)
+        self.approval_button.setVisible(agent != "dot")
+        controls.addWidget(self.approval_button)
         controls.addStretch()
         self.stop_button = button("Stop", self.stop, "stop")
         self.stop_button.setAccessibleName(f"Stop {ROLE_NAMES[agent]}")
@@ -646,7 +663,7 @@ class AgentPanel(QFrame):
         self.send_button = button("Send", self.send, "primary")
         self.send_button.setAccessibleName(f"Send to {ROLE_NAMES[agent]}")
         controls.addWidget(self.send_button)
-        layout.addLayout(controls)
+        composer.addLayout(controls)
         self.update_capabilities({})
 
     def show_capabilities(self):
@@ -984,6 +1001,7 @@ class AgentPanel(QFrame):
         self.attach_button.setEnabled(ready and files_supported)
         self.input.setAcceptDrops(files_supported and not self.monitor)
         self.pending_review.setEnabled(bool(cap.get("supports_approval")) and not self.monitor)
+        self.approval_button.setText({"ask": "每次都問", "edits": "自動核准編輯", "all": "自動核准全部"}[self.window.approval_mode(self.agent)])
         for card in self.approvals.values():
             for control in card.approval_actions:
                 control.setEnabled(bool(cap.get('supports_approval')) and not self.monitor and not card.historical and not card.approval_resolved)
@@ -1772,16 +1790,16 @@ class SessionNavigator(QWidget):
             heading = parent.font(0)
             heading.setBold(True)
             parent.setFont(0, heading)
-            parent.setForeground(1, QColor("#8c959f"))
+            parent.setForeground(1, QColor(MUTED_COLOR))
             self.tree.addTopLevelItem(parent)
             for session in rows:
                 child = QTreeWidgetItem([self.title_of(session) + ("（已封存）" if session["archived"] else ""),
                                          self.when(session["last_activity"])])
                 child.setData(0, Qt.UserRole, dict(session, kind="session"))
                 child.setToolTip(0, session["title"] + "\n" + session["cwd"] + ("" if session["cwd_exists"] else "\n資料夾已不存在"))
-                child.setForeground(1, QColor("#8c959f"))
+                child.setForeground(1, QColor(MUTED_COLOR))
                 if not session["cwd_exists"] or session["archived"]:
-                    child.setForeground(0, QColor("#8c959f"))
+                    child.setForeground(0, QColor(MUTED_COLOR))
                 if session["id"] == current:
                     font = child.font(0)
                     font.setBold(True)
@@ -1935,7 +1953,7 @@ class MainWindow(QMainWindow):
         self.resize(1530, 920)
         self.setMinimumSize(640, 420)
         QApplication.instance().setPalette(metal_palette())
-        self.setStyleSheet(build_style())
+        self.setStyleSheet(build_style(str(core.get_setting("ui.theme", "desktop"))))
         root = QWidget()
         root.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
         layout = QVBoxLayout(root)
@@ -3014,6 +3032,7 @@ class MainWindow(QMainWindow):
                 return
         self.core.set_setting("agent." + agent, dict(self.core.get_setting("agent." + agent, {}) or {}, approval_mode=mode))
         self.footer.setText(ROLE_NAMES[agent] + " 核准方式：" + approvals.MODE_LABELS[mode])
+        self.panels[agent].update_controls()
 
     def auto_approve(self, agent, event, request_id):
         """Answer a request without asking when the user's chosen mode or an "always allow" rule covers it."""
