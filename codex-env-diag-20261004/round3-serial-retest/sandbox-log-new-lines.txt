@@ -1,0 +1,24 @@
+##### sandbox.2026-10-04.log (from byte 9736)
+[2026-10-04 23:59:19.839 codex.exe] START: C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -Command try { [Console]::OutputEncoding=[System.Text.Encoding]::UTF8 } catch {}
+git rev-parse --show-toplevel
+[2026-10-04 23:59:19.974 codex.exe] setup refresh: spawning C:\Users\ryant\AppData\Local\nvm\v24.15.0\node_modules\@openai\codex\node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\codex-resources\codex-windows-sandbox-setup.exe (cwd=C:\Users\ryant\Desktop\codex-env-diag-20261004\test-repo, payload_len=4040)
+[2026-10-04T15:59:20.290652+00:00] read-acl-only mode: applying read ACLs
+[2026-10-04T15:59:20.293698700+00:00] granting read ACE to C:\Users\ryant\.claude.json for sandbox users
+[2026-10-04T15:59:20.301342900+00:00] read ACL run completed
+[2026-10-04T15:59:21.167210900+00:00] setup refresh: processed 0 write roots (read roots delegated); errors=[]
+[2026-10-04 23:59:21.167 codex-windows-sandbox-setup.exe] setup binary completed
+[2026-10-04 23:59:21.280 codex.exe] helper copy: validating command-runner source=C:\Users\ryant\AppData\Local\nvm\v24.15.0\node_modules\@openai\codex\node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\codex-resources\codex-command-runner.exe destination=C:\Users\ryant\.codex\.sandbox-bin\codex-command-runner-0.156.0.exe
+[2026-10-04 23:59:21.281 codex.exe] helper copy: reused command-runner source=C:\Users\ryant\AppData\Local\nvm\v24.15.0\node_modules\@openai\codex\node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\codex-resources\codex-command-runner.exe destination=C:\Users\ryant\.codex\.sandbox-bin\codex-command-runner-0.156.0.exe
+[2026-10-04 23:59:21.281 codex.exe] helper launch resolution: using copied command-runner path C:\Users\ryant\.codex\.sandbox-bin\codex-command-runner-0.156.0.exe
+[2026-10-04 23:59:21.391 codex-command-runner-0.156.0.exe] hide users: failed to hide current user profile dir (C:\Users\Default): SetFileAttributesW failed for C:\Users\Default: 5 (存取被拒。)
+[2026-10-04 23:59:25.137 codex.exe] START: C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -Command try { [Console]::OutputEncoding=[System.Text.Encoding]::UTF8 } catch {}
+git status --short
+[2026-10-04 23:59:25.253 codex.exe] setup refresh: spawning C:\Users\ryant\AppData\Local\nvm\v24.15.0\node_modules\@openai\codex\node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\codex-resources\codex-windows-sandbox-setup.exe (cwd=C:\Users\ryant\Desktop\codex-env-diag-20261004\test-repo, payload_len=4040)
+[2026-10-04T15:59:25.525195800+00:00] read-acl-only mode: applying read ACLs
+[2026-10-04T15:59:25.534678900+00:00] read ACL run completed
+[2026-10-04T15:59:26.092823200+00:00] setup refresh: processed 0 write roots (read roots delegated); errors=[]
+[2026-10-04 23:59:26.092 codex-windows-sandbox-setup.exe] setup binary completed
+[2026-10-04 23:59:26.208 codex.exe] helper copy: validating command-runner source=C:\Users\ryant\AppData\Local\nvm\v24.15.0\node_modules\@openai\codex\node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\codex-resources\codex-command-runner.exe destination=C:\Users\ryant\.codex\.sandbox-bin\codex-command-runner-0.156.0.exe
+[2026-10-04 23:59:26.209 codex.exe] helper copy: reused command-runner source=C:\Users\ryant\AppData\Local\nvm\v24.15.0\node_modules\@openai\codex\node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\codex-resources\codex-command-runner.exe destination=C:\Users\ryant\.codex\.sandbox-bin\codex-command-runner-0.156.0.exe
+[2026-10-04 23:59:26.209 codex.exe] helper launch resolution: using copied command-runner path C:\Users\ryant\.codex\.sandbox-bin\codex-command-runner-0.156.0.exe
+[2026-10-04 23:59:26.298 codex-command-runner-0.156.0.exe] hide users: failed to hide current user profile dir (C:\Users\Default): SetFileAttributesW failed for C:\Users\Default: 5 (存取被拒。)
