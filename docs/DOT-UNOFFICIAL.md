@@ -64,3 +64,12 @@ Further primary-source inspection shows `resolve_dot` compares `item.id == dot_i
 Literal `--dot-id=VALUE` and `--before=VALUE` arguments are used both into the bounded launcher and into unchanged CLI, preserving leading dashes and base64 punctuation without introducing flags. Shell is disabled. Workspace never places this identifier in a URL. The pinned CLI's original `assert_allowed(method,path)` remains unchanged and is the first request step before header construction/network; unsafe room-creation paths are rejected there. CLI endpoint/auth policy is not relaxed. A source-AST regression verifies that ordering. Labels are plain text. The source-derived fixture now uses `opaque-prefix:YWJj+/==`, explicitly synthetic, proving parse/real modal/save/reload/Connect-enabled without live Connect. Actual-account fixture remains BLOCKED until the human-provided ID is obtained.
 
 Installed source is updated, but existing windows retain their loaded code. Leave the current handoff window unchanged to Copy native ID; after the actual-ID fixture passes, reopen an updated Python window to apply the final opaque validator. No window is auto-closed, no data is overwritten, no live operation is triggered by development.
+
+## Automatic collaboration runs (2026-10-06)
+
+The statements above about one-use consent, no polling and no relay describe manual use and remain true for it.
+The one exception is a user-started automatic collaboration run: the start dialog shows the disclosure and asks
+for a run-scoped authorisation. While that run is active the workspace may send to and read from the selected
+Dot without further prompts (reads about every 10 seconds, at most 400 requests). The authorisation covers only
+`send` and `messages` for the selected Dot, never `list` or `connect`, and is revoked when the run ends, is
+stopped, or the Dot disconnects. See `docs/DESIGN-auto-collab.md`.

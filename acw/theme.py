@@ -49,6 +49,8 @@ QToolButton#ghost { color: #8c959f; background: transparent; border: none; borde
 QToolButton#ghost:hover, QToolButton#ghost:pressed { color: #ffffff; background: #20262d; padding: 1px 6px; }
 QFrame#event { border: none; background: transparent; }
 QFrame#event_approval { border: 1px solid #6a5a2a; border-radius: 6px; background: #1d1a12; }
+QFrame#run_bar { background: #10151b; border: 1px solid #2f6fb8; border-radius: 6px; }
+QLabel#run_status { color: #cfe3fb; font-weight: 600; }
 QFrame#activity { border: none; border-left: 2px solid #2c333b; background: transparent; }
 QFrame#event QPlainTextEdit, QFrame#event_approval QPlainTextEdit { background: #07090b; border: 1px solid #20262d; border-radius: 4px; }
 

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 from .presentation import (session_identity, session_display, local_session_displays,
                            project_label, task_label, compact)
+from .orchestrator import Orchestrator
 from .theme import EVENT_COLOR, HEADING_COLOR, STATE_COLORS, STATE_IDLE, build_style, metal_palette
 
 from PySide6.QtCore import Qt, Signal, QObject, QRunnable, QThreadPool, QTimer, QUrl, QByteArray
@@ -1925,6 +1926,9 @@ class MainWindow(QMainWindow):
         self.layout_mode.setToolTip("自動布局：窄視窗顯示一個角色，空間足夠時顯示三欄")
         self.layout_mode.currentIndexChanged.connect(self.update_workspace_layout)
         heading.addWidget(self.layout_mode)
+        self.auto_button = button("自動協作…", self.start_auto_collab, "auto_collab")
+        self.auto_button.setToolTip("Claude 規劃與最終審查 · G8毛 轉交並審查 · Codex 實作")
+        heading.addWidget(self.auto_button)
         self.details_toggle = button("Work details", self.toggle_details, "details_toggle")
         self.details_toggle.setCheckable(True)
         self.details_toggle.setToolTip("工具、命令、變更、測試、時間線與交接 · Ctrl+Shift+D")
@@ -1943,6 +1947,24 @@ class MainWindow(QMainWindow):
         workspace_menu.setMenu(menu)
         heading.addWidget(workspace_menu)
         layout.addLayout(heading)
+        self.orchestrator = None
+        self.run_bar = QFrame()
+        self.run_bar.setObjectName("run_bar")
+        run_row = QHBoxLayout(self.run_bar)
+        run_row.setContentsMargins(12, 6, 8, 6)
+        self.run_status = label("")
+        self.run_status.setObjectName("run_status")
+        self.run_status.setWordWrap(False)
+        self.run_status.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        run_row.addWidget(self.run_status, 1)
+        self.run_stop = button("Stop", self.stop_auto_collab, "stop")
+        run_row.addWidget(self.run_stop)
+        self.run_close = button("Close", self.run_bar.hide)
+        run_row.addWidget(self.run_close)
+        self.run_bar.hide()
+        layout.addWidget(self.run_bar)
+        self.run_timer = QTimer(self)
+        self.run_timer.timeout.connect(self.tick_auto_collab)
         self.workspace_splitter = QSplitter(Qt.Horizontal)
         self.workspace_splitter.setChildrenCollapsible(False)
         self.sidebar = QFrame()
@@ -2637,6 +2659,110 @@ class MainWindow(QMainWindow):
         self._preferred_agent = agent
         self.role_tabs.setCurrentIndex(AGENTS.index(agent))
         self.session_tabs.setCurrentIndex(AGENTS.index(agent))
+
+    def start_auto_collab(self):
+        if self.orchestrator and self.orchestrator.active:
+            self.show_error("已有一個自動協作正在執行。")
+            return
+        if self.mode.currentData() == "Monitor":
+            self.show_error("監看模式下不能啟動自動協作。")
+            return
+        from .adapters.dot import DISCLOSURE
+        dialog = QDialog(self)
+        dialog.setObjectName("auto_collab_dialog")
+        dialog.setWindowTitle("自動協作")
+        dialog.resize(680, 560)
+        form = QVBoxLayout(dialog)
+        form.addWidget(label("Claude 規劃 → G8毛 審查並轉交 → Codex 實作 → G8毛 審查 → Claude 最終審查。"
+                             "不通過會自動再來一輪，直到通過或達到回合上限。", True))
+        task = QPlainTextEdit()
+        task.setObjectName("auto_task")
+        task.setPlaceholderText("要完成的任務…")
+        form.addWidget(task, 1)
+        row = QHBoxLayout()
+        row.addWidget(label("回合上限"))
+        rounds = QSpinBox()
+        rounds.setObjectName("auto_rounds")
+        rounds.setRange(1, 10)
+        rounds.setValue(3)
+        row.addWidget(rounds)
+        row.addStretch()
+        form.addLayout(row)
+        form.addWidget(label("工具核准不會自動：任何角色要求核准時流程會暫停等你。任何錯誤、逾時或回覆格式不符也會暫停。", True))
+        form.addWidget(label("G8毛 授權（僅限這一次執行）\n" + DISCLOSURE +
+                             "\nDuring this run the workspace sends to and reads from the selected Dot automatically, "
+                             "reading about every 10 seconds, up to 400 requests. This is automated use of an unofficial "
+                             "interface with your ChatGPT login and may lead to rate limiting or account restrictions.", True))
+        consent = QCheckBox("我了解上述風險，授權這一次執行自動對 G8毛 傳送與讀取")
+        consent.setObjectName("auto_consent")
+        form.addWidget(consent)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        start = buttons.button(QDialogButtonBox.Ok)
+        start.setText("開始")
+        buttons.button(QDialogButtonBox.Cancel).setText("取消")
+        def ready():
+            start.setEnabled(consent.isChecked() and bool(task.toPlainText().strip()))
+        consent.toggled.connect(ready)
+        task.textChanged.connect(ready)
+        ready()
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addWidget(buttons)
+        if dialog.exec() == QDialog.Accepted:
+            self.run_auto_collab(task.toPlainText(), rounds.value())
+
+    def run_auto_collab(self, task, rounds, consented=True):
+        """Start one bounded run. `consented` is the user's run-scoped G8毛 authorisation from the dialog."""
+        if not consented:
+            return
+        dot = self.core.adapters["dot"]
+        def dispatch(operation, done, failed):
+            self.run(operation, done, on_error=failed)
+        try:
+            run = Orchestrator(self.core, task, dispatch, max_rounds=rounds,
+                               has_pending_approval=lambda: any(panel.pending_approval_events for panel in self.panels.values()))
+            if getattr(dot, "state", "") == "Connected" and hasattr(dot, "grant_run"):
+                dot.grant_run(400)
+            self.orchestrator = run
+            run.start()
+        except Exception as exc:
+            self.orchestrator = None
+            if hasattr(dot, "revoke_run"):
+                dot.revoke_run()
+            self.show_error(str(exc))
+            return
+        self.set_auto_collab_lock(True)
+        self.run_bar.show()
+        self.run_timer.start(500)
+        self.tick_auto_collab()
+
+    def set_auto_collab_lock(self, locked):
+        # A run must keep talking to the same task; switching context mid-run would misroute messages.
+        for control in (self.project_combo, self.task_combo, self.navigator, self.auto_button):
+            control.setEnabled(not locked)
+        self.run_stop.setVisible(locked)
+        self.run_close.setVisible(not locked)
+
+    def tick_auto_collab(self):
+        run = self.orchestrator
+        if not run:
+            return
+        if run.active:
+            run.tick()
+        self.run_status.setText(run.status())
+        self.run_status.setToolTip(run.status())
+        if not run.active:
+            self.run_timer.stop()
+            dot = self.core.adapters.get("dot")
+            if hasattr(dot, "revoke_run"):
+                dot.revoke_run()
+            self.set_auto_collab_lock(False)
+            self.reload_context()
+
+    def stop_auto_collab(self):
+        if self.orchestrator and self.orchestrator.active:
+            self.orchestrator.stop()
+        self.tick_auto_collab()
 
     def require_project(self, reason):
         box = QMessageBox(QMessageBox.Question, "需要專案", "", QMessageBox.Yes | QMessageBox.No, self)

@@ -67,9 +67,24 @@ class DotAdapter(Adapter):
         if action not in ('list','connect','messages','send'): raise ValueError('Invalid Dot action')
         if self.state=='Busy': raise RuntimeError('Wait for this request; backend Stop Unsupported')
         self._ticket=(action,self.target)
+    def grant_run(self,budget):
+        """Run-scoped consent given once by the user for one automatic collaboration run.
+
+        Covers reads and sends to the selected Dot only, up to `budget` requests, until revoke_run()."""
+        if not self.target or self.state!='Connected': raise RuntimeError('Connect selected Dot first')
+        self._run_grant={'target':self.target,'remaining':max(1,min(int(budget),1000))}
+    def revoke_run(self):
+        self._run_grant=None
     def _call(self,action,operation,hold_busy=False,**kwargs):
         ticket,self._ticket=self._ticket,None
-        if ticket!=(action,self.target): raise PermissionError('One-use local human consent required for this Dot action')
+        if ticket!=(action,self.target):
+            grant=getattr(self,'_run_grant',None)
+            if not grant or action not in ('messages','send') or grant['target']!=self.target:
+                raise PermissionError('One-use local human consent required for this Dot action')
+            if grant['remaining']<=0:
+                self._run_grant=None
+                raise PermissionError('Automatic run request budget for this Dot is used up')
+            grant['remaining']-=1
         if operation!='list' and not self.target: raise ValueError('Select Dot first')
         previous=self.state;self.set_state('Busy')
         try:
@@ -135,7 +150,7 @@ class DotAdapter(Adapter):
         return True
     def disconnect(self):
         if self.state=='Busy': raise RuntimeError('Wait for this request; no server cancellation')
-        self._ticket=None;super().disconnect()
+        self._ticket=None;self._run_grant=None;super().disconnect()
     def create_session(self): raise NotImplementedError('New independent Dot chat session Unsupported')
     def resume_session(self,session_id):
         if self.state!='Connected' or session_id!=self.target: raise RuntimeError('Connect selected Dot before mapping this task')
