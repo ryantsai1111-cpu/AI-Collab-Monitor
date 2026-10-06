@@ -24,6 +24,16 @@ def main():
         QMessageBox.information(None,'Workspace already open','This data directory is already open. Use the existing window.');return 1
     core=WorkspaceCore(args.data_dir)
     if core.get_setting('ui.sidebar_page') is None: core.set_setting('ui.sidebar_page','nav')
+    seed=ROOT/'config'/'local-llm.json'
+    if seed.is_file():
+        # Optional machine-local Local LLM settings; the file wins so it can be edited by hand.
+        import json
+        try:
+            values=json.loads(seed.read_text(encoding='utf-8'))
+            allowed={k:values[k] for k in ('harness','base_url','model','api_key_env','max_output_tokens','enabled') if k in values}
+            if allowed.get('model'): allowed['default_model']=allowed['model']
+            core.set_setting('agent.local',dict(core.get_setting('agent.local',{}) or {},**allowed))
+        except (OSError,ValueError): pass
     local=Path(os.environ.get('LOCALAPPDATA',''))
     claudes=list((local/'Packages'/'Claude_pzs8sxrjxfjjc'/'LocalCache'/'Roaming'/'Claude'/'claude-code').glob('*/*/claude.exe'))
     codexes=list((local/'OpenAI'/'Codex'/'bin').glob('*/codex.exe'))

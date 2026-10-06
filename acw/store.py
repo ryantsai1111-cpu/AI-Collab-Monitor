@@ -221,8 +221,10 @@ class Store:
                     continue
                 if path in active or path.is_symlink() or not path.is_file():
                     continue
-                if not path.resolve().is_relative_to(self.raw_dir):
-                    raise PermissionError('Retention path escaped workspace raw directory')
+                if not path.resolve().is_relative_to(self.raw_dir.resolve()):
+                    # Never touch a segment that resolves elsewhere. This also happens harmlessly when
+                    # Windows redirects AppData for a packaged parent app, so skip instead of failing startup.
+                    continue
                 source_name = path.name[:-3] if path.name.endswith('.gz') else path.name
                 reference = 'raw/'+source_name
                 if path.stat().st_mtime < cutoff:

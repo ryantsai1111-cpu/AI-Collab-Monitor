@@ -26,3 +26,6 @@ node_modules/
 # Archives and third-party binaries do not belong in the repo
 *.zip
 *.exe
+
+# Machine-specific Local LLM endpoint
+config/local-llm.json
