@@ -2686,7 +2686,14 @@ class MainWindow(QMainWindow):
         rounds.setRange(1, 10)
         rounds.setValue(3)
         row.addWidget(rounds)
-        row.addStretch()
+        row.addSpacing(16)
+        row.addWidget(label("Local LLM"))
+        local_role = QComboBox()
+        local_role.setObjectName("auto_local_role")
+        local_role.addItem("不加入", None)
+        local_role.addItem("第二意見（實作後多審一次，不會擋流程）", "reviewer")
+        local_role.addItem("擔任實作者（取代 Codex）", "implementer")
+        row.addWidget(local_role, 1)
         form.addLayout(row)
         form.addWidget(label("工具核准不會自動：任何角色要求核准時流程會暫停等你。任何錯誤、逾時或回覆格式不符也會暫停。", True))
         form.addWidget(label("G8毛 授權（僅限這一次執行）\n" + DISCLOSURE +
@@ -2709,9 +2716,9 @@ class MainWindow(QMainWindow):
         buttons.rejected.connect(dialog.reject)
         form.addWidget(buttons)
         if dialog.exec() == QDialog.Accepted:
-            self.run_auto_collab(task.toPlainText(), rounds.value())
+            self.run_auto_collab(task.toPlainText(), rounds.value(), local_role=local_role.currentData())
 
-    def run_auto_collab(self, task, rounds, consented=True):
+    def run_auto_collab(self, task, rounds, consented=True, local_role=None):
         """Start one bounded run. `consented` is the user's run-scoped G8毛 authorisation from the dialog."""
         if not consented:
             return
@@ -2719,7 +2726,7 @@ class MainWindow(QMainWindow):
         def dispatch(operation, done, failed):
             self.run(operation, done, on_error=failed)
         try:
-            run = Orchestrator(self.core, task, dispatch, max_rounds=rounds,
+            run = Orchestrator(self.core, task, dispatch, max_rounds=rounds, local_role=local_role,
                                has_pending_approval=lambda: any(panel.pending_approval_events for panel in self.panels.values()))
             if getattr(dot, "state", "") == "Connected" and hasattr(dot, "grant_run"):
                 dot.grant_run(400)

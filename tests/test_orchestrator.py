@@ -65,6 +65,9 @@ class OrchestratorTests(unittest.TestCase):
         self.temp.cleanup()
 
     def build(self, script=None, **options):
+        if hasattr(self, "core"):
+            self.core.close()  # a test may build more than one workspace in the same folder
+            del self.core
         script = dict(HAPPY, **(script or {}))
         self.adapters = {agent: Scripted(agent, script.get(agent, [])) for agent in AGENTS}
         self.core = WorkspaceCore(Path(self.temp.name) / "data", self.adapters)
@@ -74,7 +77,7 @@ class OrchestratorTests(unittest.TestCase):
         project = self.core.create_project("Auto", Path(self.temp.name) / "repo")
         self.core.select_project(project["id"], sync=False)
         self.core.create_task("auto task")
-        for agent in ("claude", "dot", "codex"):
+        for agent in AGENTS:
             self.adapters[agent].core = self.core
             self.adapters[agent].state = "Connected"
         def dispatch(operation, done, failed):
@@ -185,7 +188,6 @@ class OrchestratorTests(unittest.TestCase):
         self.advance(30)
         self.assertEqual(("paused", "G8毛 逾時未回覆"), (run.state, run.reason))
         self.assertLessEqual(sum(call[0] == "read" for call in self.adapters["dot"].calls), 8)
-        self.core.close()
         run = self.build()
         self.adapters["codex"].fail = "backend exploded"
         run.start()
@@ -217,6 +219,59 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual([("claude", 0), ("dot", 0), ("codex", 0)], self.sends())
         with self.assertRaises(ValueError):
             Orchestrator(self.core, "   ", lambda *a: None)
+
+    def test_local_llm_second_opinion_is_attached_to_what_g8_reviews(self):
+        run = self.build({"local": ["VERDICT: CONCERNS\n少了測試"]}, local_role="reviewer")
+        run.start()
+        self.advance()
+        self.assertEqual("done", run.state)
+        self.assertIn("回報 R", self.adapters["local"].sent[0])
+        review = self.adapters["dot"].sent[1]
+        self.assertIn("回報 R", review)
+        self.assertIn("Local LLM 第二意見（CONCERNS）", review)
+        self.assertIn("少了測試", review)
+        self.assertEqual(1, len(self.adapters["codex"].sent))
+
+    def test_local_llm_second_opinion_never_blocks_the_run(self):
+        for problem in ("no verdict", "timeout", "offline", "error"):
+            with self.subTest(problem=problem):
+                run = self.build({"local": ["沒有判定的回覆"] if problem == "no verdict" else []},
+                                 local_role="reviewer", timeouts={"local": 30})
+                local = self.adapters["local"]
+                if problem == "error":
+                    local.fail = "local server down"
+                run.start()
+                if problem == "offline":
+                    for _ in range(10):
+                        self.clock[0] += 11
+                        run.tick()
+                        if run.step == "local_review" and run._waiting == "local":
+                            local.state = "Error"
+                            break
+                self.advance()
+                self.assertEqual(("done", "Claude 最終審查通過"), (run.state, run.reason))
+                self.assertIn("回報 R", self.adapters["dot"].sent[1])
+                self.assertIn("未提供", self.adapters["dot"].sent[1])
+
+    def test_local_llm_as_implementer_replaces_codex(self):
+        run = self.build({"local": ["VERDICT: IMPLEMENTED\n本地回報 L"]}, local_role="implementer")
+        self.adapters["codex"].state = "Disconnected"
+        run.start()
+        self.advance()
+        self.assertEqual("done", run.state)
+        self.assertEqual([], self.adapters["codex"].sent)
+        self.assertIn("交接單 G1", self.adapters["local"].sent[0])
+        self.assertIn("本地回報 L", self.adapters["dot"].sent[1])
+        self.assertIn("Local LLM 實作", run.names["implement"])
+
+    def test_local_llm_must_be_connected_when_it_takes_part(self):
+        run = self.build(local_role="reviewer")
+        self.adapters["local"].state = "Disconnected"
+        with self.assertRaises(RuntimeError) as raised:
+            run.start()
+        self.assertIn("Local LLM", str(raised.exception))
+        with self.assertRaises(ValueError):
+            self.build(local_role="boss")
 
     def test_switching_task_mid_run_pauses(self):
         run = self.build()
@@ -341,7 +396,7 @@ class WindowRunTests(unittest.TestCase):
         self.adapters["codex"].state = "Disconnected"
         self.window.run_auto_collab("任務", 3)
         self.assertIsNone(self.window.orchestrator)
-        self.assertIn("codex", self.window.reported_errors[-1])
+        self.assertIn("Codex", self.window.reported_errors[-1])
         self.assertEqual(("revoke",), self.grants[-1])
         self.assertTrue(self.window.task_combo.isEnabled())
         self.window.reported_errors.clear()

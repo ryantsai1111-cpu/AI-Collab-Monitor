@@ -12,7 +12,7 @@ import time
 
 VERDICT = re.compile(r'^\s*\**\s*VERDICT\s*[:：]\s*\**\s*([A-Z_]+)', re.MULTILINE)
 MAX_FORWARD_CHARS = 12000
-TIMEOUTS = {'claude': 900, 'codex': 1800, 'dot': 1200}
+TIMEOUTS = {'claude': 900, 'codex': 1800, 'dot': 1200, 'local': 900}
 DOT_POLL_SECONDS = 10
 
 PROMPTS = {
@@ -30,6 +30,8 @@ PROMPTS = {
                     '第一行寫 `VERDICT: PASS` 或 `VERDICT: CONCERNS`，接著寫給最終審查者 Claude 的審查請求，包含你的發現。\n\n---\n{body}'),
     'final_review': ('【自動協作 · 最終審查】\n原始任務：{task}\n\n請審查目前專案資料夾中的實作。只讀，不要修改任何檔案。以下是 G8毛 的審查意見。\n'
                      '通過寫 `VERDICT: APPROVED`；需修改寫 `VERDICT: CHANGES_REQUESTED` 並列出具體修改項。第一行必須是判定。\n\n---\n{body}'),
+    'local_review': ('【自動協作 · 本地模型第二意見】\n原始任務：{task}\n\n請檢查目前專案資料夾中的實作。只讀，不要修改任何檔案。以下是實作者的回報。\n'
+                     '第一行寫 `VERDICT: PASS` 或 `VERDICT: CONCERNS`，接著簡短列出你的發現。\n\n---\n{body}'),
     'relay_changes': ('【自動協作 · 轉交修改意見】\n以下是 Claude 的最終審查意見。請改寫成給實作者 Codex 的修改交接單（自足，含驗收條件）。\n'
                       '第一行寫 `VERDICT: PASS`。\n\n---\n{body}'),
 }
@@ -43,10 +45,11 @@ STEPS = {
     'final_review': ('claude', {'APPROVED': '=Claude 最終審查通過', 'CHANGES_REQUESTED': 'relay_changes'}),
     'relay_changes': ('dot', {'PASS': 'implement'}),
 }
-STEP_NAMES = {'plan': 'Claude 規劃', 'replan': 'Claude 修訂計畫', 'review_plan': 'G8毛 審查計畫', 'implement': 'Codex 實作',
+STEP_NAMES = {'local_review': 'Local LLM 第二意見', 'plan': 'Claude 規劃', 'replan': 'Claude 修訂計畫', 'review_plan': 'G8毛 審查計畫', 'implement': 'Codex 實作',
               'review_work': 'G8毛 審查實作', 'final_review': 'Claude 最終審查', 'relay_changes': 'G8毛 轉交修改意見'}
 NEW_ROUND = ('replan', 'relay_changes')
-AGENTS = ('claude', 'dot', 'codex')
+LOCAL_ROLES = (None, 'reviewer', 'implementer')
+ROLE_NAMES = {'claude': 'Claude', 'dot': 'G8毛', 'codex': 'Codex', 'local': 'Local LLM'}
 
 
 def parse_verdict(text):
@@ -56,9 +59,26 @@ def parse_verdict(text):
 
 class Orchestrator:
     def __init__(self, core, task, dispatch, *, max_rounds=3, has_pending_approval=lambda: False,
-                 clock=time.monotonic, timeouts=None, dot_poll_seconds=DOT_POLL_SECONDS):
+                 clock=time.monotonic, timeouts=None, dot_poll_seconds=DOT_POLL_SECONDS, local_role=None):
         if not str(task).strip():
             raise ValueError('請輸入任務')
+        if local_role not in LOCAL_ROLES:
+            raise ValueError('Local LLM 的角色不正確')
+        # Local LLM joins on request: as the implementer instead of Codex, or as an advisory
+        # second opinion after the implementation. Its opinion never blocks the run.
+        self.local_role = local_role
+        self.steps = dict(STEPS)
+        self.names = dict(STEP_NAMES)
+        self.optional = set()
+        if local_role == 'implementer':
+            self.steps['implement'] = ('local', STEPS['implement'][1])
+            self.names['implement'] = 'Local LLM 實作'
+        elif local_role == 'reviewer':
+            self.steps['implement'] = ('codex', dict(STEPS['implement'][1], IMPLEMENTED='local_review'))
+            self.steps['local_review'] = ('local', {'PASS': 'review_work', 'CONCERNS': 'review_work'})
+            self.optional.add('local_review')
+        self.agents = tuple(dict.fromkeys(agent for agent, _ in self.steps.values()))
+        self._carry = ''
         self.core, self.task, self.dispatch = core, str(task).strip(), dispatch
         self.max_rounds = max(1, min(int(max_rounds), 10))
         self.has_pending_approval, self.clock = has_pending_approval, clock
@@ -78,9 +98,9 @@ class Orchestrator:
         task = self.core.current_task
         if not self.core.current_project or not task:
             raise ValueError('請先選擇專案與任務')
-        offline = [agent for agent in AGENTS if getattr(self.core.adapters.get(agent), 'state', '') != 'Connected']
+        offline = [agent for agent in self.agents if getattr(self.core.adapters.get(agent), 'state', '') != 'Connected']
         if offline:
-            raise RuntimeError('請先連線：' + '、'.join(offline))
+            raise RuntimeError('請先連線：' + '、'.join(ROLE_NAMES[agent] for agent in offline))
         self.task_id = task['id']
         self.state = 'running'
         self._note('started', f'自動協作開始 · 回合上限 {self.max_rounds}')
@@ -91,7 +111,7 @@ class Orchestrator:
             return
         waiting = self._waiting
         self._finish('stopped', reason)
-        if waiting in ('claude', 'codex') and getattr(self.core.adapters.get(waiting), 'state', '') == 'Busy':
+        if waiting in ('claude', 'codex', 'local') and getattr(self.core.adapters.get(waiting), 'state', '') == 'Busy':
             self.dispatch(lambda: self.core.stop(waiting), lambda _: None, lambda _: None)
 
     @property
@@ -101,7 +121,7 @@ class Orchestrator:
     def status(self):
         if self.state == 'running':
             wait = '等待核准 · ' if self._paused_at is not None else ''
-            return f'自動協作 · 第 {self.round}/{self.max_rounds} 回合 · {wait}{STEP_NAMES.get(self.step, "準備中")}'
+            return f'自動協作 · 第 {self.round}/{self.max_rounds} 回合 · {wait}{self.names.get(self.step, "準備中")}'
         prefix = {'done': '自動協作完成', 'stopped': '自動協作已停止', 'paused': '自動協作已暫停'}.get(self.state, '自動協作')
         return prefix + (' · ' + self.reason if self.reason else '')
 
@@ -122,14 +142,18 @@ class Orchestrator:
             self._calling = False
             done(result)
         def failed(error):
-            if self.state == 'running':
-                self._finish('paused', '發生錯誤：' + str(error)[:300])
+            if self.state != 'running':
+                return
+            if self.step in self.optional:
+                self._calling = False
+                return self._skip_optional('發生錯誤：' + str(error)[:200])
+            self._finish('paused', '發生錯誤：' + str(error)[:300])
         self.dispatch(operation, succeeded, failed)
 
     def _prepare_sessions(self):
         # Starting a run is the explicit action that maps each role to a conversation for this task.
         task = self.core.current_task
-        pending = [agent for agent in ('claude', 'codex') if not task.get(agent + '_session')]
+        pending = [agent for agent in self.agents if agent != 'dot' and not task.get(agent + '_session')]
         dot = self.core.adapters['dot']
         def step(_=None):
             if pending:
@@ -144,13 +168,19 @@ class Orchestrator:
     def _messages(self, agent):
         return [m for m in self.core.messages(self.task_id, agent) if m.get('role') == 'assistant' and m.get('status', 'complete') == 'complete']
 
+    def _skip_optional(self, reason):
+        # An advisory step that cannot answer is recorded and passed over; it never stops the run.
+        self._waiting = None
+        self._note('skipped', f'{self.names[self.step]} 未提供意見（{reason}），流程繼續')
+        self._send('review_work', self._carry + f'\n\n## Local LLM 第二意見\n未提供（{reason}）。')
+
     def _send(self, step, body):
-        agent = STEPS[step][0]
+        agent = self.steps[step][0]
         self.step = step
         if len(body) > MAX_FORWARD_CHARS:
             body = body[:MAX_FORWARD_CHARS] + f'\n\n…（內容過長已截斷，原長 {len(body)} 字元）'
         text = PROMPTS[step].format(task=self.task, body=body)
-        self._note('step', STEP_NAMES[step])
+        self._note('step', self.names[step])
         def sent(_):
             self._waiting = agent
             self._deadline = self.clock() + self.timeouts[agent]
@@ -183,7 +213,9 @@ class Orchestrator:
             return
         state = getattr(self.core.adapters.get(agent), 'state', '')
         if state in ('Error', 'Offline', 'Disconnected'):
-            return self._finish('paused', f'{agent} 連線狀態：{state}')
+            if self.step in self.optional:
+                return self._skip_optional(f'連線狀態：{state}')
+            return self._finish('paused', f'{ROLE_NAMES[agent]} 連線狀態：{state}')
         fresh = [m for m in self._messages(agent) if m['id'] not in self._seen]
         reply = '\n\n'.join(str(m['content']) for m in fresh)
         if agent == 'dot':
@@ -199,13 +231,17 @@ class Orchestrator:
         if state != 'Busy' and fresh:
             return self._advance(reply)
         if now >= self._deadline:
-            self._finish('paused', f'{agent} 逾時未完成')
+            if self.step in self.optional:
+                return self._skip_optional('逾時')
+            self._finish('paused', f'{ROLE_NAMES[agent]} 逾時未完成')
 
     def _advance(self, reply):
         self._waiting = None
-        verdict, routes = parse_verdict(reply), STEPS[self.step][1]
+        verdict, routes = parse_verdict(reply), self.steps[self.step][1]
         if verdict not in routes:
-            return self._finish('paused', f'{STEP_NAMES[self.step]} 的回覆沒有可用的判定（收到：{verdict or "無"}）')
+            if self.step in self.optional:
+                return self._skip_optional('回覆沒有可用的判定')
+            return self._finish('paused', f'{self.names[self.step]} 的回覆沒有可用的判定（收到：{verdict or "無"}）')
         target = routes[verdict]
         if target.startswith('='):
             return self._finish('done', target[1:])
@@ -216,4 +252,8 @@ class Orchestrator:
                 return self._finish('done', f'已達回合上限 {self.max_rounds}，最後判定：{verdict}')
             self.round += 1
         body = VERDICT.sub('', reply, count=1).strip()
+        if target == 'local_review':
+            self._carry = body
+        elif self.step == 'local_review':
+            body = self._carry + f'\n\n## Local LLM 第二意見（{verdict}）\n' + body
         self._send(target, body)
