@@ -30,7 +30,7 @@ def main():
         import json
         try:
             values=json.loads(seed.read_text(encoding='utf-8'))
-            allowed={k:values[k] for k in ('harness','base_url','model','api_key_env','max_output_tokens','enabled') if k in values}
+            allowed={k:values[k] for k in ('harness','base_url','model','api_key_env','max_output_tokens','context_tokens','enabled') if k in values}
             if allowed.get('model'): allowed['default_model']=allowed['model']
             core.set_setting('agent.local',dict(core.get_setting('agent.local',{}) or {},**allowed))
         except (OSError,ValueError): pass

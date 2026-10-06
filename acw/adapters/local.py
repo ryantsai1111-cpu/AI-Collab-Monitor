@@ -181,6 +181,9 @@ class LocalClaudeAdapter(_LocalSettings, ClaudeAdapter):
         # Local servers have far smaller contexts than Claude Code assumes; an uncapped
         # request (128k output tokens) is rejected outright. No telemetry leaves this child.
         child_env['CLAUDE_CODE_MAX_OUTPUT_TOKENS'] = str(self._max_output_tokens())
+        if self._context_tokens():
+            # Tell Claude Code how large the local context really is, so it compacts in time.
+            child_env['CLAUDE_CODE_MAX_CONTEXT_TOKENS'] = str(self._context_tokens())
         child_env['CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC'] = '1'
         # Never leave this empty: Claude Code would then fall back to the stored
         # Anthropic login and send that real credential to the local endpoint.
@@ -192,6 +195,12 @@ class LocalClaudeAdapter(_LocalSettings, ClaudeAdapter):
             return max(256, min(int(self.settings.get('max_output_tokens') or 8192), 128000))
         except (TypeError, ValueError):
             return 8192
+
+    def _context_tokens(self):
+        try:
+            return max(0, min(int(self.settings.get('context_tokens') or 0), 10000000))
+        except (TypeError, ValueError):
+            return 0
 
     def _discover(self, handshake):
         super()._discover(handshake)

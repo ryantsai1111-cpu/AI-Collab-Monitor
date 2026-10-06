@@ -90,8 +90,10 @@ class LocalAdapterTests(unittest.TestCase):
             # Claude Code otherwise asks for 128k output tokens, which a small local context rejects.
             self.assertEqual('8192', env['CLAUDE_CODE_MAX_OUTPUT_TOKENS'])
             self.assertEqual('1', env['CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC'])
-            capped = self.adapter(LocalClaudeAdapter, max_output_tokens=4000)
+            capped = self.adapter(LocalClaudeAdapter, max_output_tokens=4000, context_tokens=65536)
             self.assertEqual('4000', capped._process_env()['CLAUDE_CODE_MAX_OUTPUT_TOKENS'])
+            self.assertEqual('65536', capped._process_env()['CLAUDE_CODE_MAX_CONTEXT_TOKENS'])
+            self.assertNotIn('CLAUDE_CODE_MAX_CONTEXT_TOKENS', env)
             self.assertNotIn('parent-fixture', json.dumps(env))
 
     def test_missing_endpoint_or_model_is_offline_without_any_process(self):
