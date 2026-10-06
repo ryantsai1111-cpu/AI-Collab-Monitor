@@ -334,6 +334,65 @@ class WorkspaceCore:
         self._record('session_imported',agent,task_id=None,session_id=session_id,content='Native session metadata imported; explicit Resume is still required.')
         return self.store.get('sessions',identity)
 
+    def desktop_sessions(self):
+        """Explicit picker read of the Claude desktop app's local session list (metadata only)."""
+        from .desktop_sessions import list_desktop_sessions
+        return sanitize(list_desktop_sessions())
+
+    def _project_for_directory(self,directory):
+        directory=Path(directory)
+        if not directory.is_dir(): raise ValueError('此對話的資料夾已不存在：'+str(directory))
+        directory=directory.resolve()
+        for project in self.list_projects():
+            try:
+                if Path(project['repo_path']).resolve()==directory: return project
+            except OSError: continue
+        return self.create_project(directory.name or str(directory),directory)
+
+    def open_desktop_project(self,directory,title='新對話'):
+        """Select (or create) the project for a desktop folder and start a fresh task in it."""
+        self._assert_idle()
+        project=self._project_for_directory(directory)
+        self.select_project(project['id'])
+        task=self.create_task(title)
+        return {'project_id':project['id'],'task_id':task['id']}
+
+    def open_desktop_session(self,record,history_limit=200):
+        """Map one explicitly chosen desktop session to a project and task, with its visible history.
+
+        Never contacts the agent: resuming stays a separate explicit call."""
+        from .desktop_sessions import read_transcript, _valid_id
+        if not isinstance(record,dict): raise ValueError('Desktop session metadata must be an object')
+        session_id=str(record.get('id') or '').lower()
+        if not _valid_id(session_id): raise ValueError('Invalid Claude session identifier')
+        self._assert_idle()
+        project=self._project_for_directory(str(record.get('cwd') or ''))
+        self.select_project(project['id'])
+        title=sanitize(str(record.get('title') or session_id))[:200]
+        task=next((t for t in self.list_tasks(project_id=project['id']) if t.get('claude_session')==session_id),None)
+        if task: self.select_task(task['id'])
+        else: task=self.create_task(title)
+        identity={'agent':'claude','id':session_id}
+        fields=dict(task_id=task['id'],project_id=project['id'],title=title,cwd=project['repo_path'],updated_at=now())
+        if self.store.get('sessions',identity): self.store.update('sessions',identity,fields)
+        else: self.store.insert('sessions',dict(identity,**fields,created_at=now(),metadata={'source':'claude-desktop','imported_native':True}))
+        self.store.update('tasks',{'id':task['id']},{'claude_session':session_id,'updated_at':now()})
+        self._contexts.clear()
+        known={(m['role'],str(m['content']).strip()) for m in self.messages(task['id'],'claude')}
+        imported=0
+        for message in read_transcript(session_id,history_limit):
+            content=sanitize(message['content'])
+            message_id='desktop-'+session_id+'-'+message['id']
+            if not message['id'] or is_hidden_reasoning(content) or (message['role'],str(content).strip()) in known: continue
+            if self.store.get('messages',{'id':message_id}): continue
+            self.store.insert('messages',dict(id=message_id,task_id=task['id'],agent='claude',session_id=session_id,
+                role=message['role'],content=content,timestamp=message['timestamp'] or now(),status='complete',
+                metadata={'source':'claude-desktop','imported':True}))
+            imported+=1
+        self._record('session_imported','claude',task_id=task['id'],session_id=session_id,
+                     content=f'Claude desktop session opened; {imported} visible messages imported. Resume is a separate action.')
+        return {'project_id':project['id'],'task_id':task['id'],'session_id':session_id,'imported':imported}
+
     def _context(self,agent):
         if agent not in self._contexts:
             task=self.current_task or {}

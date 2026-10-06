@@ -334,6 +334,8 @@ class AgentPanel(QFrame):
         more = QMenu(self.more_button)
         more.addAction("對話…", lambda: window.show_sessions(agent))
         more.addAction("本機歷史…", self.show_session_history)
+        if agent == "claude":
+            more.addAction("Desktop 專案與對話…", window.show_desktop_sessions)
         more.addAction("能力詳情…", self.show_capabilities)
         more.addSeparator()
         more.addAction("原始事件…", lambda: window.show_agent_events(agent))
@@ -1418,6 +1420,121 @@ class NativeSessionDialog(QDialog):
         self.window.run(lambda: self.window.core.import_session(self.agent, record), imported, on_error=failed)
 
 
+class DesktopSessionsDialog(QDialog):
+    """Pick a Claude desktop project or conversation. Reading happens only after this is opened."""
+    def __init__(self, window):
+        super().__init__(window)
+        self.window = window
+        self.setObjectName("desktop_sessions_dialog")
+        self.setWindowTitle("Claude Desktop 專案與對話")
+        self.resize(900, 640)
+        layout = QVBoxLayout(self)
+        layout.addWidget(label("這裡列出 Claude Desktop 在本機保存的 Code 對話，依專案資料夾分組。"
+                               "選擇後會切換到該資料夾、載入可見的對話紀錄，並在 Claude 面板接續同一個對話。", True))
+        filters = QHBoxLayout()
+        self.search = QLineEdit()
+        self.search.setObjectName("desktop_session_search")
+        self.search.setPlaceholderText("搜尋對話標題或資料夾…")
+        self.search.textChanged.connect(self.fill)
+        filters.addWidget(self.search, 1)
+        self.archived = QCheckBox("顯示已封存")
+        self.archived.toggled.connect(self.fill)
+        filters.addWidget(self.archived)
+        layout.addLayout(filters)
+        self.tree = QTreeWidget()
+        self.tree.setObjectName("desktop_session_tree")
+        self.tree.setHeaderLabels(["專案／對話", "最後活動", "模型"])
+        self.tree.setAlternatingRowColors(True)
+        self.tree.setColumnWidth(0, 540)
+        self.tree.setColumnWidth(1, 130)
+        self.tree.currentItemChanged.connect(lambda *_: self.selection_changed())
+        self.tree.itemDoubleClicked.connect(lambda *_: self.open_selected(True))
+        layout.addWidget(self.tree, 1)
+        self.status = label("", True)
+        layout.addWidget(self.status)
+        layout.addWidget(label("注意：同一個對話不要同時在 Claude Desktop 和這裡傳送訊息，兩邊會寫入同一份紀錄。", True))
+        actions = QHBoxLayout()
+        self.new_button = button("在此專案開新對話", self.new_conversation, "desktop_new_conversation")
+        self.load_button = button("只載入紀錄", lambda: self.open_selected(False), "desktop_load_only")
+        self.open_button = button("開啟並接續對話", lambda: self.open_selected(True), "primary")
+        actions.addWidget(self.new_button)
+        actions.addStretch()
+        actions.addWidget(button("Close", self.reject))
+        actions.addWidget(self.load_button)
+        actions.addWidget(self.open_button)
+        layout.addLayout(actions)
+        self.sessions = []
+        self.selection_changed()
+
+    def load(self):
+        self.status.setText("正在讀取 Claude Desktop 的對話清單…")
+        def failed(error):
+            self.status.setText("無法讀取 Claude Desktop 對話：" + error)
+        self.window.run(self.window.core.desktop_sessions, self.set_sessions, on_error=failed)
+
+    def set_sessions(self, sessions):
+        self.sessions = list(sessions or [])
+        self.fill()
+
+    @staticmethod
+    def local_time(value):
+        try:
+            return datetime.fromisoformat(value).astimezone().strftime("%m-%d %H:%M")
+        except (TypeError, ValueError):
+            return ""
+
+    def fill(self, *_):
+        from .desktop_sessions import group_by_project
+        query = self.search.text().casefold().strip()
+        self.tree.clear()
+        shown = 0
+        for group in group_by_project(self.sessions):
+            rows = [s for s in group["sessions"] if (self.archived.isChecked() or not s["archived"])
+                    and (not query or query in (s["title"] + " " + s["cwd"]).casefold())]
+            if not rows:
+                continue
+            parent = QTreeWidgetItem([group["name"] + ("" if group["cwd_exists"] else "（資料夾不存在）"),
+                                      self.local_time(rows[0]["last_activity"]), f"{len(rows)} 個對話"])
+            parent.setData(0, Qt.UserRole, {"kind": "project", "cwd": group["cwd"], "cwd_exists": group["cwd_exists"]})
+            parent.setToolTip(0, group["cwd"])
+            self.tree.addTopLevelItem(parent)
+            for session in rows:
+                child = QTreeWidgetItem([session["title"] + ("（已封存）" if session["archived"] else ""),
+                                         self.local_time(session["last_activity"]), session["model"]])
+                child.setData(0, Qt.UserRole, dict(session, kind="session"))
+                child.setToolTip(0, session["cwd"] + "\n對話 ID：" + session["id"])
+                parent.addChild(child)
+            parent.setExpanded(bool(query) or self.tree.topLevelItemCount() <= 3)
+            shown += len(rows)
+        self.status.setText(f"共 {shown} 個對話" if self.sessions else "找不到 Claude Desktop 的本機對話。")
+        self.selection_changed()
+
+    def selected(self):
+        item = self.tree.currentItem()
+        return item.data(0, Qt.UserRole) if item else None
+
+    def selection_changed(self):
+        record = self.selected() or {}
+        usable = bool(record.get("cwd_exists")) and self.window.mode.currentData() != "Monitor"
+        self.open_button.setEnabled(usable and record.get("kind") == "session")
+        self.load_button.setEnabled(usable and record.get("kind") == "session")
+        self.new_button.setEnabled(usable)
+
+    def open_selected(self, resume):
+        record = self.selected() or {}
+        if record.get("kind") != "session" or not self.open_button.isEnabled():
+            return
+        self.accept()
+        self.window.open_desktop_session(record, resume)
+
+    def new_conversation(self):
+        record = self.selected() or {}
+        if not self.new_button.isEnabled():
+            return
+        self.accept()
+        self.window.new_desktop_conversation(record["cwd"])
+
+
 class HandoffDialog(QDialog):
     def __init__(self, window, message, target):
         super().__init__(window)
@@ -1597,6 +1714,7 @@ class MainWindow(QMainWindow):
         self.session_tabs.setDocumentMode(True)
         self.session_tabs.setAccessibleName("各角色對話")
         side.addWidget(self.session_tabs, 1)
+        side.addWidget(button("Desktop 專案與對話…", self.show_desktop_sessions, "desktop_sessions"))
         side.addWidget(button("Settings…", self.settings, "settings"))
         self.workspace_splitter.addWidget(self.sidebar)
         content = QWidget()
@@ -2146,6 +2264,49 @@ class MainWindow(QMainWindow):
             self.refresh_work_details()
         error_panel=next((panel for panel in self.panels.values() if panel.connection_state=='Error'),None)
         self.footer.setText('Error · '+error_panel.agent+' · '+error_panel.notice.text() if error_panel else self.last_event)
+
+    def show_desktop_sessions(self):
+        dialog = DesktopSessionsDialog(self)
+        dialog.load()
+        dialog.exec()
+
+    def _claude_ready(self):
+        if self.core.adapters["claude"].state != "Connected":
+            self.core.connect("claude")
+
+    def open_desktop_session(self, record, resume=True):
+        if not self.confirm_context_change():
+            return
+        def opened(result):
+            self.reload_context()
+            self.focus_role("claude")
+            self.footer.setText(f"已載入 Desktop 對話「{record.get('title', '')}」· 匯入 {result['imported']} 則可見訊息")
+            if resume:
+                self.panels["claude"].set_state("Connecting")
+                def continue_session():
+                    self._claude_ready()
+                    return self.core.resume_session("claude", result["session_id"])
+                self.run(continue_session, lambda _: (self.reload_context(), self.refresh_agent("claude")), "claude")
+        self.run(lambda: self.core.open_desktop_session(record), opened)
+
+    def new_desktop_conversation(self, directory):
+        if not self.confirm_context_change():
+            return
+        title = "新對話 " + datetime.now().strftime("%m-%d %H:%M")
+        def opened(_):
+            self.reload_context()
+            self.focus_role("claude")
+            self.panels["claude"].set_state("Connecting")
+            def start():
+                self._claude_ready()
+                return self.core.create_session("claude")
+            self.run(start, lambda _: (self.reload_context(), self.refresh_agent("claude")), "claude")
+        self.run(lambda: self.core.open_desktop_project(directory, title), opened)
+
+    def focus_role(self, agent):
+        self._preferred_agent = agent
+        self.role_tabs.setCurrentIndex(AGENTS.index(agent))
+        self.session_tabs.setCurrentIndex(AGENTS.index(agent))
 
     def require_project(self, reason):
         box = QMessageBox(QMessageBox.Question, "需要專案", "", QMessageBox.Yes | QMessageBox.No, self)

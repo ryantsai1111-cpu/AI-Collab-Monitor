@@ -24,6 +24,12 @@ python run.py
 
 `run.py` 會優先從同層的 `vendor/` 載入 PySide6（不進版控）；沒有 `vendor/` 時執行 `pip install -r requirements.txt`。
 
+## 接續 Claude Desktop 的對話
+
+側欄的「Desktop 專案與對話…」會列出 Claude Desktop 在本機保存的 Code 對話（依專案資料夾分組）。
+選擇後會切換到該資料夾、匯入可見的對話紀錄，並在 Claude 面板接續同一個對話。
+只在開啟這個視窗時才讀取，且只讀不寫。同一個對話不要同時在兩邊傳送訊息。
+
 ## 目錄
 
 | 路徑 | 內容 |

@@ -71,6 +71,9 @@ QSpinBox::down-button { subcontrol-position: bottom right; border-bottom-right-r
 QSpinBox::up-arrow { image: url("@ARROW_UP@"); width: 10px; height: 6px; }
 QSpinBox::down-arrow { image: url("@ARROW_DOWN@"); width: 10px; height: 6px; }
 QCheckBox { background: transparent; spacing: 7px; }
+QCheckBox::indicator { width: 14px; height: 14px; background: #0f1215; border: 1px solid #8a939d; border-radius: 3px; }
+QCheckBox::indicator:checked { background: #3482de; border-color: #cfe3fb; }
+QCheckBox::indicator:disabled { border-color: #4d545c; }
 
 QScrollArea { border: none; background: transparent; }
 QScrollArea > QWidget > QWidget { background: transparent; }
