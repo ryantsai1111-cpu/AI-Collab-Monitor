@@ -1,0 +1,6 @@
+{
+  "Script": "start-monitor.ps1",
+  "ExitCode": 1,
+  "Utc": "2026-10-04T16:36:09.6268010Z",
+  "Output": "C:\\Users\\ryant\\Desktop\\AI-Collab-Monitor\\start-monitor.ps1 : Monitor already running/pending. Run stop-monitor.ps1 firs\r\nt. Session be2c1e34d34c4db391f8c57e093d0ba4 is running or pending. Active lease: be2c1e34d34c4db391f8c57e093d0ba4/claud\r\ne Active lease: be2c1e34d34c4db391f8c57e093d0ba4/dot Active lease: be2c1e34d34c4db391f8c57e093d0ba4/codex Active lease:\r\n be2c1e34d34c4db391f8c57e093d0ba4/timeline\r\n    + CategoryInfo          : NotSpecified: (:) [Write-Error], WriteErrorException\r\n    + FullyQualifiedErrorId : Microsoft.PowerShell.Commands.WriteErrorException,start-monitor.ps1\r\n \r\n"
+}

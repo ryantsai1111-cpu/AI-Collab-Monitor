@@ -1,0 +1,4 @@
+{
+  "ExitCode": 0,
+  "Output": "Monitor readers stopped; all monitor leases released. No process was killed.\r\nIf Terminal keeps completed panes open, manually close ONLY the AI-Collab-Monitor window.\r\n"
+}

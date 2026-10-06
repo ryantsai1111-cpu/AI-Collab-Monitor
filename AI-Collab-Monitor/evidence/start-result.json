@@ -1,0 +1,6 @@
+{
+  "Script": "start-monitor.ps1",
+  "ExitCode": 0,
+  "Utc": "2026-10-04T16:36:08.9434012Z",
+  "Output": "AI-Collab-Monitor v0.1 started: be2c1e34d34c4db391f8c57e093d0ba4\r\nSingle window: CLAUDE | DOT | CODEX above full-width TIMELINE.\r\nAll four reader leases are active. UI visibility must be checked separately.\r\n"
+}

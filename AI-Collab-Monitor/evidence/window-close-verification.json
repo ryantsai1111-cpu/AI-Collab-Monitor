@@ -1,0 +1,6 @@
+{
+  "ClosedOnlyMonitorHandle": 722812,
+  "ObservedUtc": "2026-10-04T16:39:34.6871471Z",
+  "Method": "WindowPattern.Close on the previously observed exact monitor HWND/PID after every lease released. No process termination.",
+  "RemainingExactMonitorWindows": 0
+}

@@ -1,0 +1,26 @@
+{
+  "Marker": "ACCEPTANCE-633f92ef09ea",
+  "Unicode": "中文 🙂",
+  "Appends": [
+    {
+      "Actor": "claude",
+      "Text": "[MONITOR ACCEPTANCE TEST - NOT AGENT OUTPUT]\r\nClaude pane test ACCEPTANCE-633f92ef09ea\r\n",
+      "AppendedUtc": "2026-10-04T16:36:10.6812015Z"
+    },
+    {
+      "Actor": "dot",
+      "Text": "[MONITOR ACCEPTANCE TEST - NOT AGENT OUTPUT]\r\nDot pane test ACCEPTANCE-633f92ef09ea\r\n",
+      "AppendedUtc": "2026-10-04T16:36:10.6826543Z"
+    },
+    {
+      "Actor": "codex",
+      "Text": "[MONITOR ACCEPTANCE TEST - NOT AGENT OUTPUT]\r\nCodex pane test ACCEPTANCE-633f92ef09ea\r\n",
+      "AppendedUtc": "2026-10-04T16:36:10.6830761Z"
+    },
+    {
+      "Actor": "timeline",
+      "Text": "2026-10-05T00:36:10.6832546+08:00 | TASK-ACCEPTANCE | MONITOR_TEST | PANE_TEST | Timeline pane test ACCEPTANCE-633f92ef09ea\r\n",
+      "AppendedUtc": "2026-10-04T16:36:10.6856788Z"
+    }
+  ]
+}

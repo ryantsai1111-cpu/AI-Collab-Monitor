@@ -1,0 +1,6 @@
+{
+  "Script": "reset-monitor.ps1",
+  "ExitCode": 1,
+  "Utc": "2026-10-04T16:36:10.4935284Z",
+  "Output": "C:\\Users\\ryant\\Desktop\\AI-Collab-Monitor\\reset-monitor.ps1 : Reset refused: run stop-monitor.ps1 first and pause extern\r\nal log writers. Session be2c1e34d34c4db391f8c57e093d0ba4 is running or pending. Active lease: be2c1e34d34c4db391f8c57e0\r\n93d0ba4/claude Active lease: be2c1e34d34c4db391f8c57e093d0ba4/dot Active lease: be2c1e34d34c4db391f8c57e093d0ba4/codex \r\nActive lease: be2c1e34d34c4db391f8c57e093d0ba4/timeline No files are deleted. If an external writer raced reset, inspec\r\nt logs/archive before retrying.\r\n    + CategoryInfo          : NotSpecified: (:) [Write-Error], WriteErrorException\r\n    + FullyQualifiedErrorId : Microsoft.PowerShell.Commands.WriteErrorException,reset-monitor.ps1\r\n \r\n"
+}

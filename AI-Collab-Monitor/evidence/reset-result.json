@@ -1,0 +1,6 @@
+{
+  "Script": "reset-monitor.ps1",
+  "ExitCode": 0,
+  "Utc": "2026-10-04T16:37:12.7271660Z",
+  "Output": "Archived logs: C:\\Users\\ryant\\Desktop\\AI-Collab-Monitor\\archive\\20261005-003712\r\nFour empty UTF-8-ready logs created. tasks, earlier archives, README and scripts preserved.\r\n"
+}

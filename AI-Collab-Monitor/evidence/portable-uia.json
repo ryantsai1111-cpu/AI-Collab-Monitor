@@ -1,0 +1,26 @@
+{
+  "Passed": true,
+  "Utc": "2026-10-04T16:41:24.5295276Z",
+  "FourPaneTexts": [
+    {
+      "Name": "AI-Collab-Monitor | CLAUDE - PRIMARY REVIEWER",
+      "Text": "CLAUDE - PRIMARY REVIEWER                        \r\nlogs\\claude.log  |  v0.1  |  read only           \r\n==========================================       \r\nPORTABLE ACCEPTANCE claude 中文                  \r\n                                                 \r\n",
+      "Offscreen": false
+    },
+    {
+      "Name": "AI-Collab-Monitor | DOT - SECONDARY REVIEW / RELAY",
+      "Text": "DOT - SECONDARY REVIEW / RELAY                   \r\nlogs\\dot.log  |  v0.1  |  read only              \r\n==========================================       \r\nPORTABLE ACCEPTANCE dot 中文                     \r\n                                                 \r\n",
+      "Offscreen": false
+    },
+    {
+      "Name": "AI-Collab-Monitor | CODEX - IMPLEMENTER",
+      "Text": "CODEX - IMPLEMENTER                              \r\nlogs\\codex.log  |  v0.1  |  read only            \r\n==========================================       \r\nPORTABLE ACCEPTANCE codex 中文                   \r\n                                                 \r\n",
+      "Offscreen": false
+    },
+    {
+      "Name": "AI-Collab-Monitor | COLLABORATION TIMELINE",
+      "Text": "COLLABORATION TIMELINE                                                                                                                                      \r\nlogs\\timeline.log  |  v0.1  |  read only                                                                                                                    \r\n==========================================                                                                                                                  \r\nPORTABLE ACCEPTANCE timeline 中文                                                                                                                           \r\n                                                                                                                                                            \r\n",
+      "Offscreen": false
+    }
+  ]
+}

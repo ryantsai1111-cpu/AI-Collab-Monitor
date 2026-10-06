@@ -1,0 +1,26 @@
+{
+  "ActualPath": "C:\\Users\\ryant\\Desktop\\AI-Collab-Monitor",
+  "ActiveOrPendingMonitorBlockers": 0,
+  "MonitorWindows": 0,
+  "Logs": [
+    {
+      "Name": "claude.log",
+      "Length": 0
+    },
+    {
+      "Name": "codex.log",
+      "Length": 0
+    },
+    {
+      "Name": "dot.log",
+      "Length": 0
+    },
+    {
+      "Name": "timeline.log",
+      "Length": 0
+    }
+  ],
+  "TaskSentinelExists": true,
+  "Report": "C:\\Users\\ryant\\Desktop\\AI-Collab-Monitor\\evidence\\ACCEPTANCE-REPORT.md",
+  "ObservedUtc": "2026-10-04T16:46:32.4204786Z"
+}

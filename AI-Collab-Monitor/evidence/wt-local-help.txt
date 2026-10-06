@@ -1,0 +1,153 @@
+確定
+
+wt - the Windows Terminal
+Usage: [OPTIONS] [SUBCOMMAND]
+
+Options:
+  -h,--help                   Print this help message and exit
+  -v,--version                顯示應用程式版本
+  -M,--maximized Excludes: --fullscreen
+                              將視窗最大化啟動
+  -F,--fullscreen Excludes: --focus --maximized
+                              以全螢幕模式啟動視窗
+  -f,--focus Excludes: --fullscreen
+                              以焦點模式啟動視窗
+  --pos TEXT                  以 "x,y" 格式指定終端機的位置。
+  --size TEXT                 以 "c,r" 格式指定終端機的欄數和列數。
+  -w,--window TEXT            指定要執行指定命令列的終端視窗。「0」永遠都指目前的視窗。 
+  -s,--saved INT              此參數是內部實作詳細資料，不應使用。
+
+Subcommands:
+  new-tab                     建立新的索引標籤
+  nt                          "new-tab" 子命令的別名。
+  split-pane                  建立新的分割窗格
+  sp                          "split-pane" 子命令的別名。
+  focus-tab                   將焦點移到其他索引標籤
+  ft                          "focus-tab" 子命令的別名。
+  move-focus                  將焦點以指定的方向移到相鄰窗格
+  mf                          "move-focus" 子命令的別名。
+  move-pane                   將焦點窗格移至另一個索引標籤
+  mp                          "move-pane" 子命令的別名。
+  swap-pane                   以特定的方向，將焦點窗格與相鄰窗格交換
+  focus-pane                  將焦點移到其他窗格
+  fp                          "focus-pane" 子命令的別名。
+  x-save                      將命令列儲存為輸入動作
+
+Help
+System Menu Bar
+System
+Close
+確定
+
+wt - the Windows Terminal
+Usage: [OPTIONS] [SUBCOMMAND]
+
+Options:
+  -h,--help                   Print this help message and exit
+  -v,--version                顯示應用程式版本
+  -M,--maximized Excludes: --fullscreen
+                              將視窗最大化啟動
+  -F,--fullscreen Excludes: --maximized --focus
+                              以全螢幕模式啟動視窗
+  -f,--focus Excludes: --fullscreen
+                              以焦點模式啟動視窗
+  --pos TEXT                  以 "x,y" 格式指定終端機的位置。
+  --size TEXT                 以 "c,r" 格式指定終端機的欄數和列數。
+  -w,--window TEXT            指定要執行指定命令列的終端視窗。「0」永遠都指目前的視窗。 
+  -s,--saved INT              此參數是內部實作詳細資料，不應使用。
+
+Subcommands:
+  new-tab                     建立新的索引標籤
+  nt                          "new-tab" 子命令的別名。
+  split-pane                  建立新的分割窗格
+  sp                          "split-pane" 子命令的別名。
+  focus-tab                   將焦點移到其他索引標籤
+  ft                          "focus-tab" 子命令的別名。
+  move-focus                  將焦點以指定的方向移到相鄰窗格
+  mf                          "move-focus" 子命令的別名。
+  move-pane                   將焦點窗格移至另一個索引標籤
+  mp                          "move-pane" 子命令的別名。
+  swap-pane                   以特定的方向，將焦點窗格與相鄰窗格交換
+  focus-pane                  將焦點移到其他窗格
+  fp                          "focus-pane" 子命令的別名。
+  x-save                      將命令列儲存為輸入動作
+
+Help
+System Menu Bar
+System
+Close
+確定
+
+建立新的索引標籤
+Usage: new-tab [OPTIONS] [command...]
+
+Positionals:
+  command TEXT ...            含有引數的選用命令，可在新的索引標籤或窗格生成
+
+Options:
+  -h,--help                   Print this help message and exit
+  -p,--profile TEXT           使用指定的設定檔開啟。接受設定檔的名稱或 GUID
+  --sessionId TEXT            設定 WT_SESSION 變數; 必須為 GUID
+  -d,--startingDirectory TEXT 在指定目錄中開啟，而不是在設定檔的 "startingDirectory" 集合中開啟
+  --title TEXT                使用提供的標題開啟終端，而不是使用設定檔設定的 "title"
+  --tabColor TEXT             以 #rrggbb 格式開啟具有指定色彩的索引標籤
+  --suppressApplicationTitle,--useApplicationTitle{false}
+                              開啟索引標籤，使用索引標籤標題覆寫預設標題，並抑制應用程式的標題變更訊息
+  --colorScheme TEXT          使用指定的色彩配置 (而不是設定檔的集合 "colorScheme") 來開啟索引標籤
+  --appendCommandLine         如果設定，命令會附加到設定檔的預設命令，而不是取代命令。
+  --inheritEnvironment,--reloadEnvironment{false}
+                              建立新索引標籤或窗格時，繼承終端機自己的環境變數，而非建立全新環境區塊。這是傳遞 "command" 時所要設定的預設值。
+
+Help
+System Menu Bar
+System
+Close
+確定
+
+建立新的分割窗格
+Usage: split-pane [OPTIONS] [command...]
+
+Positionals:
+  command TEXT ...            含有引數的選用命令，可在新的索引標籤或窗格生成
+
+Options:
+  -h,--help                   Print this help message and exit
+  -p,--profile TEXT           使用指定的設定檔開啟。接受設定檔的名稱或 GUID
+  --sessionId TEXT            設定 WT_SESSION 變數; 必須為 GUID
+  -d,--startingDirectory TEXT 在指定目錄中開啟，而不是在設定檔的 "startingDirectory" 集合中開啟
+  --title TEXT                使用提供的標題開啟終端，而不是使用設定檔設定的 "title"
+  --tabColor TEXT             以 #rrggbb 格式開啟具有指定色彩的索引標籤
+  --suppressApplicationTitle,--useApplicationTitle{false}
+                              開啟索引標籤，使用索引標籤標題覆寫預設標題，並抑制應用程式的標題變更訊息
+  --colorScheme TEXT          使用指定的色彩配置 (而不是設定檔的集合 "colorScheme") 來開啟索引標籤
+  --appendCommandLine         如果設定，命令會附加到設定檔的預設命令，而不是取代命令。
+  --inheritEnvironment,--reloadEnvironment{false}
+                              建立新索引標籤或窗格時，繼承終端機自己的環境變數，而非建立全新環境區塊。這是傳遞 "command" 時所要設定的預設值。
+  -H,--horizontal Excludes: --vertical
+                              以水平分割建立新的窗格 (例如 [-])
+  -V,--vertical Excludes: --horizontal
+                              以垂直分割建立新窗格 (考慮 [|])
+  -s,--size FLOAT:FLOAT in [0.01 - 0.99]
+                              以父窗格的百分比來指定大小。有效值介於 (0,1)（不含首尾）。
+  -D,--duplicate              透過複製焦點窗格的設定檔來建立新的窗格
+
+Help
+System Menu Bar
+System
+Close
+確定
+
+將焦點以指定的方向移到相鄰窗格
+Usage: move-focus [OPTIONS] direction
+
+Positionals:
+  direction ENUM:value in {down->4,first->8,left->1,nextInOrder->7,previous->5,previousInOrder->6,right->2,up->3} OR {4,8,1,7,5,6,2,3} REQUIRED
+                              移動焦點的方向
+
+Options:
+  -h,--help                   Print this help message and exit
+
+Help
+System Menu Bar
+System
+Close

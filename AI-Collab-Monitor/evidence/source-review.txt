@@ -1,0 +1,534 @@
+===== start-monitor.ps1 | SHA256 DE849B976B83034E8A6BE5C7BD3BBAED0C845DEC309EB5B6B2AF90BE759B91E6 =====
+param()
+. (Join-Path $PSScriptRoot 'helpers\common.ps1')
+$gate = $null
+$sessionPath = $null
+try {
+    $wtCommand = Get-Command wt.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $wtCommand) { throw 'Windows Terminal (wt.exe) was not found. No software or PATH was changed.' }
+    $shell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    if (-not (Test-Path -LiteralPath $shell)) { throw 'Windows PowerShell 5.1 was not found.' }
+    if ($script:MonitorRoot.Contains(';')) { throw 'A semicolon in the monitor path is unsupported by the Windows Terminal command separator. Use a path without semicolons.' }
+    $gate = Enter-MonitorGate
+    $blockers = @(Get-MonitorBlockers)
+    if ($blockers.Count) { throw ('Monitor already running/pending. Run stop-monitor.ps1 first. ' + ($blockers -join ' ')) }
+    foreach ($dir in @('logs','archive','tasks')) { New-MonitorDirectory (Join-Path $script:MonitorRoot $dir) }
+    foreach ($actor in $script:MonitorActors) { New-MonitorEmptyFile (Join-Path (Join-Path $script:MonitorRoot 'logs') ($actor + '.log')) }
+    $sessionId = [Guid]::NewGuid().ToString('N')
+    $sessionPath = Join-Path (Join-Path $script:MonitorState 'sessions') $sessionId
+    New-MonitorDirectory $sessionPath
+    $titleMap = @{
+        claude = 'CLAUDE - PRIMARY REVIEWER'; dot = 'DOT - SECONDARY REVIEW / RELAY'
+        codex = 'CODEX - IMPLEMENTER'; timeline = 'COLLABORATION TIMELINE'
+    }
+    function Get-PaneCommand([string]$Actor) {
+        $parts = @('--title', ('AI-Collab-Monitor | ' + $titleMap[$Actor]), '--suppressApplicationTitle', '-d', $script:MonitorRoot,
+            $shell, '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'helpers\watch-pane.ps1'),
+            '-SessionId', $sessionId, '-Actor', $Actor)
+        return (($parts | ForEach-Object { Quote-MonitorArgument $_ }) -join ' ')
+    }
+    # Verified against Ryan-PC wt 1.24.12741.0 local help; always uses ONE fresh window.
+    $commandLine = '-w new --maximized new-tab ' + (Get-PaneCommand 'claude') +
+        ' ; split-pane -H --size 0.30 ' + (Get-PaneCommand 'timeline') +
+        ' ; move-focus up ; split-pane -V --size 0.6667 ' + (Get-PaneCommand 'dot') +
+        ' ; split-pane -V --size 0.5 ' + (Get-PaneCommand 'codex') + ' ; move-focus first'
+    Write-MonitorJson (Join-Path $sessionPath 'session.json') ([ordered]@{
+        Version='0.1'; SessionId=$sessionId; CreatedUtc=[DateTime]::UtcNow.ToString('o'); Root=$script:MonitorRoot
+        Layout='Top: Claude | Dot | Codex. Bottom: Timeline (30%).'; WindowsTerminal=$wtCommand.Source
+        CommandLine=$commandLine
+    })
+    $gate.Dispose()
+    $gate = $null
+    # This is the explicitly requested visible interactive monitor window.
+    $launcher = Start-Process -FilePath $wtCommand.Source -ArgumentList $commandLine -PassThru
+    $deadline = [DateTime]::UtcNow.AddSeconds(20)
+    do {
+        if (Test-Path -LiteralPath (Join-Path $sessionPath 'stop.signal')) { throw 'Startup was cancelled by stop-monitor.ps1.' }
+        $ready = @($script:MonitorActors | Where-Object { Test-Path -LiteralPath (Join-Path $sessionPath ($_ + '.started.json')) })
+        if ($ready.Count -eq 4) { break }
+        Start-Sleep -Milliseconds 200
+    } while ([DateTime]::UtcNow -lt $deadline)
+    if ($ready.Count -ne 4) { throw "Only $($ready.Count)/4 panes started. Stop requested. Inspect this monitor window and local wt --help; do not retry blindly." }
+    $gate = Enter-MonitorGate
+    if (Test-Path -LiteralPath (Join-Path $sessionPath 'stop.signal')) { throw 'Startup was cancelled.' }
+    foreach ($actor in $script:MonitorActors) {
+        if (-not (Test-MonitorLeaseBusy $sessionPath $actor)) { throw "Pane exited during startup: $actor" }
+    }
+    Write-Output "AI-Collab-Monitor v0.1 started: $sessionId"
+    Write-Output 'Single window: CLAUDE | DOT | CODEX above full-width TIMELINE.'
+    Write-Output 'All four reader leases are active. UI visibility must be checked separately.'
+} catch {
+    if ($gate) { $gate.Dispose(); $gate = $null }
+    if ($sessionPath -and (Test-Path -LiteralPath $sessionPath)) {
+        $cancelGate = Enter-MonitorGate
+        try { Request-MonitorStop $sessionPath } finally { $cancelGate.Dispose() }
+    }
+    Write-Error -Message $_.Exception.Message -ErrorAction Continue
+    exit 1
+} finally {
+    if ($gate) { $gate.Dispose() }
+}
+
+===== stop-monitor.ps1 | SHA256 2AC68AC3DE95CE02940A7F10F191220B0EAAB231CC5F98DF4A726619198662AF =====
+param()
+. (Join-Path $PSScriptRoot 'helpers\common.ps1')
+$gate = $null
+try {
+    $gate = Enter-MonitorGate
+    $sessions = @(Get-MonitorSessions)
+    foreach ($session in $sessions) { Request-MonitorStop $session }
+    # Keep the lifecycle gate until old readers stop, preventing a concurrent new start.
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    do {
+        $busy = @()
+        foreach ($session in $sessions) {
+            foreach ($actor in $script:MonitorActors) {
+                if (Test-MonitorLeaseBusy $session $actor) { $busy += ((Split-Path -Leaf $session) + '/' + $actor) }
+            }
+        }
+        if (-not $busy.Count) { break }
+        Start-Sleep -Milliseconds 200
+    } while ([DateTime]::UtcNow -lt $deadline)
+    if ($busy.Count) { throw ('Readers did not release their leases. Manually close ONLY the AI-Collab-Monitor window, then run stop again. No process was killed. ' + ($busy -join ', ')) }
+    Write-Output 'Monitor readers stopped; all monitor leases released. No process was killed.'
+    Write-Output 'If Terminal keeps completed panes open, manually close ONLY the AI-Collab-Monitor window.'
+} catch {
+    Write-Error -Message $_.Exception.Message -ErrorAction Continue
+    exit 1
+} finally { if ($gate) { $gate.Dispose() } }
+
+===== reset-monitor.ps1 | SHA256 4C8EF5F737C85139F428B3E1B0F831DFC563A7AF5C9B11F0D9970EB5DF23509D =====
+param()
+. (Join-Path $PSScriptRoot 'helpers\common.ps1')
+$gate = $null
+try {
+    $gate = Enter-MonitorGate
+    $blockers = @(Get-MonitorBlockers)
+    if ($blockers.Count) { throw ('Reset refused: run stop-monitor.ps1 first and pause external log writers. ' + ($blockers -join ' ')) }
+    $logs = Join-Path $script:MonitorRoot 'logs'
+    $archive = Join-Path $script:MonitorRoot 'archive'
+    New-MonitorDirectory $logs
+    New-MonitorDirectory $archive
+    foreach ($actor in $script:MonitorActors) { New-MonitorEmptyFile (Join-Path $logs ($actor + '.log')) }
+    # Preflight all four logs before moving any. Unknown/open writer => fail safely.
+    $probes = @()
+    try {
+        foreach ($actor in $script:MonitorActors) {
+            $probes += [IO.File]::Open((Assert-MonitorPath (Join-Path $logs ($actor + '.log'))), [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        }
+    } finally { foreach ($probe in $probes) { $probe.Dispose() } }
+    $baseName = Get-Date -Format 'yyyyMMdd-HHmmss'
+    $destination = Join-Path $archive $baseName
+    $suffix = 0
+    while (Test-Path -LiteralPath $destination) {
+        $suffix++
+        $destination = Join-Path $archive ($baseName + '-' + $suffix.ToString('D2'))
+    }
+    New-MonitorDirectory $destination
+    # Move only the four explicit files; no recursive delete/move, no overwrite.
+    foreach ($actor in $script:MonitorActors) {
+        $source = Assert-MonitorPath (Join-Path $logs ($actor + '.log'))
+        $dest = Assert-MonitorPath (Join-Path $destination ($actor + '.log'))
+        [IO.File]::Move($source, $dest)
+        New-MonitorEmptyFile $source
+    }
+    Write-Output "Archived logs: $destination"
+    Write-Output 'Four empty UTF-8-ready logs created. tasks, earlier archives, README and scripts preserved.'
+} catch {
+    Write-Error -Message ($_.Exception.Message + ' No files are deleted. If an external writer raced reset, inspect logs/archive before retrying.') -ErrorAction Continue
+    exit 1
+} finally { if ($gate) { $gate.Dispose() } }
+
+===== AI-Collab-Monitor.bat | SHA256 050D0E149C87C1DDB8A00B3EBA78EF8F984F8872187DE0B1B250E4D4D7E21D2E =====
+@echo off
+setlocal
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0start-monitor.ps1"
+set "monitorExit=%ERRORLEVEL%"
+if not "%monitorExit%"=="0" pause
+exit /b %monitorExit%
+
+===== README.md | SHA256 BB3482E7438BC9A41FD82B3115812C38BCCDAB623198977591482E4E43C7D217 =====
+# AI-Collab-Monitor v0.1
+
+本次實機驗收與原始文字證據請見 [驗收紀錄](evidence/ACCEPTANCE-REPORT.md)。
+
+這是放在桌面的三 Agent 監看器。它在單一 Windows Terminal 視窗中，即時顯示 Claude、dot、Codex 與協作時間線的文字 log。v0.1 只是 **observability layer（可觀測性層）**：讀取已寫入的紀錄，協助人工追蹤輸入、輸出、公開摘要、審查、handoff、命令、diff 與測試結果。
+
+Monitor 不會啟動、控制或協調 Agent，不會派工、批准執行、觸發下一步或建立 orchestrator。它不會自動抓取 Agent 對話、其他 Terminal 畫面、設定或憑證，也不會擷取任何 Agent 的隱藏 chain-of-thought。`REASONING SUMMARY` 只供 Agent 主動提供的公開推理摘要與 decision rationale 使用。
+
+## 角色與畫面
+
+| 位置 | 標題 | 角色 | 監看的檔案 |
+| --- | --- | --- | --- |
+| 左上 | CLAUDE - PRIMARY REVIEWER | 第一審查者，提供理解、公開摘要與審查決策 | `logs\claude.log` |
+| 中上 | DOT - SECONDARY REVIEW / RELAY | 獨立複審與轉交，提出補充發現 | `logs\dot.log` |
+| 右上 | CODEX - IMPLEMENTER | 實作方，記錄計畫、檔案、真實工具紀錄、diff 與測試 | `logs\codex.log` |
+| 下方橫跨 | COLLABORATION TIMELINE | 按寫入順序顯示跨 Agent 事件 | `logs\timeline.log` |
+
+```text
+┌────────────────┬────────────────┬────────────────┐
+│     CLAUDE     │      DOT       │      CODEX     │
+├────────────────┴────────────────┴────────────────┤
+│              COLLABORATION TIMELINE              │
+└─────────────────────────────────────────────────┘
+```
+
+CLI 語法依 Ryan-PC 現有 Windows Terminal **1.24.12741.0** 的本機 help 確認。視窗大小、字型與使用者 Terminal 設定會影響可顯示的文字寬度；每格內容開頭也會顯示自己的標題。
+
+## 目錄
+
+```text
+AI-Collab-Monitor\
+├─ logs\
+│  ├─ claude.log
+│  ├─ dot.log
+│  ├─ codex.log
+│  └─ timeline.log
+├─ archive\
+├─ tasks\
+├─ helpers\
+│  ├─ common.ps1
+│  └─ watch-pane.ps1
+├─ .monitor\
+│  └─ sessions\            # 每次啟動的獨立 session 與生命週期紀錄
+├─ start-monitor.ps1
+├─ stop-monitor.ps1
+├─ reset-monitor.ps1
+├─ AI-Collab-Monitor.bat
+└─ README.md
+```
+
+安裝位置為 `C:\Users\ryant\Desktop\AI-Collab-Monitor`；若該處已有資料而使用新的版本子目錄，請以本 README 所在目錄為實際根目錄。所有腳本都以自身所在位置定位檔案，可處理含空格的路徑。`tasks\` 留給使用者保存任務資料；v0.1 不會解讀或執行其中的內容。
+
+## 啟動
+
+使用一般使用者權限，雙擊 `AI-Collab-Monitor.bat`。也可在本目錄的 PowerShell 執行：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\start-monitor.ps1
+```
+
+腳本先確認 `wt.exe` 與四個 log；只安全補建不存在的 log，不清空既有內容。接著開啟單一 Windows Terminal 視窗與四格監看。重複啟動同一套監看器會被阻擋，並以非零結束碼回報；不會再開一組監看。
+
+每格使用 Windows 原生 .NET 檔案讀取方式，以約 200 毫秒的輪詢週期等待新內容，並同時檢查停止訊號。不需要 Node、Electron、Tauri、Web server 或系統管理員權限。`ExecutionPolicy Bypass` 只適用該次 PowerShell 子程序，不修改系統或使用者的永久 ExecutionPolicy。
+
+## 停止
+
+在本目錄執行：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\stop-monitor.ps1
+```
+
+每次啟動使用新的 GUID session。每格監看程序在存活期間持有自己的獨占 lease；停止腳本向本套監看器的 session 寫入 `stop.signal`，由各格自行結束，並阻止該 session 尚未完成的延遲啟動。生命週期 gate 用來避免啟動、停止、reset 的競爭。
+
+停止不依賴 PID 強制終止，不會執行 `taskkill`，也不會關閉其他 PowerShell、Windows Terminal、Claude 或 Codex 工作階段。若 Terminal 的使用者設定保留已結束的 pane，確認監看已停止後，手動關閉這個 Monitor 視窗即可。若腳本不能安全確認狀態，依它顯示的提示手動關閉這個 Monitor 視窗；不要批次終止程序。不要手動刪除 `.monitor` 或其中的 session 檔案來略過安全檢查。
+
+若直接手動關閉 Monitor 視窗，session 仍會保守地視為運作中或待啟動。**重新啟動或 reset 前，仍須執行一次 `stop-monitor.ps1`**，讓該 session 收到停止訊號，也阻止可能延遲出現的 pane 啟動。
+
+## Reset 與封存
+
+先暫停所有會寫入這四個 log 的外部來源，再停止 Monitor；確認監看已結束後，在本目錄執行：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\reset-monitor.ps1
+```
+
+reset 會先檢查監看狀態；仍在監看或仍有待完成的啟動時，會拒絕執行並提示安全操作方式，不會在背景偷偷替換 log。
+
+安全狀態下，reset 會：
+
+1. 建立 `archive\YYYYMMDD-HHmmss\`；名稱碰撞時使用唯一後綴，保留既有封存。
+2. 將目前的四個 log 移入該封存目錄。
+3. 在 `logs\` 建立新的四個空 log。
+
+reset 不會刪除 `tasks\`、既有 `archive\`、README 或腳本。完成後可重新啟動 Monitor，再恢復外部寫入。它只能掌握自己的監看程序，不能替任何外部 writer 暫停或協調 log rotation；若 writer 在 reset 期間持續寫入，可能發生檔案占用或資料落到封存檔，因此暫停 writer 是操作前提。
+
+## 如何寫入 log
+
+四個 log 初始為空檔。v0.1 不會自動從 Agent 收集資料；只有實際寫入檔案的內容才會出現在 pane。請以 **UTF-8、附加寫入、每筆以換行結尾** 的方式記錄，避免在監看期間覆寫、截短、刪除或替換檔案。監看器逐批顯示新讀到的文字，不必等到整行完成；跨批次的 UTF-8 字元會保留解碼狀態。
+
+以下是可在 Windows PowerShell 5.1 使用的手動測試；請在 Monitor 根目錄執行。這些文字只是測試，不代表真實 Agent 的審查或執行結果：
+
+```powershell
+$monitorRoot = (Get-Location).Path
+$utf8 = [Text.UTF8Encoding]::new($false)
+[IO.File]::AppendAllText((Join-Path $monitorRoot 'logs\claude.log'), "[TEST DATA] Claude pane test`r`n", $utf8)
+[IO.File]::AppendAllText((Join-Path $monitorRoot 'logs\dot.log'), "[TEST DATA] Dot pane test`r`n", $utf8)
+[IO.File]::AppendAllText((Join-Path $monitorRoot 'logs\codex.log'), "[TEST DATA] Codex pane test`r`n", $utf8)
+$timelineLine = '{0} | TEST-MANUAL | MONITOR | PANE_TEST | Timeline pane test (test data)' -f (Get-Date -Format o)
+[IO.File]::AppendAllText((Join-Path $monitorRoot 'logs\timeline.log'), ($timelineLine + "`r`n"), $utf8)
+```
+
+不要把密碼、token、cookie、`.env` 內容或其他秘密寫入 log。Monitor 直接顯示文字，不提供自動去識別、過濾或秘密遮罩。每個 log 建議由一個 writer 寫入；多個 writer 同時附加可能互相爭用或交錯。
+
+## Agent log 範本
+
+下列只是預期格式，省略號應由主動輸出的真實內容取代。不要用範本中的 `APPROVE / BLOCK` 或其他佔位文字冒充實際決策。
+
+### Claude
+
+```text
+[INPUT]
+...
+
+[UNDERSTANDING]
+...
+
+[REASONING SUMMARY]
+...
+
+[DECISION]
+APPROVE / BLOCK
+
+[OUTPUT / HANDOFF]
+...
+```
+
+### Dot
+
+```text
+[INPUT]
+...
+
+[INDEPENDENT REVIEW]
+...
+
+[ADDITIONAL FINDINGS]
+...
+
+[DECISION]
+APPROVE / BLOCK
+
+[HANDOFF]
+...
+```
+
+### Codex
+
+```text
+[INPUT]
+...
+
+[PLAN]
+...
+
+[FILES]
+...
+
+[TOOL / COMMAND]
+...
+
+[COMMAND OUTPUT]
+...
+
+[EXIT CODE]
+...
+
+[DIFF]
+...
+
+[TEST]
+...
+
+[OUTPUT]
+...
+```
+
+`COMMAND OUTPUT`、`EXIT CODE`、`DIFF` 與 `TEST` 應記錄真實工具結果。若尚未執行或無法驗證，應明確寫出，不能以推測代替證據。
+
+## Timeline 格式
+
+```text
+ISO8601_TIMESTAMP | TASK_ID | ACTOR | EVENT | OPTIONAL_MESSAGE
+```
+
+timestamp 應包含時區，`TASK_ID` 用於對照三方紀錄。最後一欄可省略。以下全部為格式範例，不是已發生的事件：
+
+```text
+2026-10-05T00:42:01+08:00 | TASK-0001 | CLAUDE | REVIEW_STARTED
+2026-10-05T00:42:20+08:00 | TASK-0001 | CLAUDE | APPROVE
+2026-10-05T00:42:23+08:00 | TASK-0001 | DOT | REVIEW_STARTED
+2026-10-05T00:42:40+08:00 | TASK-0001 | DOT | APPROVE
+2026-10-05T00:42:45+08:00 | TASK-0001 | CODEX | IMPLEMENTATION_STARTED
+```
+
+Monitor 不會解析決策、排序 timestamp、驗證 actor 身分或根據事件採取動作；時間線顯示的是檔案內的寫入順序。
+
+## 已知限制與下一階段
+
+- 目前沒有 Agent 自動寫入整合，也沒有 orchestrator、事件派送或背景常駐服務；關閉視窗或停止監看後，不再顯示新增內容。
+- 只支援文字 log 顯示，不提供 diff 上色、結構化搜尋、測試報告解析或跨檔案一致性保證。
+- Terminal 版本、視窗尺寸與使用者設定可能影響外觀；若 pane 結束後仍保留，手動關閉該 Monitor 視窗即可。
+- 外部 writer 必須配合停止與 reset；本工具不會擅自中斷 writer 或修改 Agent 設定。
+
+下一階段可另外設計經使用者授權的 writer adapter，讓 Claude、dot、Codex 透過各自支援的明確輸出或 hook，把公開摘要、審查決策、handoff 與真實工具結果附加到對應 log，並由同一個受控 writer 寫入帶有 task ID 的 timeline。應先定義事件格式、寫入鎖、秘密遮罩、長輸出處理與 reset 協定，再逐一整合。這些整合 **尚未實作**，不屬於 v0.1；也不需要擷取任何隱藏思考。
+
+===== helpers\common.ps1 | SHA256 DB10D1373082F11E77EC7B565747ADDEE53920512914FF75B0F2992D976E81B1 =====
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$script:MonitorRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
+$script:MonitorActors = @('claude', 'dot', 'codex', 'timeline')
+$script:MonitorState = Join-Path $script:MonitorRoot '.monitor'
+
+function Assert-MonitorPath([string]$Path) {
+    $full = [IO.Path]::GetFullPath($Path)
+    if ($full -ne $script:MonitorRoot -and -not $full.StartsWith($script:MonitorRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Path is outside this monitor: $full"
+    }
+    $cursor = $full
+    while ($cursor.Length -ge $script:MonitorRoot.Length) {
+        if (Test-Path -LiteralPath $cursor) {
+            if ((Get-Item -LiteralPath $cursor -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                throw "Refusing linked/reparse monitor path: $cursor"
+            }
+        }
+        if ($cursor -eq $script:MonitorRoot) { break }
+        $cursor = Split-Path -Parent $cursor
+    }
+    return $full
+}
+
+function New-MonitorDirectory([string]$Path) {
+    $full = Assert-MonitorPath $Path
+    [void][IO.Directory]::CreateDirectory($full)
+}
+
+function New-MonitorEmptyFile([string]$Path) {
+    $full = Assert-MonitorPath $Path
+    if (Test-Path -LiteralPath $full) {
+        if (-not [IO.File]::Exists($full)) { throw "Expected a file: $full" }
+        return
+    }
+    $file = [IO.File]::Open($full, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+    $file.Dispose()
+}
+
+function Enter-MonitorGate {
+    New-MonitorDirectory $script:MonitorState
+    $path = Assert-MonitorPath (Join-Path $script:MonitorState 'lifecycle.lock')
+    $deadline = [DateTime]::UtcNow.AddSeconds(5)
+    while ($true) {
+        try { return [IO.File]::Open($path, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None) }
+        catch [IO.IOException] {
+            if ([DateTime]::UtcNow -ge $deadline) { throw 'Another monitor lifecycle operation is running. Try again after it finishes.' }
+            Start-Sleep -Milliseconds 100
+        }
+    }
+}
+
+function Get-MonitorSessions {
+    $dir = Assert-MonitorPath (Join-Path $script:MonitorState 'sessions')
+    if (-not (Test-Path -LiteralPath $dir)) { return }
+    foreach ($item in Get-ChildItem -LiteralPath $dir -Directory) {
+        if ($item.Name -notmatch '^[a-f0-9]{32}$') { throw "Unrecognized session directory; inspect manually: $($item.FullName)" }
+        [void](Assert-MonitorPath $item.FullName)
+        $item.FullName
+    }
+}
+
+function Test-MonitorLeaseBusy([string]$SessionPath, [string]$Actor) {
+    $leasePath = Assert-MonitorPath (Join-Path $SessionPath ($Actor + '.lease'))
+    if (-not (Test-Path -LiteralPath $leasePath)) { return $false }
+    try {
+        $probe = [IO.File]::Open($leasePath, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        $probe.Dispose()
+        return $false
+    }
+    catch [IO.IOException] { return $true }
+    # Permission/unknown errors are deliberately not treated as an inactive lease.
+}
+
+function Get-MonitorBlockers {
+    foreach ($session in @(Get-MonitorSessions)) {
+        if (-not (Test-Path -LiteralPath (Assert-MonitorPath (Join-Path $session 'stop.signal')))) {
+            "Session $(Split-Path -Leaf $session) is running or pending."
+        }
+        foreach ($actor in $script:MonitorActors) {
+            if (Test-MonitorLeaseBusy $session $actor) { "Active lease: $(Split-Path -Leaf $session)/$actor" }
+        }
+    }
+}
+
+function Request-MonitorStop([string]$SessionPath) {
+    New-MonitorEmptyFile (Join-Path $SessionPath 'stop.signal')
+}
+
+function Write-MonitorJson([string]$Path, $Value) {
+    $full = Assert-MonitorPath $Path
+    [IO.File]::WriteAllText($full, ($Value | ConvertTo-Json -Depth 6), [Text.UTF8Encoding]::new($false))
+}
+
+function Quote-MonitorArgument([string]$Value) {
+    # Values are our fixed flags/titles/IDs or validated absolute paths, never a shell expression.
+    if ($Value -match '["\r\n]' -or $Value.EndsWith('\')) { throw 'Unsupported character/trailing separator in command argument.' }
+    return '"' + $Value + '"'
+}
+
+===== helpers\watch-pane.ps1 | SHA256 0B0BAD0FB78EB660C92D33B9E14AF95A537752F1325CDBB63512C99F0E6C3955 =====
+param(
+    [Parameter(Mandatory=$true)][ValidatePattern('^[a-f0-9]{32}$')][string]$SessionId,
+    [Parameter(Mandatory=$true)][ValidateSet('claude','dot','codex','timeline')][string]$Actor
+)
+. (Join-Path $PSScriptRoot 'common.ps1')
+$titles = @{
+    claude = 'CLAUDE - PRIMARY REVIEWER'
+    dot = 'DOT - SECONDARY REVIEW / RELAY'
+    codex = 'CODEX - IMPLEMENTER'
+    timeline = 'COLLABORATION TIMELINE'
+}
+$colors = @{ claude = 'Cyan'; dot = 'Yellow'; codex = 'Green'; timeline = 'Magenta' }
+$sessionPath = Assert-MonitorPath (Join-Path (Join-Path $script:MonitorState 'sessions') $SessionId)
+$logPath = Assert-MonitorPath (Join-Path (Join-Path $script:MonitorRoot 'logs') ($Actor + '.log'))
+$stopPath = Join-Path $sessionPath 'stop.signal'
+$gate = $null
+$lease = $null
+$logStream = $null
+$exitCode = 0
+try {
+    $gate = Enter-MonitorGate
+    # Stop/reset can happen while Terminal is still launching a delayed pane.
+    if (-not (Test-Path -LiteralPath (Join-Path $sessionPath 'session.json')) -or (Test-Path -LiteralPath $stopPath)) { return }
+    $lease = [IO.File]::Open((Assert-MonitorPath (Join-Path $sessionPath ($Actor + '.lease'))), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    # No Delete sharing: even an outside rename cannot silently strand the tail.
+    $logStream = [IO.File]::Open($logPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+    Write-MonitorJson (Join-Path $sessionPath ($Actor + '.started.json')) ([ordered]@{
+        Actor=$Actor; Pid=$PID; StartedUtc=[DateTime]::UtcNow.ToString('o'); Log=$logPath; SessionId=$SessionId
+    })
+    $gate.Dispose()
+    $gate = $null
+    [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+    $Host.UI.RawUI.WindowTitle = 'AI-Collab-Monitor | ' + $titles[$Actor]
+    Write-Host $titles[$Actor] -ForegroundColor $colors[$Actor]
+    Write-Host ('logs\' + $Actor + '.log  |  v0.1  |  read only') -ForegroundColor DarkGray
+    Write-Host ('=' * 42) -ForegroundColor DarkGray
+    # Native .NET incremental UTF-8 reader. It can stop even when no lines arrive.
+    # Decoder retains partial multibyte characters across separate appends.
+    $encoding = [Text.UTF8Encoding]::new($false, $false)
+    $decoder = $encoding.GetDecoder()
+    $bytes = New-Object byte[] 8192
+    $chars = New-Object char[] ($encoding.GetMaxCharCount($bytes.Length))
+    while (-not (Test-Path -LiteralPath $stopPath)) {
+        $count = $logStream.Read($bytes, 0, $bytes.Length)
+        if ($count -gt 0) {
+            $length = $decoder.GetChars($bytes, 0, $count, $chars, 0, $false)
+            $text = [string]::new($chars, 0, $length)
+            # Logs remain unchanged. Strip terminal control characters from display.
+            $text = [regex]::Replace($text, '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F\uFEFF]', '')
+            [Console]::Write($text)
+        } else {
+            if ($logStream.Length -lt $logStream.Position) { throw 'The log was truncated externally. Stop the monitor before reset/rotation.' }
+            Start-Sleep -Milliseconds 200
+        }
+    }
+    Write-Host "`n[MONITOR STOPPED]" -ForegroundColor DarkGray
+} catch {
+    $exitCode = 1
+    Write-Host ('[MONITOR ERROR] ' + $_.Exception.Message) -ForegroundColor Red
+} finally {
+    if ($logStream) { $logStream.Dispose() }
+    if ($lease) { $lease.Dispose() }
+    if ($gate) { $gate.Dispose() }
+}
+exit $exitCode
+

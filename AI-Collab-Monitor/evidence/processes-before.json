@@ -1,0 +1,104 @@
+[
+  {
+    "Name": "claude",
+    "Pid": 4744,
+    "StartedUtc": "2026-10-04T15:14:24.0338790Z",
+    "SessionId": 1
+  },
+  {
+    "Name": "claude",
+    "Pid": 7456,
+    "StartedUtc": "2026-10-04T15:14:28.8894529Z",
+    "SessionId": 1
+  },
+  {
+    "Name": "claude",
+    "Pid": 12032,
+    "StartedUtc": "2026-10-04T15:14:31.3330225Z",
+    "SessionId": 1
+  },
+  {
+    "Name": "claude",
+    "Pid": 12420,
+    "StartedUtc": "2026-10-04T15:15:02.0149185Z",
+    "SessionId": 1
+  },
+  {
+    "Name": "claude",
+    "Pid": 12596,
+    "StartedUtc": "2026-10-04T15:14:24.3884204Z",
+    "SessionId": 1
+  },
+  {
+    "Name": "claude",
+    "Pid": 15156,
+    "StartedUtc": "2026-10-04T15:14:21.5854499Z",
+    "SessionId": 1
+  },
+  {
+    "Name": "claude",
+    "Pid": 21784,
+    "StartedUtc": "2026-10-04T15:14:18.4523638Z",
+    "SessionId": 1
+  },
+  {
+    "Name": "claude",
+    "Pid": 22200,
+    "StartedUtc": "2026-10-04T15:14:33.6642011Z",
+    "SessionId": 1
+  },
+  {
+    "Name": "claude",
+    "Pid": 22856,
+    "StartedUtc": "2026-10-04T15:14:15.4835199Z",
+    "SessionId": 1
+  },
+  {
+    "Name": "claude",
+    "Pid": 23916,
+    "StartedUtc": "2026-10-04T15:14:21.4884738Z",
+    "SessionId": 1
+  },
+  {
+    "Name": "claude",
+    "Pid": 25944,
+    "StartedUtc": "2026-10-04T15:14:36.6239665Z",
+    "SessionId": 1
+  },
+  {
+    "Name": "claude",
+    "Pid": 25952,
+    "StartedUtc": "2026-10-04T15:14:36.6286877Z",
+    "SessionId": 1
+  },
+  {
+    "Name": "claude",
+    "Pid": 27112,
+    "StartedUtc": "2026-10-04T15:15:03.2046740Z",
+    "SessionId": 1
+  },
+  {
+    "Name": "codex",
+    "Pid": 14384,
+    "StartedUtc": "2026-10-04T15:15:02.5859631Z",
+    "SessionId": 1
+  },
+  {
+    "Name": "codex",
+    "Pid": 24612,
+    "StartedUtc": "2026-10-04T15:14:31.0422421Z",
+    "SessionId": 1
+  },
+  {
+    "Name": "powershell",
+    "Pid": 8028,
+    "StartedUtc": "2026-10-04T15:15:05.9105971Z",
+    "SessionId": 1
+  },
+  {
+    "Name": "pwsh",
+    "Pid": 6016,
+    "StartedUtc": "2026-10-04T16:36:05.6466679Z",
+    "SessionId": 1
+  }
+]

@@ -1,0 +1,1 @@
+The initial acceptance comparison mixed PowerShell 7.6 JSON DateTime values with ISO strings. Corrected to compare DateTimeOffset values using the unchanged raw before/after snapshots. Product stop/reset code was unaffected.

@@ -1,0 +1,226 @@
+{
+    "StartedUtc":  "2026-10-04T16:44:36.0312586Z",
+    "PowerShellVersion":  "5.1.26100.9444",
+    "Scratch":  "C:\\Users\\ryant\\Documents\\Codex\\2026-10-05\\task\\monitor regression 測試-20261005-004435-f821c541",
+    "Tests":  [
+                  {
+                      "Name":  "Actual Windows PowerShell 5.1",
+                      "Passed":  true,
+                      "Details":  "5.1.26100.9444"
+                  },
+                  {
+                      "Name":  "Pending session blocks reset",
+                      "Passed":  true,
+                      "Details":  {
+                                      "ExitCode":  1,
+                                      "Stderr":  "C:\\Users\\ryant\\Documents\\Codex\\2026-10-05\\task\\monitor regression 測試-20261005-004435-f821c541\\evidence\\01-reset-monitor.stderr.txt"
+                                  }
+                  },
+                  {
+                      "Name":  "Blocked reset leaves empty logs and tasks untouched",
+                      "Passed":  true,
+                      "Details":  "AD9DC3BA24CF80D24476CED8A33E5D360CBA44514DBFF80F1C0E9767AF5C50A3"
+                  },
+                  {
+                      "Name":  "Stop cancels pending session without processes",
+                      "Passed":  true,
+                      "Details":  {
+                                      "Session":  "5387a318baed45c592699fea44abe3b9",
+                                      "ExitCode":  0
+                                  }
+                  },
+                  {
+                      "Name":  "Headless native reader starts from spaced Unicode path",
+                      "Passed":  true,
+                      "Details":  {
+                                      "Path":  "C:\\Users\\ryant\\Documents\\Codex\\2026-10-05\\task\\monitor regression 測試-20261005-004435-f821c541",
+                                      "Stdout":  "C:\\Users\\ryant\\Documents\\Codex\\2026-10-05\\task\\monitor regression 測試-20261005-004435-f821c541\\evidence\\03-watch-pane.stdout.txt"
+                                  }
+                  },
+                  {
+                      "Name":  "Active reader blocks reset",
+                      "Passed":  true,
+                      "Details":  {
+                                      "ExitCode":  1
+                                  }
+                  },
+                  {
+                      "Name":  "Reader consumes 8192-byte chunk ending with incomplete emoji",
+                      "Passed":  true,
+                      "Details":  {
+                                      "IncompleteEmojiBytes":  "F0 9F 98",
+                                      "DecodedPrefixChars":  8189,
+                                      "InputBytes":  8192
+                                  }
+                  },
+                  {
+                      "Name":  "Reader displays subsequent Unicode append",
+                      "Passed":  true,
+                      "Details":  {
+                                      "Unicode":  "中文測試",
+                                      "Emoji":  "😀"
+                                  }
+                  },
+                  {
+                      "Name":  "Exact Unicode payload survives decoder boundary",
+                      "Passed":  true,
+                      "Details":  {
+                                      "FirstReadBytes":  8192,
+                                      "PayloadChars":  16416,
+                                      "SecondReadBytes":  8192
+                                  }
+                  },
+                  {
+                      "Name":  "Idle reader cooperatively stops with exit 0",
+                      "Passed":  true,
+                      "Details":  {
+                                      "StopExit":  0,
+                                      "ReaderExit":  0,
+                                      "StopSignal":  true
+                                  }
+                  },
+                  {
+                      "Name":  "No reader error or replacement characters",
+                      "Passed":  true,
+                      "Details":  {
+                                      "Stderr":  "C:\\Users\\ryant\\Documents\\Codex\\2026-10-05\\task\\monitor regression 測試-20261005-004435-f821c541\\evidence\\03-watch-pane.stderr.txt",
+                                      "Stdout":  "C:\\Users\\ryant\\Documents\\Codex\\2026-10-05\\task\\monitor regression 測試-20261005-004435-f821c541\\evidence\\03-watch-pane.stdout.txt"
+                                  }
+                  },
+                  {
+                      "Name":  "Stopped sessions permit reset",
+                      "Passed":  true,
+                      "Details":  {
+                                      "ExitCode":  0,
+                                      "Stdout":  "C:\\Users\\ryant\\Documents\\Codex\\2026-10-05\\task\\monitor regression 測試-20261005-004435-f821c541\\evidence\\06-reset-monitor.stdout.txt"
+                                  }
+                  },
+                  {
+                      "Name":  "Archive collision uses fresh suffixed directory",
+                      "Passed":  true,
+                      "Details":  [
+                                      "C:\\Users\\ryant\\Documents\\Codex\\2026-10-05\\task\\monitor regression 測試-20261005-004435-f821c541\\archive\\20261005-004441-01"
+                                  ]
+                  },
+                  {
+                      "Name":  "All four archived logs preserve exact bytes",
+                      "Passed":  true,
+                      "Details":  {
+                                      "Archived":  {
+                                                       "timeline":  "37DC4030E6ACBCD2706AA782277B2441B6D1CFE7B3E301C1FE80B329F7A29237",
+                                                       "dot":  "C7210A29BD6ADB27F63565CFCEF8631E8D9A09297CFDFC5BCAF9A6945DBA005F",
+                                                       "claude":  "819EC0072123DBEDD7A7CD59046EEEFE1DDCBD8E4B948FF1E5A011A4AB1E147D",
+                                                       "codex":  "C6350111C64E3AFD670012A7D7BAB80413F3500E7F6CE87EBA7F535FC6F2AB68"
+                                                   },
+                                      "Original":  {
+                                                       "timeline":  "37DC4030E6ACBCD2706AA782277B2441B6D1CFE7B3E301C1FE80B329F7A29237",
+                                                       "dot":  "C7210A29BD6ADB27F63565CFCEF8631E8D9A09297CFDFC5BCAF9A6945DBA005F",
+                                                       "claude":  "819EC0072123DBEDD7A7CD59046EEEFE1DDCBD8E4B948FF1E5A011A4AB1E147D",
+                                                       "codex":  "C6350111C64E3AFD670012A7D7BAB80413F3500E7F6CE87EBA7F535FC6F2AB68"
+                                                   }
+                                  }
+                  },
+                  {
+                      "Name":  "Reset produces four empty replacement logs",
+                      "Passed":  true,
+                      "Details":  true
+                  },
+                  {
+                      "Name":  "Pre-existing archive markers retained",
+                      "Passed":  true,
+                      "Details":  [
+                                      "C:\\Users\\ryant\\Documents\\Codex\\2026-10-05\\task\\monitor regression 測試-20261005-004435-f821c541\\archive\\20261005-004440",
+                                      "C:\\Users\\ryant\\Documents\\Codex\\2026-10-05\\task\\monitor regression 測試-20261005-004435-f821c541\\archive\\20261005-004441",
+                                      "C:\\Users\\ryant\\Documents\\Codex\\2026-10-05\\task\\monitor regression 測試-20261005-004435-f821c541\\archive\\20261005-004442",
+                                      "C:\\Users\\ryant\\Documents\\Codex\\2026-10-05\\task\\monitor regression 測試-20261005-004435-f821c541\\archive\\20261005-004443",
+                                      "C:\\Users\\ryant\\Documents\\Codex\\2026-10-05\\task\\monitor regression 測試-20261005-004435-f821c541\\archive\\20261005-004444",
+                                      "C:\\Users\\ryant\\Documents\\Codex\\2026-10-05\\task\\monitor regression 測試-20261005-004435-f821c541\\archive\\20261005-004445",
+                                      "C:\\Users\\ryant\\Documents\\Codex\\2026-10-05\\task\\monitor regression 測試-20261005-004435-f821c541\\archive\\20261005-004446",
+                                      "C:\\Users\\ryant\\Documents\\Codex\\2026-10-05\\task\\monitor regression 測試-20261005-004435-f821c541\\archive\\20261005-004447",
+                                      "C:\\Users\\ryant\\Documents\\Codex\\2026-10-05\\task\\monitor regression 測試-20261005-004435-f821c541\\archive\\20261005-004448"
+                                  ]
+                  },
+                  {
+                      "Name":  "Repeated reset keeps both archives",
+                      "Passed":  true,
+                      "Details":  [
+                                      "C:\\Users\\ryant\\Documents\\Codex\\2026-10-05\\task\\monitor regression 測試-20261005-004435-f821c541\\archive\\20261005-004441-01",
+                                      "C:\\Users\\ryant\\Documents\\Codex\\2026-10-05\\task\\monitor regression 測試-20261005-004435-f821c541\\archive\\20261005-004442-01"
+                                  ]
+                  },
+                  {
+                      "Name":  "Tasks and scripts remain unchanged",
+                      "Passed":  true,
+                      "Details":  {
+                                      "TasksSHA256":  "AD9DC3BA24CF80D24476CED8A33E5D360CBA44514DBFF80F1C0E9767AF5C50A3",
+                                      "ScriptHashes":  {
+                                                           "C:\\Users\\ryant\\Documents\\Codex\\2026-10-05\\task\\monitor regression 測試-20261005-004435-f821c541\\reset-monitor.ps1":  "4C8EF5F737C85139F428B3E1B0F831DFC563A7AF5C9B11F0D9970EB5DF23509D",
+                                                           "C:\\Users\\ryant\\Documents\\Codex\\2026-10-05\\task\\monitor regression 測試-20261005-004435-f821c541\\stop-monitor.ps1":  "2AC68AC3DE95CE02940A7F10F191220B0EAAB231CC5F98DF4A726619198662AF",
+                                                           "C:\\Users\\ryant\\Documents\\Codex\\2026-10-05\\task\\monitor regression 測試-20261005-004435-f821c541\\helpers\\watch-pane.ps1":  "0B0BAD0FB78EB660C92D33B9E14AF95A537752F1325CDBB63512C99F0E6C3955",
+                                                           "C:\\Users\\ryant\\Documents\\Codex\\2026-10-05\\task\\monitor regression 測試-20261005-004435-f821c541\\helpers\\common.ps1":  "DB10D1373082F11E77EC7B565747ADDEE53920512914FF75B0F2992D976E81B1",
+                                                           "C:\\Users\\ryant\\Documents\\Codex\\2026-10-05\\task\\monitor regression 測試-20261005-004435-f821c541\\start-monitor.ps1":  "DE849B976B83034E8A6BE5C7BD3BBAED0C845DEC309EB5B6B2AF90BE759B91E6"
+                                                       }
+                                  }
+                  }
+              ],
+    "Invocations":  [
+                        {
+                            "Tag":  "01-reset-monitor",
+                            "Script":  "C:\\Users\\ryant\\Documents\\Codex\\2026-10-05\\task\\monitor regression 測試-20261005-004435-f821c541\\reset-monitor.ps1",
+                            "Stdout":  "C:\\Users\\ryant\\Documents\\Codex\\2026-10-05\\task\\monitor regression 測試-20261005-004435-f821c541\\evidence\\01-reset-monitor.stdout.txt",
+                            "Stderr":  "C:\\Users\\ryant\\Documents\\Codex\\2026-10-05\\task\\monitor regression 測試-20261005-004435-f821c541\\evidence\\01-reset-monitor.stderr.txt",
+                            "Pid":  11344,
+                            "ExitCode":  1
+                        },
+                        {
+                            "Tag":  "02-stop-monitor",
+                            "Script":  "C:\\Users\\ryant\\Documents\\Codex\\2026-10-05\\task\\monitor regression 測試-20261005-004435-f821c541\\stop-monitor.ps1",
+                            "Stdout":  "C:\\Users\\ryant\\Documents\\Codex\\2026-10-05\\task\\monitor regression 測試-20261005-004435-f821c541\\evidence\\02-stop-monitor.stdout.txt",
+                            "Stderr":  "C:\\Users\\ryant\\Documents\\Codex\\2026-10-05\\task\\monitor regression 測試-20261005-004435-f821c541\\evidence\\02-stop-monitor.stderr.txt",
+                            "Pid":  13916,
+                            "ExitCode":  0
+                        },
+                        {
+                            "Tag":  "03-watch-pane",
+                            "Script":  "C:\\Users\\ryant\\Documents\\Codex\\2026-10-05\\task\\monitor regression 測試-20261005-004435-f821c541\\helpers\\watch-pane.ps1",
+                            "Stdout":  "C:\\Users\\ryant\\Documents\\Codex\\2026-10-05\\task\\monitor regression 測試-20261005-004435-f821c541\\evidence\\03-watch-pane.stdout.txt",
+                            "Stderr":  "C:\\Users\\ryant\\Documents\\Codex\\2026-10-05\\task\\monitor regression 測試-20261005-004435-f821c541\\evidence\\03-watch-pane.stderr.txt",
+                            "Pid":  7476,
+                            "ExitCode":  0
+                        },
+                        {
+                            "Tag":  "04-reset-monitor",
+                            "Script":  "C:\\Users\\ryant\\Documents\\Codex\\2026-10-05\\task\\monitor regression 測試-20261005-004435-f821c541\\reset-monitor.ps1",
+                            "Stdout":  "C:\\Users\\ryant\\Documents\\Codex\\2026-10-05\\task\\monitor regression 測試-20261005-004435-f821c541\\evidence\\04-reset-monitor.stdout.txt",
+                            "Stderr":  "C:\\Users\\ryant\\Documents\\Codex\\2026-10-05\\task\\monitor regression 測試-20261005-004435-f821c541\\evidence\\04-reset-monitor.stderr.txt",
+                            "Pid":  14820,
+                            "ExitCode":  1
+                        },
+                        {
+                            "Tag":  "05-stop-monitor",
+                            "Script":  "C:\\Users\\ryant\\Documents\\Codex\\2026-10-05\\task\\monitor regression 測試-20261005-004435-f821c541\\stop-monitor.ps1",
+                            "Stdout":  "C:\\Users\\ryant\\Documents\\Codex\\2026-10-05\\task\\monitor regression 測試-20261005-004435-f821c541\\evidence\\05-stop-monitor.stdout.txt",
+                            "Stderr":  "C:\\Users\\ryant\\Documents\\Codex\\2026-10-05\\task\\monitor regression 測試-20261005-004435-f821c541\\evidence\\05-stop-monitor.stderr.txt",
+                            "Pid":  14212,
+                            "ExitCode":  0
+                        },
+                        {
+                            "Tag":  "06-reset-monitor",
+                            "Script":  "C:\\Users\\ryant\\Documents\\Codex\\2026-10-05\\task\\monitor regression 測試-20261005-004435-f821c541\\reset-monitor.ps1",
+                            "Stdout":  "C:\\Users\\ryant\\Documents\\Codex\\2026-10-05\\task\\monitor regression 測試-20261005-004435-f821c541\\evidence\\06-reset-monitor.stdout.txt",
+                            "Stderr":  "C:\\Users\\ryant\\Documents\\Codex\\2026-10-05\\task\\monitor regression 測試-20261005-004435-f821c541\\evidence\\06-reset-monitor.stderr.txt",
+                            "Pid":  29376,
+                            "ExitCode":  0
+                        },
+                        {
+                            "Tag":  "07-reset-monitor",
+                            "Script":  "C:\\Users\\ryant\\Documents\\Codex\\2026-10-05\\task\\monitor regression 測試-20261005-004435-f821c541\\reset-monitor.ps1",
+                            "Stdout":  "C:\\Users\\ryant\\Documents\\Codex\\2026-10-05\\task\\monitor regression 測試-20261005-004435-f821c541\\evidence\\07-reset-monitor.stdout.txt",
+                            "Stderr":  "C:\\Users\\ryant\\Documents\\Codex\\2026-10-05\\task\\monitor regression 測試-20261005-004435-f821c541\\evidence\\07-reset-monitor.stderr.txt",
+                            "Pid":  11992,
+                            "ExitCode":  0
+                        }
+                    ],
+    "Passed":  true,
+    "CompletedUtc":  "2026-10-04T16:44:42.5346615Z"
+}

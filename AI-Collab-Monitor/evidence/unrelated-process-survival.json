@@ -1,0 +1,82 @@
+[
+  {
+    "Name": "claude",
+    "Pid": 4744,
+    "SameProcessAlive": true
+  },
+  {
+    "Name": "claude",
+    "Pid": 7456,
+    "SameProcessAlive": true
+  },
+  {
+    "Name": "claude",
+    "Pid": 12032,
+    "SameProcessAlive": true
+  },
+  {
+    "Name": "claude",
+    "Pid": 12420,
+    "SameProcessAlive": true
+  },
+  {
+    "Name": "claude",
+    "Pid": 12596,
+    "SameProcessAlive": true
+  },
+  {
+    "Name": "claude",
+    "Pid": 15156,
+    "SameProcessAlive": true
+  },
+  {
+    "Name": "claude",
+    "Pid": 21784,
+    "SameProcessAlive": true
+  },
+  {
+    "Name": "claude",
+    "Pid": 22200,
+    "SameProcessAlive": true
+  },
+  {
+    "Name": "claude",
+    "Pid": 22856,
+    "SameProcessAlive": true
+  },
+  {
+    "Name": "claude",
+    "Pid": 23916,
+    "SameProcessAlive": true
+  },
+  {
+    "Name": "claude",
+    "Pid": 25944,
+    "SameProcessAlive": true
+  },
+  {
+    "Name": "claude",
+    "Pid": 25952,
+    "SameProcessAlive": true
+  },
+  {
+    "Name": "claude",
+    "Pid": 27112,
+    "SameProcessAlive": true
+  },
+  {
+    "Name": "codex",
+    "Pid": 14384,
+    "SameProcessAlive": true
+  },
+  {
+    "Name": "codex",
+    "Pid": 24612,
+    "SameProcessAlive": true
+  },
+  {
+    "Name": "powershell",
+    "Pid": 8028,
+    "SameProcessAlive": true
+  }
+]

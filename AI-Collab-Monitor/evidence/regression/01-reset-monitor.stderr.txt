@@ -1,0 +1,6 @@
+C:\Users\ryant\Documents\Codex\2026-10-05\task\monitor regression ด๚ธี-20261005-004435-f821c541\reset-monitor.ps1 : Res
+et refused: run stop-monitor.ps1 first and pause external log writers. Session 5387a318baed45c592699fea44abe3b9 is runn
+ing or pending. No files are deleted. If an external writer raced reset, inspect logs/archive before retrying.
+    + CategoryInfo          : NotSpecified: (:) [Write-Error], WriteErrorException
+    + FullyQualifiedErrorId : Microsoft.PowerShell.Commands.WriteErrorException,reset-monitor.ps1
+ 

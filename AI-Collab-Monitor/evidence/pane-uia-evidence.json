@@ -1,0 +1,58 @@
+{
+  "ObservedUtc": "2026-10-04T16:36:55.3909815Z",
+  "WindowTitle": "AI-Collab-Monitor | CLAUDE - PRIMARY REVIEWER",
+  "WindowHandle": 722812,
+  "Pid": 3708,
+  "Panes": [
+    {
+      "Name": "AI-Collab-Monitor | CLAUDE - PRIMARY REVIEWER",
+      "Type": "ControlType.Text",
+      "X": 54.0,
+      "Y": 9.0,
+      "Width": 205.0,
+      "Height": 20.0,
+      "Offscreen": false,
+      "Text": "AI-Collab-Monitor | CLAUDE - PRIMARY REVIEWER"
+    },
+    {
+      "Name": "AI-Collab-Monitor | CLAUDE - PRIMARY REVIEWER",
+      "Type": "ControlType.Text",
+      "X": 0.0,
+      "Y": 39.0,
+      "Width": 637.0,
+      "Height": 768.0,
+      "Offscreen": false,
+      "Text": "CLAUDE - PRIMARY REVIEWER                        \r\nlogs\\claude.log  |  v0.1  |  read only           \r\n==========================================       \r\n[MONITOR ACCEPTANCE TEST - NOT AGENT OUTPUT]     \r\nClaude pane test ACCEPTANCE-633f92ef09ea         \r\nCLAUDE live append 2 (acceptance only)           \r\n                                                 \r\n"
+    },
+    {
+      "Name": "AI-Collab-Monitor | DOT - SECONDARY REVIEW / RELAY",
+      "Type": "ControlType.Text",
+      "X": 643.0,
+      "Y": 39.0,
+      "Width": 634.0,
+      "Height": 768.0,
+      "Offscreen": false,
+      "Text": "DOT - SECONDARY REVIEW / RELAY                   \r\nlogs\\dot.log  |  v0.1  |  read only              \r\n==========================================       \r\n[MONITOR ACCEPTANCE TEST - NOT AGENT OUTPUT]     \r\nDot pane test ACCEPTANCE-633f92ef09ea            \r\nDOT live append 2 (acceptance only)              \r\n                                                 \r\n"
+    },
+    {
+      "Name": "AI-Collab-Monitor | CODEX - IMPLEMENTER",
+      "Type": "ControlType.Text",
+      "X": 1283.0,
+      "Y": 39.0,
+      "Width": 637.0,
+      "Height": 768.0,
+      "Offscreen": false,
+      "Text": "CODEX - IMPLEMENTER                              \r\nlogs\\codex.log  |  v0.1  |  read only            \r\n==========================================       \r\n[MONITOR ACCEPTANCE TEST - NOT AGENT OUTPUT]     \r\nCodex pane test ACCEPTANCE-633f92ef09ea          \r\nUTF8 test: 中文 🙂                               \r\nCODEX live append 2 (acceptance only)            \r\n                                                 \r\n"
+    },
+    {
+      "Name": "AI-Collab-Monitor | COLLABORATION TIMELINE",
+      "Type": "ControlType.Text",
+      "X": 0.0,
+      "Y": 813.0,
+      "Width": 1920.0,
+      "Height": 327.0,
+      "Offscreen": false,
+      "Text": "COLLABORATION TIMELINE                                                                                                                                      \r\nlogs\\timeline.log  |  v0.1  |  read only                                                                                                                    \r\n==========================================                                                                                                                  \r\n2026-10-05T00:36:10.6832546+08:00 | TASK-ACCEPTANCE | MONITOR_TEST | PANE_TEST | Timeline pane test ACCEPTANCE-633f92ef09ea                                 \r\n2026-10-05T00:36:54.3887478+08:00 | TASK-ACCEPTANCE | MONITOR_TEST | LIVE_APPEND_2 | Timeline pane test continued                                           \r\n                                                                                                                                                            \r\n"
+    }
+  ]
+}
