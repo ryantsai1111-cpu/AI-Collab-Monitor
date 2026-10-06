@@ -71,6 +71,23 @@ class LocalAdapterTests(unittest.TestCase):
             self.assertIn('--model=fixture-local', self.popen.call_args.args[0])
             self.assertEqual(before, dict(os.environ))
 
+    def test_claude_without_api_key_never_falls_back_to_parent_login(self):
+        # An empty token makes Claude Code send its stored Anthropic login to the endpoint.
+        with patch.dict(os.environ, {'CLAUDE_CODE_OAUTH_TOKEN': 'parent-fixture-login',
+                                    'ANTHROPIC_AUTH_TOKEN': 'parent-fixture-token',
+                                    'CLAUDE_CODE_SDK_HAS_HOST_AUTH_REFRESH': '1',
+                                    'CLAUDE_CONFIG_DIR': 'fixture-config-dir'}):
+            adapter = self.adapter(LocalClaudeAdapter)
+            self.connect(adapter)
+            env = self.popen.call_args.kwargs['env']
+            self.assertEqual('local', env['ANTHROPIC_AUTH_TOKEN'])
+            self.assertEqual('http://localhost:1234/v1', env['ANTHROPIC_BASE_URL'])
+            self.assertEqual('fixture-config-dir', env['CLAUDE_CONFIG_DIR'])
+            leaked = [name for name in env if name.upper().startswith(('ANTHROPIC_', 'CLAUDE'))
+                      and name not in ('ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'CLAUDE_CONFIG_DIR')]
+            self.assertEqual([], leaked)
+            self.assertNotIn('parent-fixture', json.dumps(env))
+
     def test_missing_endpoint_or_model_is_offline_without_any_process(self):
         for cls in (LocalCodexAdapter, LocalClaudeAdapter):
             for settings in ({}, {'model': 'fixture'}, {'base_url': 'http://localhost:1234'}):

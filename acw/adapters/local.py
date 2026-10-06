@@ -172,11 +172,15 @@ class LocalClaudeAdapter(_LocalSettings, ClaudeAdapter):
         base_url, _, credential = self._validate()
         child_env = os.environ.copy()
         # Explicitly route this child through Messages, independent of official panes.
-        for key in ('ANTHROPIC_API_KEY', 'CLAUDE_CODE_USE_BEDROCK',
-                    'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY'):
-            child_env.pop(key, None)
+        # Drop every inherited Anthropic/Claude Code routing or auth variable, so a
+        # parent Claude session cannot lend this child its credentials.
+        for key in [name for name in child_env if name.upper().startswith(('ANTHROPIC_', 'CLAUDE'))
+                    and name.upper() != 'CLAUDE_CONFIG_DIR']:
+            del child_env[key]
         child_env['ANTHROPIC_BASE_URL'] = base_url
-        child_env['ANTHROPIC_AUTH_TOKEN'] = credential or ''
+        # Never leave this empty: Claude Code would then fall back to the stored
+        # Anthropic login and send that real credential to the local endpoint.
+        child_env['ANTHROPIC_AUTH_TOKEN'] = credential or 'local'
         return child_env
 
     def _discover(self, handshake):
