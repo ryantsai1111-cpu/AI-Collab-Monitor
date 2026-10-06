@@ -568,6 +568,10 @@ class AgentPanel(QFrame):
             self.window.run(lambda: self.window.core.disconnect(self.agent), lambda _: self.window.refresh_agent(self.agent), self.agent)
         else:
             if self.agent == 'dot' and not self.dot_consent('connect'): return
+            # Claude Code needs a working directory; guide instead of failing with a terse error.
+            if self.agent in ('claude', 'local') and not self.window.core.current_project:
+                self.window.require_project(ROLE_NAMES[self.agent] + " 需要先有專案資料夾才能連線。")
+                return
             self.set_state("Connecting")
             self.window.run(lambda: self.window.core.connect(self.agent), lambda _: self.window.refresh_agent(self.agent), self.agent)
 
@@ -894,7 +898,7 @@ class AgentPanel(QFrame):
         if not content.strip() or not self.send_button.isEnabled():
             return
         if not self.window.core.current_task:
-            self.window.show_error("Create or select a task before sending a message.")
+            self.window.require_task()
             return
         model, effort, attachments = self.model.currentData(), self.effort.currentData(), list(self.attachments)
         if self.agent == 'dot' and not self.dot_consent('send'): return
@@ -2143,9 +2147,30 @@ class MainWindow(QMainWindow):
         error_panel=next((panel for panel in self.panels.values() if panel.connection_state=='Error'),None)
         self.footer.setText('Error · '+error_panel.agent+' · '+error_panel.notice.text() if error_panel else self.last_event)
 
+    def require_project(self, reason):
+        box = QMessageBox(QMessageBox.Question, "需要專案", "", QMessageBox.Yes | QMessageBox.No, self)
+        box.setTextFormat(Qt.PlainText)
+        box.setText(reason + "\n專案就是這個角色工作時所在的資料夾。\n\n要現在建立專案嗎？建立後請再按一次「連線」。")
+        box.button(QMessageBox.Yes).setText("建立專案…")
+        box.button(QMessageBox.No).setText("稍後")
+        if box.exec() == QMessageBox.Yes:
+            self.new_project()
+
+    def require_task(self):
+        if not self.core.current_project:
+            self.require_project("傳送訊息前需要先有專案與任務。")
+            return
+        box = QMessageBox(QMessageBox.Question, "需要任務", "", QMessageBox.Yes | QMessageBox.No, self)
+        box.setTextFormat(Qt.PlainText)
+        box.setText("傳送訊息前需要先建立或選擇一個任務；草稿會保留。\n\n要現在建立任務嗎？")
+        box.button(QMessageBox.Yes).setText("建立任務…")
+        box.button(QMessageBox.No).setText("稍後")
+        if box.exec() == QMessageBox.Yes:
+            self.new_task()
+
     def new_project(self):
         dialog = QDialog(self)
-        dialog.setWindowTitle("Create project")
+        dialog.setWindowTitle("建立專案")
         dialog.resize(640, 320)
         layout = QFormLayout(dialog)
         name, repo, branch, notes = QLineEdit(), QLineEdit(), QLineEdit(), QPlainTextEdit()
@@ -2155,18 +2180,18 @@ class MainWindow(QMainWindow):
         row_layout = QHBoxLayout(row)
         row_layout.setContentsMargins(0, 0, 0, 0)
         row_layout.addWidget(repo)
-        row_layout.addWidget(button("Browse…", lambda: repo.setText(QFileDialog.getExistingDirectory(dialog, "Project directory") or repo.text())))
-        layout.addRow("Name", name)
-        layout.addRow("Repository / directory", row)
-        layout.addRow("Default branch (optional)", branch)
-        layout.addRow("Notes", notes)
+        row_layout.addWidget(button("瀏覽…", lambda: repo.setText(QFileDialog.getExistingDirectory(dialog, "選擇專案資料夾") or repo.text())))
+        layout.addRow("名稱", name)
+        layout.addRow("專案資料夾", row)
+        layout.addRow("預設分支（選填）", branch)
+        layout.addRow("備註", notes)
         actions = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         actions.accepted.connect(dialog.accept)
         actions.rejected.connect(dialog.reject)
         layout.addRow(actions)
         if dialog.exec() == QDialog.Accepted:
             if not name.text().strip() or not repo.text().strip():
-                self.show_error("Project name and directory are required.")
+                self.show_error("請填寫專案名稱與資料夾。")
                 return
             if not self.confirm_context_change():
                 return
@@ -2179,9 +2204,9 @@ class MainWindow(QMainWindow):
 
     def new_task(self):
         if not self.core.current_project:
-            self.show_error("Create or select a project first.")
+            self.require_project("建立任務前需要先有專案。")
             return
-        title, ok = QInputDialog.getText(self, "Create task", "Task title")
+        title, ok = QInputDialog.getText(self, "建立任務", "任務名稱")
         if ok and title.strip():
             if not self.confirm_context_change():
                 return
