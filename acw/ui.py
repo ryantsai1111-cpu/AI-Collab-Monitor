@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 from .presentation import (session_identity, session_display, local_session_displays,
                            project_label, task_label, compact)
+from . import approvals
 from .orchestrator import Orchestrator
 from .theme import EVENT_COLOR, HEADING_COLOR, STATE_COLORS, STATE_IDLE, build_style, metal_palette
 
@@ -346,6 +347,9 @@ class EventCard(QFrame):
         summary = event.get("command") or event.get("tool") or event.get("summary") or event.get("name") or event.get("status", "")
         if event.get("imported") and event.get("tool") and event.get("summary") and not event.get("command"):
             summary = f"{event['tool']} · {event['summary']}"
+        request = approvals.describe(event.get("details")) if kind in APPROVAL_EVENTS else None
+        if request:
+            summary = request["tool"] + " · " + (request["command"] or request["path"] or "")
         summary = ANSI_ESCAPE.sub("", str(summary)).strip()
         self.toggle = QToolButton()
         self.toggle.setText(f"{EVENT_LABELS.get(kind, kind.replace('_', ' '))}  {(summary.splitlines() or [''])[0][:100]}")
@@ -360,7 +364,12 @@ class EventCard(QFrame):
         detail = dict(event)
         if "output" in detail and (detail.get("output_stream") == "combined" or not ("stdout" in detail or "stderr" in detail)):
             detail["output_stream"] = "Combined output supplied by backend; stdout/stderr separation unavailable."
-        self.body = QPlainTextEdit(ANSI_ESCAPE.sub("", plain(detail)))
+        if request:
+            # The command or file as the backend will run it, not a JSON dump of it.
+            readable = request["command"] or request["path"] or plain(event.get("details") or {})
+            self.body = QPlainTextEdit(ANSI_ESCAPE.sub("", request["tool"] + "\n\n" + readable))
+        else:
+            self.body = QPlainTextEdit(ANSI_ESCAPE.sub("", plain(detail)))
         self.body.setReadOnly(True)
         self.body.setFont(QFont("Consolas", 9))
         self.body.setMaximumHeight(300)
@@ -373,8 +382,14 @@ class EventCard(QFrame):
         if kind in APPROVAL_EVENTS:
             self.setObjectName("event_approval")
             actions = QHBoxLayout()
-            actions.addWidget(label("Backend approval required. Review the request above.", True))
-            self.approval_actions = [button("Deny", lambda: window.approve(event, False)), button("Approve…", lambda: window.approve(event, True))]
+            actions.addStretch()
+            self.approval_actions = [button("Deny", lambda: window.approve(event, False)),
+                                     button("核准", lambda: window.approve(event, True, confirm=False))]
+            key = approvals.rule_key(request)
+            if key:
+                always = button("一律允許 " + approvals.rule_label(key), lambda: window.allow_always(event, key))
+                always.setToolTip("這次連線期間，同一個程式或工具不再詢問；危險操作仍會問")
+                self.approval_actions.append(always)
             for control in self.approval_actions:
                 control.setEnabled(not historical and window.mode.currentData() != 'Monitor' and bool(window.core.capabilities(event.get("agent", "")).get("supports_approval")))
                 actions.addWidget(control)
@@ -448,6 +463,7 @@ class AgentPanel(QFrame):
         self.cards = {}
         self.approvals = {}
         self.pending_approval_events = {}
+        self.approval_rules = set()  # "always allow" choices; they last until this role disconnects
         self.attachments = []
         self.connection_state = "Disconnected"
         self.monitor = False
@@ -495,6 +511,16 @@ class AgentPanel(QFrame):
         more.addAction("原始事件…", lambda: window.show_agent_events(agent))
         more.addAction("日誌…", lambda: window.open_logs(agent))
         more.addAction("專案檔案", window.open_project)
+        if agent != "dot":
+            more.addSeparator()
+            mode_menu = more.addMenu("核准方式")
+            self.approval_actions_menu = {}
+            for mode in approvals.MODES:
+                action = mode_menu.addAction(approvals.MODE_LABELS[mode], lambda checked=False, mode=mode: window.set_approval_mode(agent, mode))
+                action.setCheckable(True)
+                self.approval_actions_menu[mode] = action
+            mode_menu.aboutToShow.connect(lambda: [action.setChecked(mode == window.approval_mode(agent))
+                                                   for mode, action in self.approval_actions_menu.items()])
         self.more_button.setMenu(more)
         header.addWidget(self.more_button)
         layout.addLayout(header)
@@ -911,6 +937,8 @@ class AgentPanel(QFrame):
         self.state.setText(STATE_LABELS.get(state, "狀態待確認（" + state + "）"))
         color = STATE_COLORS.get(state, STATE_IDLE)
         self.state.setStyleSheet(f"color: {color};")
+        if state in ("Disconnected", "Offline"):
+            self.approval_rules.clear()
         if (old_state in ("Connected", "Busy")) != (state in ("Connected", "Busy")):
             self.update_capabilities(self.capabilities)
         self.connect_button.setText("中斷連線" if state in ("Connected", "Busy") else ("重新連線" if state in ("Error", "Offline") else "連線"))
@@ -1112,7 +1140,16 @@ class AgentPanel(QFrame):
         event = {**(event.get("payload") or {}), **event}
         self.empty.hide()
         card = EventCard(event, self.window, historical)
-        if event.get("type") in APPROVAL_EVENTS:
+        approval = event.get("type") in APPROVAL_EVENTS
+        request_id = event.get("request_id") or (event.get("payload") or {}).get("request_id")
+        automatic = approval and not historical and bool(request_id) and self.window.auto_approve(self.agent, event, request_id)
+        if approval and (historical or automatic):
+            # Already answered: it belongs with the rest of the tool activity, not in the user's way.
+            card.resolve_approval()
+            card.toggle.setChecked(False)
+            if automatic:
+                card.toggle.setText("已自動核准  " + card.toggle.text().split("  ", 1)[-1])
+        if approval and not (historical or automatic):
             self.transcript_layout.insertWidget(self.transcript_layout.count() - 1, card)
             # A live insertion must be exposed before it can receive pointer input.
             # Layout geometry is still allowed to settle in the normal event loop.
@@ -1126,11 +1163,10 @@ class AgentPanel(QFrame):
                 self.transcript_layout.insertWidget(self.transcript_layout.count() - 1, group)
                 group.show()
             group.add(card)
-        if event.get("type") in APPROVAL_EVENTS:
-            request_id = event.get("request_id") or (event.get("payload") or {}).get("request_id")
+        if approval:
             if request_id:
                 self.approvals[request_id] = card
-                if not historical:
+                if not historical and not automatic:
                     self.pending_approval_events[request_id] = event
                     self.pending_review.show()
                     self.window.update_role_tabs()
@@ -2962,13 +2998,45 @@ class MainWindow(QMainWindow):
         if QMessageBox.question(self, "Stop current task", "Request cancellation from all four adapters for the current task?", QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes:
             self.run(lambda: self.core.stop_task(confirmed=True))
 
-    def approve(self, event, approved):
+    def approval_mode(self, agent):
+        mode = (self.core.get_setting("agent." + agent, {}) or {}).get("approval_mode", "ask")
+        return mode if mode in approvals.MODES else "ask"
+
+    def set_approval_mode(self, agent, mode):
+        if mode == "all" and self.approval_mode(agent) != "all":
+            box = QMessageBox(QMessageBox.Warning, "自動核准全部", "", QMessageBox.Yes | QMessageBox.No, self)
+            box.setTextFormat(Qt.PlainText)
+            box.setText(ROLE_NAMES[agent] + " 之後執行指令、修改專案內的檔案都不會再問你。\n\n"
+                        "仍然會問的：刪除資料夾、git push、強制覆寫、修改系統設定、下載後直接執行、修改專案資料夾以外的檔案。\n\n"
+                        "這份清單擋得住常見的危險操作，但不保證擋得住全部。要開啟嗎？")
+            box.setDefaultButton(QMessageBox.No)
+            if box.exec() != QMessageBox.Yes:
+                return
+        self.core.set_setting("agent." + agent, dict(self.core.get_setting("agent." + agent, {}) or {}, approval_mode=mode))
+        self.footer.setText(ROLE_NAMES[agent] + " 核准方式：" + approvals.MODE_LABELS[mode])
+
+    def auto_approve(self, agent, event, request_id):
+        """Answer a request without asking when the user's chosen mode or an "always allow" rule covers it."""
+        if self.mode.currentData() == "Monitor" or not self.core.capabilities(agent).get("supports_approval"):
+            return False
+        cwd = getattr(self.core.adapters.get(agent), "cwd", "") or (self.core.current_project or {}).get("repo_path", "")
+        if not approvals.decide(self.approval_mode(agent), event.get("details"), cwd, self.panels[agent].approval_rules):
+            return False
+        self.run(lambda: self.core.approve(agent, request_id, True), agent=agent)
+        return True
+
+    def allow_always(self, event, key):
+        event = {**(event.get("payload") or {}), **event}
+        self.panels[event["agent"]].approval_rules.add(key)
+        self.approve(event, True, confirm=False)
+
+    def approve(self, event, approved, confirm=True):
         event = {**(event.get("payload") or {}), **event}
         request_id = event.get("request_id") or event.get("approval_id")
         if not request_id:
             self.show_error("核准要求缺少後端識別碼。未傳送回覆。")
             return
-        if approved:
+        if approved and confirm:
             box = QMessageBox(QMessageBox.Question, "Backend tool approval", "", QMessageBox.Yes | QMessageBox.No, self)
             box.setTextFormat(Qt.PlainText)
             box.setText("Approve this specific backend request?")
@@ -3441,7 +3509,7 @@ class MainWindow(QMainWindow):
         for name, text in (
             ("Projects", "Use the project selector to choose a working directory. Sync sets Claude, Codex and Local LLM cwd; dot receives metadata only. Git integration is read only."),
             ("Logs", "Raw JSONL and structured events are retained locally. Safety filtering redacts credentials and excludes hidden reasoning before persistence. Open per-agent logs from each panel."),
-            ("Permissions", "Original backend permission and sandbox settings remain authoritative. Tool approval requires an explicit user action. Automatic approval and sandbox bypass are not available."),
+            ("Permissions", "Original backend permission and sandbox settings remain authoritative. Tool approval asks every time by default. Each role's ⋯ menu can loosen this to file edits inside the project, or to everything except destructive and outward-facing commands. Sandbox bypass is not available."),
             ("Advanced", "Automatic orchestration: OFF\nNo agents connect automatically at startup. Unsupported capabilities remain unavailable. Use Diagnostics for executable, backend, session, cwd, last event and last error."),
         ):
             page = QWidget()
