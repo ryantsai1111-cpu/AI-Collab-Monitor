@@ -23,6 +23,7 @@ def main():
     if not lock.tryLock(100):
         QMessageBox.information(None,'Workspace already open','This data directory is already open. Use the existing window.');return 1
     core=WorkspaceCore(args.data_dir)
+    if core.get_setting('ui.sidebar_page') is None: core.set_setting('ui.sidebar_page','nav')
     local=Path(os.environ.get('LOCALAPPDATA',''))
     claudes=list((local/'Packages'/'Claude_pzs8sxrjxfjjc'/'LocalCache'/'Roaming'/'Claude'/'claude-code').glob('*/*/claude.exe'))
     codexes=list((local/'OpenAI'/'Codex'/'bin').glob('*/codex.exe'))

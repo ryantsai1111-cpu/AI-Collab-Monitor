@@ -95,6 +95,12 @@ QTreeWidget, QTableWidget { color: #e9eef3; background: #0f1215; border: 1px sol
 QTreeWidget::item { padding: 5px; }
 QTableCornerButton::section { background: #393e45; border: none; }
 QSplitter::handle { background: transparent; width: 8px; }
+QTabBar#sidebar_pages::tab, QTabBar#nav_source::tab { padding: 6px 10px; }
+QTreeWidget#nav_tree { border-radius: 6px; padding: 4px; outline: 0; }
+QTreeWidget#nav_tree::item { padding: 6px 4px; border-radius: 4px; }
+QTreeWidget#nav_tree::item:hover { background: #1c2126; }
+QTreeWidget#nav_tree::item:selected { color: #ffffff; background: #24507f; }
+QLabel#nav_status { color: #aeb7c1; font-size: 11px; }
 
 QMenu { color: #12161a; background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #eceff2, stop:1 #c9ced4); border: 1px solid #0d0f11; padding: 5px; }
 QMenu::item { color: #12161a; background: transparent; padding: 6px 18px; border-radius: 3px; }

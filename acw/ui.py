@@ -15,10 +15,10 @@ from .presentation import (session_identity, session_display, local_session_disp
 from .theme import EVENT_COLOR, HEADING_COLOR, STATE_COLORS, STATE_IDLE, build_style, metal_palette
 
 from PySide6.QtCore import Qt, Signal, QObject, QRunnable, QThreadPool, QTimer, QUrl, QByteArray
-from PySide6.QtGui import QAction, QDesktopServices, QFont, QKeySequence, QPixmap, QTextCursor
+from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QKeySequence, QPixmap, QTextCursor
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
-    QFormLayout, QFrame, QGridLayout, QHBoxLayout, QInputDialog, QLabel,
+    QFormLayout, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
     QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
     QScrollArea, QSizePolicy, QSpinBox, QSplitter, QStackedWidget, QTabWidget,
     QTableWidget, QTableWidgetItem, QTextBrowser, QToolButton, QTreeWidget, QTabBar,
@@ -246,11 +246,15 @@ class EventCard(QFrame):
         layout.setContentsMargins(7, 4, 7, 4)
         kind = event.get("type", "event")
         summary = event.get("command") or event.get("tool") or event.get("summary") or event.get("name") or event.get("status", "")
+        if event.get("imported") and event.get("tool") and event.get("summary") and not event.get("command"):
+            summary = f"{event['tool']} · {event['summary']}"
         self.toggle = QToolButton()
-        self.toggle.setText(f"{kind.replace('_', ' ').upper()}  {str(summary)[:100]}")
+        self.toggle.setText(f"{kind.replace('_', ' ').upper()}  {(str(summary).strip().splitlines() or [''])[0][:100]}")
         self.toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self.toggle.setArrowType(Qt.RightArrow)
-        self.toggle.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        # A long command must not widen the transcript past its viewport.
+        self.toggle.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.toggle.setToolTip(str(summary)[:600])
         self.toggle.setCheckable(True)
         self.toggle.setStyleSheet(f"text-align: left; border: none; background: transparent; color: {EVENT_COLOR};")
         layout.addWidget(self.toggle)
@@ -334,8 +338,10 @@ class AgentPanel(QFrame):
         more = QMenu(self.more_button)
         more.addAction("對話…", lambda: window.show_sessions(agent))
         more.addAction("本機歷史…", self.show_session_history)
+        if agent == "codex":
+            more.addAction("Codex 本機對話…", lambda: window.show_desktop_sessions("codex"))
         if agent == "claude":
-            more.addAction("Desktop 專案與對話…", window.show_desktop_sessions)
+            more.addAction("Desktop 專案與對話…", lambda: window.show_desktop_sessions("claude"))
         more.addAction("能力詳情…", self.show_capabilities)
         more.addSeparator()
         more.addAction("原始事件…", lambda: window.show_agent_events(agent))
@@ -1420,94 +1426,184 @@ class NativeSessionDialog(QDialog):
         self.window.run(lambda: self.window.core.import_session(self.agent, record), imported, on_error=failed)
 
 
-class DesktopSessionsDialog(QDialog):
-    """Pick a Claude desktop project or conversation. Reading happens only after this is opened."""
+class SessionNavigator(QWidget):
+    """Sidebar list of locally saved Claude desktop and Codex conversations, grouped by repository.
+
+    Nothing is read until this page is first shown. Rename and archive are kept in this
+    workspace's own settings; the source apps' files are never written."""
+    SOURCES = (("Claude", "claude"), ("Codex", "codex"))
+
     def __init__(self, window):
-        super().__init__(window)
+        super().__init__()
         self.window = window
-        self.setObjectName("desktop_sessions_dialog")
-        self.setWindowTitle("Claude Desktop 專案與對話")
-        self.resize(900, 640)
+        self.sessions = {agent: None for _, agent in self.SOURCES}
+        self.collapsed = set()
         layout = QVBoxLayout(self)
-        layout.addWidget(label("這裡列出 Claude Desktop 在本機保存的 Code 對話，依專案資料夾分組。"
-                               "選擇後會切換到該資料夾、載入可見的對話紀錄，並在 Claude 面板接續同一個對話。", True))
-        filters = QHBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        self.source = QTabBar()
+        self.source.setObjectName("nav_source")
+        self.source.setDrawBase(False)
+        self.source.setExpanding(True)
+        for title, _ in self.SOURCES:
+            self.source.addTab(title)
+        self.source.currentChanged.connect(lambda _: self.ensure_loaded())
+        layout.addWidget(self.source)
         self.search = QLineEdit()
-        self.search.setObjectName("desktop_session_search")
-        self.search.setPlaceholderText("搜尋對話標題或資料夾…")
+        self.search.setObjectName("nav_search")
+        self.search.setPlaceholderText("搜尋對話或專案…")
+        self.search.setClearButtonEnabled(True)
         self.search.textChanged.connect(self.fill)
-        filters.addWidget(self.search, 1)
-        self.archived = QCheckBox("顯示已封存")
-        self.archived.toggled.connect(self.fill)
-        filters.addWidget(self.archived)
-        layout.addLayout(filters)
+        layout.addWidget(self.search)
         self.tree = QTreeWidget()
-        self.tree.setObjectName("desktop_session_tree")
-        self.tree.setHeaderLabels(["專案／對話", "最後活動", "模型"])
-        self.tree.setAlternatingRowColors(True)
-        self.tree.setColumnWidth(0, 540)
-        self.tree.setColumnWidth(1, 130)
+        self.tree.setObjectName("nav_tree")
+        self.tree.setColumnCount(2)
+        self.tree.setHeaderHidden(True)
+        self.tree.setRootIsDecorated(False)
+        self.tree.setIndentation(12)
+        self.tree.setUniformRowHeights(True)
+        self.tree.setTextElideMode(Qt.ElideRight)
+        self.tree.header().setStretchLastSection(False)
+        self.tree.header().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.tree.header().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(lambda point: self.menu.exec(self.tree.viewport().mapToGlobal(point)))
         self.tree.currentItemChanged.connect(lambda *_: self.selection_changed())
-        self.tree.itemDoubleClicked.connect(lambda *_: self.open_selected(True))
+        self.tree.itemClicked.connect(self.toggle_group)
+        self.tree.itemActivated.connect(lambda *_: self.open_selected(True))
         layout.addWidget(self.tree, 1)
         self.status = label("", True)
+        self.status.setObjectName("nav_status")
         layout.addWidget(self.status)
-        layout.addWidget(label("注意：同一個對話不要同時在 Claude Desktop 和這裡傳送訊息，兩邊會寫入同一份紀錄。", True))
         actions = QHBoxLayout()
-        self.new_button = button("在此專案開新對話", self.new_conversation, "desktop_new_conversation")
-        self.load_button = button("只載入紀錄", lambda: self.open_selected(False), "desktop_load_only")
-        self.open_button = button("開啟並接續對話", lambda: self.open_selected(True), "primary")
-        actions.addWidget(self.new_button)
-        actions.addStretch()
-        actions.addWidget(button("Close", self.reject))
-        actions.addWidget(self.load_button)
-        actions.addWidget(self.open_button)
+        actions.setSpacing(6)
+        self.open_button = button("接續對話", lambda: self.open_selected(True), "primary")
+        self.open_button.setToolTip("切換到該專案、載入紀錄並接續同一個對話（也可按兩下）")
+        actions.addWidget(self.open_button, 1)
+        self.more = QToolButton()
+        self.more.setText("⋯")
+        self.more.setAccessibleName("對話操作")
+        self.more.setPopupMode(QToolButton.InstantPopup)
+        self.menu = QMenu(self.more)
+        self.load_action = self.menu.addAction("只載入紀錄", lambda: self.open_selected(False))
+        self.new_action = self.menu.addAction("在此專案開新對話", self.new_conversation)
+        self.menu.addSeparator()
+        self.rename_action = self.menu.addAction("重新命名…", self.rename)
+        self.archive_action = self.menu.addAction("封存", self.toggle_archive)
+        self.menu.addSeparator()
+        self.archived_action = self.menu.addAction("顯示已封存與系統對話")
+        self.archived_action.setCheckable(True)
+        self.archived_action.toggled.connect(self.fill)
+        self.refresh_action = self.menu.addAction("重新整理", self.load)
+        self.more.setMenu(self.menu)
+        actions.addWidget(self.more)
         layout.addLayout(actions)
-        self.sessions = []
         self.selection_changed()
 
-    def load(self):
-        self.status.setText("正在讀取 Claude Desktop 的對話清單…")
-        def failed(error):
-            self.status.setText("無法讀取 Claude Desktop 對話：" + error)
-        self.window.run(self.window.core.desktop_sessions, self.set_sessions, on_error=failed)
+    @property
+    def agent(self):
+        return self.SOURCES[max(0, self.source.currentIndex())][1]
 
-    def set_sessions(self, sessions):
-        self.sessions = list(sessions or [])
-        self.fill()
+    def ensure_loaded(self):
+        if self.sessions[self.agent] is None:
+            self.load()
+        else:
+            self.fill()
+
+    def load(self):
+        agent = self.agent
+        self.status.setText("正在讀取對話清單…")
+        def failed(error):
+            self.status.setText("無法讀取對話清單：" + error)
+        self.window.run(lambda: self.window.core.desktop_sessions(agent), lambda rows: self.set_sessions(agent, rows), on_error=failed)
+
+    def set_sessions(self, agent, rows):
+        self.sessions[agent] = list(rows or [])
+        if agent == self.agent:
+            self.fill()
 
     @staticmethod
-    def local_time(value):
+    def when(value):
         try:
-            return datetime.fromisoformat(value).astimezone().strftime("%m-%d %H:%M")
+            moment = datetime.fromisoformat(value).astimezone()
         except (TypeError, ValueError):
             return ""
+        minutes = (datetime.now().astimezone() - moment).total_seconds() / 60
+        if minutes < 1:
+            return "剛剛"
+        if minutes < 60:
+            return f"{int(minutes)} 分"
+        if minutes < 1440:
+            return f"{int(minutes // 60)} 小時"
+        if minutes < 10080:
+            return f"{int(minutes // 1440)} 天"
+        return moment.strftime("%m-%d")
+
+    def title_of(self, session):
+        if session["title"].startswith("（未命名"):
+            return "未命名對話 " + self.when(session["created"] or session["last_activity"])
+        return session["title"]
 
     def fill(self, *_):
         from .desktop_sessions import group_by_project
-        query = self.search.text().casefold().strip()
+        agent, query = self.agent, self.search.text().casefold().strip()
+        selected = (self.selected() or {}).get("id")
+        current = (self.window.core.current_task or {}).get(agent + "_session")
         self.tree.clear()
-        shown = 0
-        for group in group_by_project(self.sessions):
-            rows = [s for s in group["sessions"] if (self.archived.isChecked() or not s["archived"])
-                    and (not query or query in (s["title"] + " " + s["cwd"]).casefold())]
+        shown, focus = 0, None
+        for group in group_by_project(self.sessions[agent] or []):
+            rows = [s for s in group["sessions"] if (self.archived_action.isChecked() or not (s["archived"] or s.get("system")))
+                    and (not query or query in (s["title"] + " " + group["name"] + " " + s["cwd"]).casefold())]
             if not rows:
                 continue
-            parent = QTreeWidgetItem([group["name"] + ("" if group["cwd_exists"] else "（資料夾不存在）"),
-                                      self.local_time(rows[0]["last_activity"]), f"{len(rows)} 個對話"])
-            parent.setData(0, Qt.UserRole, {"kind": "project", "cwd": group["cwd"], "cwd_exists": group["cwd_exists"]})
+            key = rows[0].get("project_key") or group["cwd"]
+            parent = QTreeWidgetItem(["", str(len(rows))])
+            parent.setData(0, Qt.UserRole, {"kind": "project", "key": key, "name": group["name"], "agent": agent,
+                                            "cwd": group["cwd"], "cwd_exists": group["cwd_exists"]})
             parent.setToolTip(0, group["cwd"])
+            heading = parent.font(0)
+            heading.setBold(True)
+            parent.setFont(0, heading)
+            parent.setForeground(1, QColor("#8c959f"))
             self.tree.addTopLevelItem(parent)
             for session in rows:
-                child = QTreeWidgetItem([session["title"] + ("（已封存）" if session["archived"] else ""),
-                                         self.local_time(session["last_activity"]), session["model"]])
+                child = QTreeWidgetItem([self.title_of(session) + ("（已封存）" if session["archived"] else ""),
+                                         self.when(session["last_activity"])])
                 child.setData(0, Qt.UserRole, dict(session, kind="session"))
-                child.setToolTip(0, session["cwd"] + "\n對話 ID：" + session["id"])
+                child.setToolTip(0, session["title"] + "\n" + session["cwd"] + ("" if session["cwd_exists"] else "\n資料夾已不存在"))
+                child.setForeground(1, QColor("#8c959f"))
+                if not session["cwd_exists"] or session["archived"]:
+                    child.setForeground(0, QColor("#8c959f"))
+                if session["id"] == current:
+                    font = child.font(0)
+                    font.setBold(True)
+                    child.setFont(0, font)
+                    child.setForeground(0, QColor(HEADING_COLOR))
                 parent.addChild(child)
-            parent.setExpanded(bool(query) or self.tree.topLevelItemCount() <= 3)
+                if session["id"] == (selected or current):
+                    focus = child
+            parent.setExpanded(bool(query) or key not in self.collapsed)
+            self.label_group(parent)
             shown += len(rows)
-        self.status.setText(f"共 {shown} 個對話" if self.sessions else "找不到 Claude Desktop 的本機對話。")
+        if focus is not None:
+            self.tree.setCurrentItem(focus)
+        if self.sessions[agent] is None:
+            self.status.setText("")
+        else:
+            self.status.setText(f"{shown} 個對話" if self.sessions[agent] else "這台電腦上沒有找到本機對話")
         self.selection_changed()
+
+    @staticmethod
+    def label_group(item):
+        item.setText(0, ("▾ " if item.isExpanded() else "▸ ") + item.data(0, Qt.UserRole)["name"])
+
+    def toggle_group(self, item, _column=0):
+        record = item.data(0, Qt.UserRole) or {}
+        if record.get("kind") != "project":
+            return
+        item.setExpanded(not item.isExpanded())
+        (self.collapsed.discard if item.isExpanded() else self.collapsed.add)(record["key"])
+        self.label_group(item)
 
     def selected(self):
         item = self.tree.currentItem()
@@ -1515,24 +1611,44 @@ class DesktopSessionsDialog(QDialog):
 
     def selection_changed(self):
         record = self.selected() or {}
+        session = record.get("kind") == "session"
         usable = bool(record.get("cwd_exists")) and self.window.mode.currentData() != "Monitor"
-        self.open_button.setEnabled(usable and record.get("kind") == "session")
-        self.load_button.setEnabled(usable and record.get("kind") == "session")
-        self.new_button.setEnabled(usable)
+        self.open_button.setEnabled(usable and session)
+        self.load_action.setEnabled(usable and session)
+        self.new_action.setEnabled(usable)
+        self.rename_action.setEnabled(session)
+        self.archive_action.setEnabled(session)
+        self.archive_action.setText("取消封存" if record.get("archived") else "封存")
 
     def open_selected(self, resume):
         record = self.selected() or {}
-        if record.get("kind") != "session" or not self.open_button.isEnabled():
-            return
-        self.accept()
-        self.window.open_desktop_session(record, resume)
+        if record.get("kind") == "session" and self.open_button.isEnabled():
+            self.window.open_desktop_session(record, resume)
 
     def new_conversation(self):
         record = self.selected() or {}
-        if not self.new_button.isEnabled():
+        if self.new_action.isEnabled():
+            self.window.new_desktop_conversation(record["cwd"], record.get("agent", self.agent))
+
+    def _override(self, record, **changes):
+        agent = record.get("agent", self.agent)
+        def done(_):
+            self.window.reload_context()
+            self.load()
+        self.window.run(lambda: self.window.core.set_desktop_override(agent, record["id"], **changes), done)
+
+    def rename(self):
+        record = self.selected() or {}
+        if record.get("kind") != "session":
             return
-        self.accept()
-        self.window.new_desktop_conversation(record["cwd"])
+        title, ok = QInputDialog.getText(self, "重新命名對話", "名稱（留空則恢復原名；只影響這個程式）", text=record["title"])
+        if ok:
+            self._override(record, title=title.strip())
+
+    def toggle_archive(self):
+        record = self.selected() or {}
+        if record.get("kind") == "session":
+            self._override(record, archived=not record.get("archived"))
 
 
 class HandoffDialog(QDialog):
@@ -1665,7 +1781,24 @@ class MainWindow(QMainWindow):
         side = QVBoxLayout(self.sidebar)
         side.setContentsMargins(12, 12, 12, 12)
         side.setSpacing(8)
-        side.addWidget(label("專案與對話", True))
+        self.sidebar_pages = QTabBar()
+        self.sidebar_pages.setObjectName("sidebar_pages")
+        self.sidebar_pages.setDrawBase(False)
+        self.sidebar_pages.setExpanding(True)
+        self.sidebar_pages.setAccessibleName("側欄頁面")
+        self.sidebar_pages.addTab("對話")
+        self.sidebar_pages.addTab("工作區")
+        side.addWidget(self.sidebar_pages)
+        self.sidebar_stack = QStackedWidget()
+        self.navigator = SessionNavigator(self)
+        self.sidebar_stack.addWidget(self.navigator)
+        work_page = QWidget()
+        work = QVBoxLayout(work_page)
+        work.setContentsMargins(0, 0, 0, 0)
+        work.setSpacing(8)
+        self.sidebar_stack.addWidget(work_page)
+        side.addWidget(self.sidebar_stack, 1)
+        work.addWidget(label("專案與任務", True))
         project_row = QHBoxLayout()
         self.project_combo = QComboBox()
         self.project_combo.setObjectName("global_project")
@@ -1678,7 +1811,7 @@ class MainWindow(QMainWindow):
         create_project.setAccessibleName("新增專案")
         create_project.setToolTip("新增專案")
         project_row.addWidget(create_project)
-        side.addLayout(project_row)
+        work.addLayout(project_row)
         task_row = QHBoxLayout()
         self.task_combo = QComboBox()
         self.task_combo.setObjectName("global_task")
@@ -1691,7 +1824,7 @@ class MainWindow(QMainWindow):
         create_task.setAccessibleName("新增任務")
         create_task.setToolTip("新增任務")
         task_row.addWidget(create_task)
-        side.addLayout(task_row)
+        work.addLayout(task_row)
         self.task_status = QComboBox()
         self.task_status.addItem("尚未選擇任務", None)
         for value in STATUSES:
@@ -1699,22 +1832,21 @@ class MainWindow(QMainWindow):
         self.task_status.setObjectName("task_status")
         self.task_status.setAccessibleName("任務狀態")
         self.task_status.currentIndexChanged.connect(lambda _: self.status_changed(self.task_status.currentData()))
-        side.addWidget(label("任務狀態", True))
-        side.addWidget(self.task_status)
+        work.addWidget(label("任務狀態", True))
+        work.addWidget(self.task_status)
         self.mode = QComboBox()
         for title, value in (("對話", "Workspace"), ("監看（唯讀）", "Monitor"), ("時間線", "Timeline"), ("歷史", "History")):
             self.mode.addItem(title, value)
         self.mode.setObjectName("view_mode")
         self.mode.setAccessibleName("工作區檢視")
         self.mode.currentIndexChanged.connect(lambda _: self.change_mode(self.mode.currentData()))
-        side.addWidget(label("檢視", True))
-        side.addWidget(self.mode)
+        work.addWidget(label("檢視", True))
+        work.addWidget(self.mode)
         self.session_tabs = QTabWidget()
         self.session_tabs.setObjectName("sidebar_sessions")
         self.session_tabs.setDocumentMode(True)
         self.session_tabs.setAccessibleName("各角色對話")
-        side.addWidget(self.session_tabs, 1)
-        side.addWidget(button("Desktop 專案與對話…", self.show_desktop_sessions, "desktop_sessions"))
+        work.addWidget(self.session_tabs, 1)
         side.addWidget(button("Settings…", self.settings, "settings"))
         self.workspace_splitter.addWidget(self.sidebar)
         content = QWidget()
@@ -1847,6 +1979,12 @@ class MainWindow(QMainWindow):
             action.triggered.connect(lambda checked=False, agent=agent: self.focus_agent(agent))
             self.addAction(action)
         self.reload_context()
+        self.sidebar_pages.currentChanged.connect(self.sidebar_page_changed)
+        # Local conversations are read only once this page is shown, never during construction.
+        self.sidebar_pages.setCurrentIndex(0 if core.get_setting("ui.sidebar_page", "work") == "nav" else 1)
+        self.sidebar_stack.setCurrentIndex(self.sidebar_pages.currentIndex())
+        if self.sidebar_pages.currentIndex() == 0:
+            QTimer.singleShot(0, self.navigator, self.navigator.ensure_loaded)
         geometry = core.get_setting("ui.geometry", "")
         if geometry:
             self.restoreGeometry(QByteArray.fromBase64(str(geometry).encode()))
@@ -1882,9 +2020,16 @@ class MainWindow(QMainWindow):
             self.sidebar_toggle.setFocus()
         QTimer.singleShot(0, self, self.update_workspace_layout)
 
+    def sidebar_page_changed(self, index):
+        self.sidebar_stack.setCurrentIndex(index)
+        self.core.set_setting("ui.sidebar_page", "nav" if index == 0 else "work")
+        if index == 0:
+            self.navigator.ensure_loaded()
+
     def show_sessions(self, agent):
         self.sidebar.show()
         self.sidebar_toggle.setChecked(True)
+        self.sidebar_pages.setCurrentIndex(1)
         self.session_tabs.setCurrentIndex(AGENTS.index(agent))
         self.panels[agent].session.setFocus()
         QTimer.singleShot(0, self, self.update_workspace_layout)
@@ -2149,19 +2294,26 @@ class MainWindow(QMainWindow):
                 self.reconcile_pending_approvals(view, agent, identifier(task))
                 panel._restoring_view = True
                 panel.clear_conversation()
-                for message in self.core.messages(agent=agent):
-                    if message.get("role") in ("user", "assistant"):
-                        panel.add_message(message)
-                for event in reversed(self.core.events(agent=agent, limit=100)):
-                    if event.get("type") in ("tool_start", "tool_result", "command", "command_output", "file", "file_edit", "error", "test", "approval", "approval_request", "tool_approval"):
-                        pending_id = event.get("request_id") or (event.get("payload") or {}).get("request_id")
-                        panel.add_event(event, historical=pending_id not in view.get("pending", {}))
+                shown = ("tool_start", "tool_result", "command", "command_output", "file", "file_edit", "error", "test", "approval", "approval_request", "tool_approval")
+                history = [(str(message.get("timestamp") or ""), 0, message) for message in self.core.messages(agent=agent)
+                           if message.get("role") in ("user", "assistant")]
+                history += [(str(event.get("timestamp") or ""), 1, event) for event in reversed(self.core.events(agent=agent, limit=400))
+                            if event.get("type") in shown]
+                # Stable sort: equal timestamps keep messages before events, as before.
+                for _, is_event, row in sorted(history, key=lambda entry: entry[:2]):
+                    if is_event:
+                        pending_id = row.get("request_id") or (row.get("payload") or {}).get("request_id")
+                        panel.add_event(row, historical=pending_id not in view.get("pending", {}))
+                    else:
+                        panel.add_message(row)
                 panel.cwd_label.setText(("中繼資料：" if agent == "dot" else "工作目錄：") + (project.get("name", "尚未選擇") if agent == "dot" else project.get(f"{agent}_cwd") or project.get("repo_path") or project.get("repo") or "尚未選擇"))
                 panel.cwd_label.setToolTip(panel.cwd_label.text())
                 panel.branch_label.setText("分支：" + (task.get("branch") or project.get("active_branch") or "—"))
                 self.refresh_agent(agent)
                 panel.restore_view_state(view)
             self._loaded_context_key = key
+            if hasattr(self, "navigator") and self.navigator.sessions[self.navigator.agent] is not None:
+                self.navigator.fill()
             self._preferred_agent = saved_view.get("role", self._preferred_agent)
             self.role_tabs.setCurrentIndex(AGENTS.index(self._preferred_agent))
             self.session_tabs.setCurrentIndex(saved_view.get("session_tab", AGENTS.index(self._preferred_agent)))
@@ -2265,42 +2417,47 @@ class MainWindow(QMainWindow):
         error_panel=next((panel for panel in self.panels.values() if panel.connection_state=='Error'),None)
         self.footer.setText('Error · '+error_panel.agent+' · '+error_panel.notice.text() if error_panel else self.last_event)
 
-    def show_desktop_sessions(self):
-        dialog = DesktopSessionsDialog(self)
-        dialog.load()
-        dialog.exec()
+    def show_desktop_sessions(self, agent="claude"):
+        self.sidebar.show()
+        self.sidebar_toggle.setChecked(True)
+        self.navigator.source.setCurrentIndex([value for _, value in SessionNavigator.SOURCES].index(agent))
+        self.sidebar_pages.setCurrentIndex(0)
+        self.navigator.ensure_loaded()
+        self.navigator.search.setFocus()
+        QTimer.singleShot(0, self, self.update_workspace_layout)
 
-    def _claude_ready(self):
-        if self.core.adapters["claude"].state != "Connected":
-            self.core.connect("claude")
+    def _agent_ready(self, agent):
+        if self.core.adapters[agent].state != "Connected":
+            self.core.connect(agent)
 
     def open_desktop_session(self, record, resume=True):
         if not self.confirm_context_change():
             return
+        agent = record.get("agent", "claude")
         def opened(result):
             self.reload_context()
-            self.focus_role("claude")
-            self.footer.setText(f"已載入 Desktop 對話「{record.get('title', '')}」· 匯入 {result['imported']} 則可見訊息")
+            self.focus_role(agent)
+            self.footer.setText(f"已載入「{record.get('title', '')}」· {result['imported']} 則訊息、{result['tools']} 筆工具紀錄")
             if resume:
-                self.panels["claude"].set_state("Connecting")
+                self.panels[agent].set_state("Connecting")
                 def continue_session():
-                    self._claude_ready()
-                    return self.core.resume_session("claude", result["session_id"])
-                self.run(continue_session, lambda _: (self.reload_context(), self.refresh_agent("claude")), "claude")
+                    self._agent_ready(agent)
+                    return self.core.resume_session(agent, result["session_id"])
+                self.run(continue_session, lambda _: (self.reload_context(), self.refresh_agent(agent)), agent)
         self.run(lambda: self.core.open_desktop_session(record), opened)
 
-    def new_desktop_conversation(self, directory):
+    def new_desktop_conversation(self, directory, agent="claude"):
         if not self.confirm_context_change():
             return
         title = "新對話 " + datetime.now().strftime("%m-%d %H:%M")
         def opened(_):
             self.reload_context()
-            self.focus_role("claude")
-            self.panels["claude"].set_state("Connecting")
+            self.focus_role(agent)
+            self.panels[agent].set_state("Connecting")
             def start():
-                self._claude_ready()
-                return self.core.create_session("claude")
-            self.run(start, lambda _: (self.reload_context(), self.refresh_agent("claude")), "claude")
+                self._agent_ready(agent)
+                return self.core.create_session(agent)
+            self.run(start, lambda _: (self.reload_context(), self.refresh_agent(agent)), agent)
         self.run(lambda: self.core.open_desktop_project(directory, title), opened)
 
     def focus_role(self, agent):

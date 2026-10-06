@@ -334,10 +334,35 @@ class WorkspaceCore:
         self._record('session_imported',agent,task_id=None,session_id=session_id,content='Native session metadata imported; explicit Resume is still required.')
         return self.store.get('sessions',identity)
 
-    def desktop_sessions(self):
-        """Explicit picker read of the Claude desktop app's local session list (metadata only)."""
-        from .desktop_sessions import list_desktop_sessions
-        return sanitize(list_desktop_sessions())
+    def desktop_sessions(self,agent='claude'):
+        """Explicit navigator read of locally saved Claude desktop or Codex conversations (metadata only)."""
+        from .desktop_sessions import list_desktop_sessions, list_codex_sessions
+        if agent not in ('claude','codex'): raise ValueError('Local conversations are available for Claude and Codex only')
+        rows=sanitize(list_desktop_sessions() if agent=='claude' else list_codex_sessions())
+        overrides=self.get_setting('desktop.overrides',{}) or {}
+        for row in rows:
+            override=overrides.get(agent+':'+row['id']) or {}
+            if override.get('title'): row.update(title=override['title'],renamed=True)
+            if 'archived' in override: row['archived']=bool(override['archived'])
+        return rows
+
+    def set_desktop_override(self,agent,session_id,*,title=None,archived=None):
+        """Rename or archive a listed conversation inside this workspace only; the source app is never written."""
+        from .desktop_sessions import _valid_id
+        if agent not in ('claude','codex') or not _valid_id(str(session_id)): raise ValueError('Invalid conversation')
+        overrides=dict(self.get_setting('desktop.overrides',{}) or {})
+        entry=dict(overrides.get(agent+':'+session_id) or {})
+        if title is not None:
+            title=sanitize(str(title)).strip()[:200]
+            if title: entry['title']=title
+            else: entry.pop('title',None)
+            if title and self.store.get('sessions',{'agent':agent,'id':session_id}):
+                self.store.update('sessions',{'agent':agent,'id':session_id},{'title':title,'updated_at':now()})
+        if archived is not None: entry['archived']=bool(archived)
+        if entry: overrides[agent+':'+session_id]=entry
+        else: overrides.pop(agent+':'+session_id,None)
+        self.set_setting('desktop.overrides',overrides)
+        return entry
 
     def _project_for_directory(self,directory):
         directory=Path(directory)
@@ -350,7 +375,7 @@ class WorkspaceCore:
         return self.create_project(directory.name or str(directory),directory)
 
     def open_desktop_project(self,directory,title='新對話'):
-        """Select (or create) the project for a desktop folder and start a fresh task in it."""
+        """Select (or create) the project for a listed folder and start a fresh task in it."""
         self._assert_idle()
         project=self._project_for_directory(directory)
         self.select_project(project['id'])
@@ -358,40 +383,50 @@ class WorkspaceCore:
         return {'project_id':project['id'],'task_id':task['id']}
 
     def open_desktop_session(self,record,history_limit=200):
-        """Map one explicitly chosen desktop session to a project and task, with its visible history.
+        """Map one explicitly chosen local conversation to a project and task, with its visible history.
 
         Never contacts the agent: resuming stays a separate explicit call."""
-        from .desktop_sessions import read_transcript, _valid_id
-        if not isinstance(record,dict): raise ValueError('Desktop session metadata must be an object')
+        from .desktop_sessions import read_history, _valid_id
+        if not isinstance(record,dict): raise ValueError('Conversation metadata must be an object')
+        agent=record.get('agent','claude')
+        if agent not in ('claude','codex'): raise ValueError('Local conversations are available for Claude and Codex only')
         session_id=str(record.get('id') or '').lower()
-        if not _valid_id(session_id): raise ValueError('Invalid Claude session identifier')
+        if not _valid_id(session_id): raise ValueError('Invalid session identifier')
         self._assert_idle()
         project=self._project_for_directory(str(record.get('cwd') or ''))
         self.select_project(project['id'])
         title=sanitize(str(record.get('title') or session_id))[:200]
-        task=next((t for t in self.list_tasks(project_id=project['id']) if t.get('claude_session')==session_id),None)
+        task=next((t for t in self.list_tasks(project_id=project['id']) if t.get(agent+'_session')==session_id),None)
         if task: self.select_task(task['id'])
         else: task=self.create_task(title)
-        identity={'agent':'claude','id':session_id}
+        identity={'agent':agent,'id':session_id}
         fields=dict(task_id=task['id'],project_id=project['id'],title=title,cwd=project['repo_path'],updated_at=now())
         if self.store.get('sessions',identity): self.store.update('sessions',identity,fields)
-        else: self.store.insert('sessions',dict(identity,**fields,created_at=now(),metadata={'source':'claude-desktop','imported_native':True}))
-        self.store.update('tasks',{'id':task['id']},{'claude_session':session_id,'updated_at':now()})
+        else: self.store.insert('sessions',dict(identity,**fields,created_at=now(),metadata={'source':agent+'-local','imported_native':True}))
+        self.store.update('tasks',{'id':task['id']},{agent+'_session':session_id,'updated_at':now()})
         self._contexts.clear()
-        known={(m['role'],str(m['content']).strip()) for m in self.messages(task['id'],'claude')}
-        imported=0
-        for message in read_transcript(session_id,history_limit):
-            content=sanitize(message['content'])
-            message_id='desktop-'+session_id+'-'+message['id']
-            if not message['id'] or is_hidden_reasoning(content) or (message['role'],str(content).strip()) in known: continue
-            if self.store.get('messages',{'id':message_id}): continue
-            self.store.insert('messages',dict(id=message_id,task_id=task['id'],agent='claude',session_id=session_id,
-                role=message['role'],content=content,timestamp=message['timestamp'] or now(),status='complete',
-                metadata={'source':'claude-desktop','imported':True}))
-            imported+=1
-        self._record('session_imported','claude',task_id=task['id'],session_id=session_id,
-                     content=f'Claude desktop session opened; {imported} visible messages imported. Resume is a separate action.')
-        return {'project_id':project['id'],'task_id':task['id'],'session_id':session_id,'imported':imported}
+        known={(m['role'],str(m['content']).strip()) for m in self.messages(task['id'],agent)}
+        imported=tools=0
+        for item in read_history(agent,session_id,history_limit):
+            item_id='desktop-'+session_id+'-'+item['id']
+            if not item['id']: continue
+            if item['kind']=='message':
+                content=sanitize(item['content'])
+                if is_hidden_reasoning(content) or (item['role'],str(content).strip()) in known: continue
+                if self.store.get('messages',{'id':item_id}): continue
+                self.store.insert('messages',dict(id=item_id,task_id=task['id'],agent=agent,session_id=session_id,
+                    role=item['role'],content=content,timestamp=item['timestamp'] or now(),status='complete',
+                    metadata={'source':agent+'-local','imported':True}))
+                imported+=1
+            elif not self.store.get('events',{'id':item_id}):
+                payload=sanitize({'tool':item['tool'],'summary':item['summary'],'input':item['input'],'output':item['output'],'imported':True})
+                if item['type']=='command': payload['command']=payload['summary']
+                self.store.insert('events',dict(id=item_id,task_id=task['id'],agent=agent,session_id=session_id,type=item['type'],
+                    status='imported',timestamp=item['timestamp'] or now(),summary=str(payload['summary'])[:600],raw_ref='',payload=payload))
+                tools+=1
+        self._record('session_imported',agent,task_id=task['id'],session_id=session_id,
+                     content=f'Local conversation opened; {imported} messages and {tools} tool records imported. Resume is a separate action.')
+        return {'agent':agent,'project_id':project['id'],'task_id':task['id'],'session_id':session_id,'imported':imported,'tools':tools}
 
     def _context(self,agent):
         if agent not in self._contexts:
