@@ -84,8 +84,14 @@ class LocalAdapterTests(unittest.TestCase):
             self.assertEqual('http://localhost:1234/v1', env['ANTHROPIC_BASE_URL'])
             self.assertEqual('fixture-config-dir', env['CLAUDE_CONFIG_DIR'])
             leaked = [name for name in env if name.upper().startswith(('ANTHROPIC_', 'CLAUDE'))
-                      and name not in ('ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'CLAUDE_CONFIG_DIR')]
+                      and name not in ('ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'CLAUDE_CONFIG_DIR',
+                                       'CLAUDE_CODE_MAX_OUTPUT_TOKENS', 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC')]
             self.assertEqual([], leaked)
+            # Claude Code otherwise asks for 128k output tokens, which a small local context rejects.
+            self.assertEqual('8192', env['CLAUDE_CODE_MAX_OUTPUT_TOKENS'])
+            self.assertEqual('1', env['CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC'])
+            capped = self.adapter(LocalClaudeAdapter, max_output_tokens=4000)
+            self.assertEqual('4000', capped._process_env()['CLAUDE_CODE_MAX_OUTPUT_TOKENS'])
             self.assertNotIn('parent-fixture', json.dumps(env))
 
     def test_missing_endpoint_or_model_is_offline_without_any_process(self):

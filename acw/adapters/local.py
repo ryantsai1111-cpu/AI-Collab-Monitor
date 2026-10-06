@@ -178,10 +178,20 @@ class LocalClaudeAdapter(_LocalSettings, ClaudeAdapter):
                     and name.upper() != 'CLAUDE_CONFIG_DIR']:
             del child_env[key]
         child_env['ANTHROPIC_BASE_URL'] = base_url
+        # Local servers have far smaller contexts than Claude Code assumes; an uncapped
+        # request (128k output tokens) is rejected outright. No telemetry leaves this child.
+        child_env['CLAUDE_CODE_MAX_OUTPUT_TOKENS'] = str(self._max_output_tokens())
+        child_env['CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC'] = '1'
         # Never leave this empty: Claude Code would then fall back to the stored
         # Anthropic login and send that real credential to the local endpoint.
         child_env['ANTHROPIC_AUTH_TOKEN'] = credential or 'local'
         return child_env
+
+    def _max_output_tokens(self):
+        try:
+            return max(256, min(int(self.settings.get('max_output_tokens') or 8192), 128000))
+        except (TypeError, ValueError):
+            return 8192
 
     def _discover(self, handshake):
         super()._discover(handshake)
