@@ -6,6 +6,7 @@ never spawns a shell, reads credentials, or creates an agent session on startup.
 from __future__ import annotations
 
 import json
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -15,7 +16,8 @@ from .presentation import (session_identity, session_display, local_session_disp
 from .theme import EVENT_COLOR, HEADING_COLOR, STATE_COLORS, STATE_IDLE, build_style, metal_palette
 
 from PySide6.QtCore import Qt, Signal, QObject, QRunnable, QThreadPool, QTimer, QUrl, QByteArray
-from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QKeySequence, QPixmap, QTextCursor
+from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont, QKeySequence, QPixmap, QTextCharFormat,
+                           QTextCursor, QTextDocument, QTextFormat)
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
     QFormLayout, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
@@ -162,26 +164,140 @@ class DetailDialog(QDialog):
         layout.addLayout(actions)
 
 
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[@-Z\\-_]|[\x00-\x08\x0b\x0c\x0e-\x1f]")
+# Shown inline in a conversation. Everything else stays in the timeline, raw events and logs.
+TRANSCRIPT_EVENTS = ("tool_start", "tool_result", "tool", "command", "command_output", "file", "file_edit", "diff",
+                     "test", "error", "handoff", "stop", "recovery", "approval", "approval_request", "tool_approval")
+APPROVAL_EVENTS = ("approval", "approval_request", "tool_approval")
+EVENT_LABELS = {"tool_start": "工具", "tool_result": "工具結果", "tool": "工具", "command": "指令", "command_output": "輸出",
+                "file": "檔案", "file_edit": "編輯", "diff": "差異", "test": "測試", "error": "錯誤", "handoff": "交接",
+                "stop": "停止", "recovery": "復原", "approval": "核准", "approval_request": "核准", "tool_approval": "核准"}
+
+
+def chat_markdown(text):
+    """Keep the author's line breaks: outside code fences a single newline becomes a hard break."""
+    lines, fenced, result = text.split("\n"), False, []
+    for index, line in enumerate(lines):
+        if line.lstrip().startswith(("```", "~~~")):
+            fenced = not fenced
+        following = lines[index + 1] if index + 1 < len(lines) else ""
+        soft = not fenced and line.strip() and following.strip() and not line.lstrip().startswith(("```", "~~~", "|", "#"))
+        result.append(line.rstrip() + "  " if soft else line)
+    return "\n".join(result)
+
+
+class MessageBody(QTextBrowser):
+    """Read-only rendered message that grows to fit its content instead of scrolling inside the transcript."""
+    def __init__(self):
+        super().__init__()
+        self.setObjectName("message_body")
+        self.setFrameShape(QFrame.NoFrame)
+        self.setOpenLinks(False)
+        self.setOpenExternalLinks(False)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        self.document().setDocumentMargin(2)
+
+    def loadResource(self, kind, name):
+        return None  # never load images or any other resource a message refers to
+
+    def fit(self):
+        width = self.viewport().width()
+        if width > 0:
+            self.document().setTextWidth(width)
+        self.setFixedHeight(int(self.document().size().height()) + 4)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.fit()
+
+    def wheelEvent(self, event):
+        event.ignore()  # the transcript scrolls, not the message
+
+    def render(self, text, markdown):
+        if not markdown:
+            self.setPlainText(text)
+        else:
+            # Raw HTML in a message is shown literally, never interpreted.
+            self.document().setMarkdown(chat_markdown(text), QTextDocument.MarkdownDialectGitHub | QTextDocument.MarkdownNoHTML)
+            block = self.document().begin()
+            while block.isValid():
+                cursor = QTextCursor(block)
+                if block.blockFormat().hasProperty(QTextFormat.BlockCodeFence) or block.blockFormat().hasProperty(QTextFormat.BlockCodeLanguage):
+                    shaded = block.blockFormat()
+                    shaded.setBackground(QColor("#07090b"))
+                    shaded.setLeftMargin(8)
+                    shaded.setRightMargin(8)
+                    cursor.setBlockFormat(shaded)
+                    cursor.movePosition(QTextCursor.EndOfBlock, QTextCursor.KeepAnchor)
+                    mono = QTextCharFormat()
+                    mono.setFontFamilies(["Cascadia Mono", "Consolas"])
+                    mono.setForeground(QColor("#d5dbe1"))
+                    cursor.mergeCharFormat(mono)
+                else:
+                    if block.textList() is None:
+                        spaced = block.blockFormat()
+                        spaced.setBottomMargin(7)
+                        cursor.setBlockFormat(spaced)
+                    part = block.begin()
+                    while not part.atEnd():
+                        fragment = part.fragment()
+                        if fragment.isValid() and fragment.charFormat().fontFixedPitch():
+                            cursor.setPosition(fragment.position())
+                            cursor.setPosition(fragment.position() + fragment.length(), QTextCursor.KeepAnchor)
+                            inline = QTextCharFormat()
+                            inline.setBackground(QColor("#20262d"))
+                            inline.setForeground(QColor("#f0c987"))
+                            inline.setFontFamilies(["Cascadia Mono", "Consolas"])
+                            cursor.mergeCharFormat(inline)
+                        part += 1
+                block = block.next()
+        self.fit()
+
+
 class MessageCard(QFrame):
-    """Plain response content plus explicit actions; source text is never rewritten."""
+    """Rendered response plus explicit actions; the stored source text is never rewritten."""
     def __init__(self, message, panel):
         super().__init__()
-        self.setObjectName("message")
         self.message = dict(message)
         self.panel = panel
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(9, 7, 9, 8)
-        header = QHBoxLayout()
         role = message.get("role", "assistant")
-        self.heading = label(role.upper())
-        self.heading.setStyleSheet(f"font-weight: 650; color: {HEADING_COLOR}; font-size: 12px;")
-        header.addWidget(self.heading)
+        self.role = role
+        self.setObjectName("message_user" if role == "user" else "message")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 9, 12, 7) if role == "user" else layout.setContentsMargins(4, 2, 4, 2)
+        layout.setSpacing(3)
+        self.body = MessageBody()
+        self.body.setStyleSheet("background: transparent; border: none; padding: 0; font-size: 14px;")
+        layout.addWidget(self.body)
+        footer = QHBoxLayout()
+        footer.setSpacing(2)
         stamp = str(message.get("timestamp", ""))
-        header.addWidget(label(stamp[11:19] if "T" in stamp else stamp, True))
-        header.addStretch()
+        try:
+            stamp = datetime.fromisoformat(stamp.replace("Z", "+00:00")).astimezone().strftime("%H:%M")
+        except ValueError:
+            stamp = stamp[11:16] if "T" in stamp else stamp
+        self.heading = label(("你" if role == "user" else ROLE_NAMES.get(panel.agent, role)) + " · " + stamp, True)
+        self.heading.setObjectName("message_meta")
+        self.heading.setWordWrap(False)
+        footer.addWidget(self.heading)
+        footer.addStretch()
+        if role == "assistant":
+            self.forward_button = QToolButton()
+            self.forward_button.setObjectName("ghost")
+            self.forward_button.setText("轉交 ▾")
+            self.forward_button.setPopupMode(QToolButton.InstantPopup)
+            targets = QMenu(self.forward_button)
+            for target in AGENTS:
+                if target != panel.agent:
+                    targets.addAction(ROLE_NAMES[target], lambda checked=False, target=target: panel.window.forward(self.message, target))
+            self.forward_button.setMenu(targets)
+            footer.addWidget(self.forward_button)
         menu_button = QToolButton()
+        menu_button.setObjectName("ghost")
         menu_button.setText("⋯")
-        menu_button.setToolTip("Copy, raw event, and handoff")
+        menu_button.setToolTip("複製、原始事件與轉交")
         menu_button.setPopupMode(QToolButton.InstantPopup)
         menu = QMenu(menu_button)
         menu.addAction("Copy", lambda: self.copy(False))
@@ -193,41 +309,20 @@ class MessageCard(QFrame):
                 if target != panel.agent:
                     menu.addAction(f"轉交給 {ROLE_NAMES[target]}…", lambda checked=False, target=target: panel.window.forward(self.message, target))
         menu_button.setMenu(menu)
-        header.addWidget(menu_button)
-        layout.addLayout(header)
-        self.body = QPlainTextEdit()
-        self.body.setReadOnly(True)
-        self.body.setFrameShape(QFrame.NoFrame)
-        self.body.setStyleSheet("background: transparent; border: none; padding: 0; font-size: 15px;")
-        self.body.setLineWrapMode(QPlainTextEdit.WidgetWidth)
-        layout.addWidget(self.body)
-        if role == "assistant":
-            forward = QHBoxLayout()
-            forward.addStretch()
-            self.forward_button = QToolButton()
-            self.forward_button.setText("轉交 ▾")
-            self.forward_button.setPopupMode(QToolButton.InstantPopup)
-            targets = QMenu(self.forward_button)
-            for target in AGENTS:
-                if target != panel.agent:
-                    targets.addAction(ROLE_NAMES[target], lambda checked=False, target=target: panel.window.forward(self.message, target))
-            self.forward_button.setMenu(targets)
-            forward.addWidget(self.forward_button)
-            layout.addLayout(forward)
+        footer.addWidget(menu_button)
+        layout.addLayout(footer)
         self.update_content(message.get("content", ""))
 
     def update_content(self, content):
         self.message["content"] = content
         cursor = self.body.textCursor()
         start, end = cursor.anchor(), cursor.position()
-        scroll = self.body.verticalScrollBar().value()
-        self.body.setPlainText(plain(content))
-        cursor.setPosition(min(start, len(plain(content))))
-        cursor.setPosition(min(end, len(plain(content))), QTextCursor.KeepAnchor)
+        self.body.render(plain(content), self.role == "assistant")
+        size = len(self.body.toPlainText())
+        cursor = self.body.textCursor()
+        cursor.setPosition(min(start, size))
+        cursor.setPosition(min(end, size), QTextCursor.KeepAnchor)
         self.body.setTextCursor(cursor)
-        self.body.verticalScrollBar().setValue(scroll)
-        lines = max(1, sum(max(1, (len(line) + 51) // 52) for line in plain(content).splitlines()))
-        self.body.setFixedHeight(min(420, 32 + lines * 23))
 
     def copy(self, metadata=False):
         content = plain(self.message.get("content", ""))
@@ -243,25 +338,28 @@ class EventCard(QFrame):
         self.setObjectName("event")
         self.event_key = identifier(event) or str(event.get("request_id") or event.get("timestamp") or plain(event))
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(7, 4, 7, 4)
+        layout.setContentsMargins(6, 2, 6, 2)
+        layout.setSpacing(2)
         kind = event.get("type", "event")
+        self.kind = kind
         summary = event.get("command") or event.get("tool") or event.get("summary") or event.get("name") or event.get("status", "")
         if event.get("imported") and event.get("tool") and event.get("summary") and not event.get("command"):
             summary = f"{event['tool']} · {event['summary']}"
+        summary = ANSI_ESCAPE.sub("", str(summary)).strip()
         self.toggle = QToolButton()
-        self.toggle.setText(f"{kind.replace('_', ' ').upper()}  {(str(summary).strip().splitlines() or [''])[0][:100]}")
+        self.toggle.setText(f"{EVENT_LABELS.get(kind, kind.replace('_', ' '))}  {(summary.splitlines() or [''])[0][:100]}")
         self.toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self.toggle.setArrowType(Qt.RightArrow)
         # A long command must not widen the transcript past its viewport.
         self.toggle.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        self.toggle.setToolTip(str(summary)[:600])
+        self.toggle.setToolTip(summary[:600])
         self.toggle.setCheckable(True)
-        self.toggle.setStyleSheet(f"text-align: left; border: none; background: transparent; color: {EVENT_COLOR};")
+        self.toggle.setStyleSheet(f"text-align: left; border: none; background: transparent; padding: 3px 2px; color: {'#ff9a90' if kind == 'error' else EVENT_COLOR};")
         layout.addWidget(self.toggle)
         detail = dict(event)
         if "output" in detail and (detail.get("output_stream") == "combined" or not ("stdout" in detail or "stderr" in detail)):
             detail["output_stream"] = "Combined output supplied by backend; stdout/stderr separation unavailable."
-        self.body = QPlainTextEdit(plain(detail))
+        self.body = QPlainTextEdit(ANSI_ESCAPE.sub("", plain(detail)))
         self.body.setReadOnly(True)
         self.body.setFont(QFont("Consolas", 9))
         self.body.setMaximumHeight(300)
@@ -271,7 +369,8 @@ class EventCard(QFrame):
         self.approval_actions = []
         self.historical = historical
         self.approval_resolved = False
-        if kind in ("approval", "approval_request", "tool_approval"):
+        if kind in APPROVAL_EVENTS:
+            self.setObjectName("event_approval")
             actions = QHBoxLayout()
             actions.addWidget(label("Backend approval required. Review the request above.", True))
             self.approval_actions = [button("Deny", lambda: window.approve(event, False)), button("Approve…", lambda: window.approve(event, True))]
@@ -290,6 +389,54 @@ class EventCard(QFrame):
         self.approval_resolved = True
         for control in self.approval_actions:
             control.setEnabled(False)
+
+
+class ActivityGroup(QFrame):
+    """Consecutive tool activity folded into one line, like the desktop apps do."""
+    CATEGORIES = (("指令", ("command", "command_output")), ("檔案變更", ("file", "file_edit", "diff")),
+                  ("測試", ("test",)), ("錯誤", ("error",)))
+
+    def __init__(self):
+        super().__init__()
+        self.setObjectName("activity")
+        self.cards = []
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 1, 4, 1)
+        layout.setSpacing(0)
+        self.toggle = QToolButton()
+        self.toggle.setObjectName("activity_toggle")
+        self.toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.toggle.setArrowType(Qt.RightArrow)
+        self.toggle.setCheckable(True)
+        self.toggle.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.toggle.toggled.connect(self.set_expanded)
+        layout.addWidget(self.toggle)
+        self.inner = QWidget()
+        self.inner_layout = QVBoxLayout(self.inner)
+        self.inner_layout.setContentsMargins(10, 0, 0, 2)
+        self.inner_layout.setSpacing(0)
+        self.inner.hide()
+        layout.addWidget(self.inner)
+
+    def add(self, card):
+        self.cards.append(card)
+        self.inner_layout.addWidget(card)
+        counts, other = [], len(self.cards)
+        for title, kinds in self.CATEGORIES:
+            number = sum(card.kind in kinds for card in self.cards)
+            other -= number
+            if number:
+                counts.append(f"{title} {number}")
+        if other:
+            counts.append(f"工具 {other}")
+        self.toggle.setText(" · ".join(counts))
+        failed = any(card.kind == "error" for card in self.cards)
+        self.toggle.setStyleSheet(f"text-align: left; border: none; background: transparent; padding: 4px 2px; color: {'#ff9a90' if failed else '#aeb7c1'};")
+
+    def set_expanded(self, expanded):
+        self.inner.setVisible(expanded)
+        self.toggle.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
+        self.updateGeometry()
 
 
 class AgentPanel(QFrame):
@@ -351,7 +498,9 @@ class AgentPanel(QFrame):
         header.addWidget(self.more_button)
         layout.addLayout(header)
         self.notice = label("能力尚未偵測 · 請在準備好時連線", True)
-        self.notice.setMaximumHeight(38)
+        # One quiet line; the full text stays in the tooltip.
+        self.notice.setWordWrap(False)
+        self.notice.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.notice.setToolTip(self.notice.text())
         layout.addWidget(self.notice)
 
@@ -416,8 +565,8 @@ class AgentPanel(QFrame):
         self.scroll.setProperty("well", True)
         self.transcript = QWidget()
         self.transcript_layout = QVBoxLayout(self.transcript)
-        self.transcript_layout.setContentsMargins(0, 4, 0, 4)
-        self.transcript_layout.setSpacing(12)
+        self.transcript_layout.setContentsMargins(8, 8, 8, 8)
+        self.transcript_layout.setSpacing(10)
         self.empty = label("對話將顯示在這裡。\n請在準備好時連線。", True)
         self.empty.setAlignment(Qt.AlignCenter)
         self.transcript_layout.addWidget(self.empty)
@@ -497,10 +646,8 @@ class AgentPanel(QFrame):
             selection = card.body.textCursor()
             selections[mid] = (selection.anchor(), selection.position(), card.body.verticalScrollBar().value())
         events = {}
-        for index in range(self.transcript_layout.count()):
-            widget = self.transcript_layout.itemAt(index).widget()
-            if isinstance(widget, EventCard):
-                events[widget.event_key] = widget.toggle.isChecked()
+        for widget in self.event_cards():
+            events[widget.event_key] = widget.toggle.isChecked()
         return {
             "draft": self.input.toPlainText(), "draft_cursor": (cursor.anchor(), cursor.position()),
             "attachments": list(self.attachments), "model": self.model.currentData(),
@@ -554,15 +701,29 @@ class AgentPanel(QFrame):
                 cursor.setPosition(min(selection[1], size), QTextCursor.KeepAnchor)
                 card.body.setTextCursor(cursor)
                 card.body.verticalScrollBar().setValue(selection[2])
-        for index in range(self.transcript_layout.count()):
-            widget = self.transcript_layout.itemAt(index).widget()
-            if isinstance(widget, EventCard) and widget.event_key in state.get("expanded_events", {}):
+        for widget in self.event_cards():
+            if widget.event_key in state.get("expanded_events", {}):
                 widget.toggle.setChecked(state["expanded_events"][widget.event_key])
+        for group in self.activity_groups():
+            if any(card.toggle.isChecked() for card in group.cards):
+                group.toggle.setChecked(True)
         self.update_controls()
         def restore_scroll():
             self.scroll.verticalScrollBar().setValue(state.get("scroll", 0))
             self._restoring_view = False
         QTimer.singleShot(0, self, restore_scroll)
+
+    def activity_groups(self):
+        widgets = (self.transcript_layout.itemAt(index).widget() for index in range(self.transcript_layout.count()))
+        return [widget for widget in widgets if isinstance(widget, ActivityGroup)]
+
+    def event_cards(self):
+        for index in range(self.transcript_layout.count()):
+            widget = self.transcript_layout.itemAt(index).widget()
+            if isinstance(widget, EventCard):
+                yield widget
+            elif isinstance(widget, ActivityGroup):
+                yield from widget.cards
 
     def jump_to_latest(self):
         self.scroll.verticalScrollBar().setValue(self.scroll.verticalScrollBar().maximum())
@@ -950,11 +1111,21 @@ class AgentPanel(QFrame):
         event = {**(event.get("payload") or {}), **event}
         self.empty.hide()
         card = EventCard(event, self.window, historical)
-        self.transcript_layout.insertWidget(self.transcript_layout.count() - 1, card)
-        # A live insertion must be exposed before it can receive pointer input.
-        # Layout geometry is still allowed to settle in the normal event loop.
-        card.show()
-        if event.get("type") in ("approval", "approval_request", "tool_approval"):
+        if event.get("type") in APPROVAL_EVENTS:
+            self.transcript_layout.insertWidget(self.transcript_layout.count() - 1, card)
+            # A live insertion must be exposed before it can receive pointer input.
+            # Layout geometry is still allowed to settle in the normal event loop.
+            card.show()
+        else:
+            # Tool activity folds into the group that ends the transcript, or starts a new one.
+            last = self.transcript_layout.itemAt(self.transcript_layout.count() - 2)
+            group = last.widget() if last else None
+            if not isinstance(group, ActivityGroup):
+                group = ActivityGroup()
+                self.transcript_layout.insertWidget(self.transcript_layout.count() - 1, group)
+                group.show()
+            group.add(card)
+        if event.get("type") in APPROVAL_EVENTS:
             request_id = event.get("request_id") or (event.get("payload") or {}).get("request_id")
             if request_id:
                 self.approvals[request_id] = card
@@ -2294,7 +2465,7 @@ class MainWindow(QMainWindow):
                 self.reconcile_pending_approvals(view, agent, identifier(task))
                 panel._restoring_view = True
                 panel.clear_conversation()
-                shown = ("tool_start", "tool_result", "command", "command_output", "file", "file_edit", "error", "test", "approval", "approval_request", "tool_approval")
+                shown = TRANSCRIPT_EVENTS
                 history = [(str(message.get("timestamp") or ""), 0, message) for message in self.core.messages(agent=agent)
                            if message.get("role") in ("user", "assistant")]
                 history += [(str(event.get("timestamp") or ""), 1, event) for event in reversed(self.core.events(agent=agent, limit=400))
@@ -2408,7 +2579,7 @@ class MainWindow(QMainWindow):
                     # concatenate raw backend fragments across secret boundaries.
                     continue
                 panel.add_message(dict(event, id=mid, role=role, content=content))
-            elif panel and kind not in ("raw", "state", "connection_state", "heartbeat", "message_delta", "legacy"):
+            elif panel and kind in TRANSCRIPT_EVENTS:
                 panel.add_event(event)
             if self.mode.currentData() == "Timeline":
                 self.add_timeline_event(event)
@@ -2438,6 +2609,8 @@ class MainWindow(QMainWindow):
             self.reload_context()
             self.focus_role(agent)
             self.footer.setText(f"已載入「{record.get('title', '')}」· {result['imported']} 則訊息、{result['tools']} 筆工具紀錄")
+            # A conversation opens at its latest message, like the desktop apps.
+            QTimer.singleShot(150, self.panels[agent], self.panels[agent].jump_to_latest)
             if resume:
                 self.panels[agent].set_state("Connecting")
                 def continue_session():

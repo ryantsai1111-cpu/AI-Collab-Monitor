@@ -42,8 +42,15 @@ QLabel#agentTitle { font-size: 16px; font-weight: 650; color: #f6f8fa; }
 QLabel#status { color: #aeb7c1; font-size: 12px; font-weight: 600; background: #0b0d0f; border: 1px solid #050607; border-bottom-color: #6b737d; border-radius: 9px; padding: 2px 9px; }
 QFrame#panel { background-color: @PLATE@; background-image: url("@BRUSHED@"); border: 1px solid #121416; border-top-color: #8a939d; border-radius: 8px; }
 QFrame#sidebar, QFrame#work_details { background-color: @PLATE_DARK@; background-image: url("@BRUSHED@"); border: 1px solid #121416; border-top-color: #7a838d; border-radius: 8px; }
-QFrame#message { border: none; border-bottom: 1px solid #2a2f35; border-radius: 0; background: transparent; }
-QFrame#event { border: 1px solid #343a41; border-radius: 6px; background: #181c20; }
+QFrame#message { border: none; background: transparent; }
+QFrame#message_user { background: #1b2026; border: 1px solid #2c333b; border-radius: 10px; margin-left: 40px; }
+QLabel#message_meta { color: #7f8892; font-size: 11px; }
+QToolButton#ghost { color: #8c959f; background: transparent; border: none; border-radius: 4px; padding: 1px 6px; min-height: 0; font-size: 12px; }
+QToolButton#ghost:hover, QToolButton#ghost:pressed { color: #ffffff; background: #20262d; padding: 1px 6px; }
+QFrame#event { border: none; background: transparent; }
+QFrame#event_approval { border: 1px solid #6a5a2a; border-radius: 6px; background: #1d1a12; }
+QFrame#activity { border: none; border-left: 2px solid #2c333b; background: transparent; }
+QFrame#event QPlainTextEdit, QFrame#event_approval QPlainTextEdit { background: #07090b; border: 1px solid #20262d; border-radius: 4px; }
 
 QPushButton, QToolButton { color: #12161a; background: @CHROME@; border: 1px solid #0d0f11; border-radius: 5px; padding: 6px 10px; min-height: 19px; }
 QPushButton:hover, QToolButton:hover { background: @CHROME_HOVER@; }

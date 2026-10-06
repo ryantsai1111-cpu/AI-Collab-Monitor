@@ -195,7 +195,10 @@ class CoreAndUiTests(DesktopSessionFixture):
         try:
             layout = window.panels["claude"].transcript_layout
             kinds = [type(layout.itemAt(i).widget()).__name__ for i in range(layout.count()) if layout.itemAt(i).widget()]
-            self.assertEqual(["MessageCard", "MessageCard", "EventCard"], [k for k in kinds if k.endswith("Card")])
+            self.assertEqual(["MessageCard", "MessageCard", "ActivityGroup"], [k for k in kinds if k != "QLabel"])
+            group = window.panels["claude"].activity_groups()[0]
+            self.assertEqual("指令 1", group.toggle.text())
+            self.assertFalse(group.inner.isVisible())
         finally:
             window.timer.stop()
             window.close()
