@@ -102,7 +102,8 @@ class OrchestratorTests(unittest.TestCase):
 
     def test_verdict_parsing_accepts_only_a_line_start_token(self):
         self.assertEqual("PASS", parse_verdict("VERDICT: PASS\nbody"))
-        self.assertEqual("CHANGES_REQUESTED", parse_verdict("前言\n**VERDICT：CHANGES_REQUESTED**\n細節"))
+        self.assertIsNone(parse_verdict("前言\n**VERDICT：CHANGES_REQUESTED**\n細節"))
+        self.assertEqual("CHANGES_REQUESTED", parse_verdict("**VERDICT：CHANGES_REQUESTED**\n細節"))
         self.assertIsNone(parse_verdict("I think the verdict: pass"))
         self.assertIsNone(parse_verdict(""))
 

@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 import time
 
-VERDICT = re.compile(r'^\s*\**\s*VERDICT\s*[:：]\s*\**\s*([A-Z_]+)', re.MULTILINE)
+VERDICT = re.compile(r'(?P<bold>\*\*)?VERDICT[ \t]*[:：][ \t]*(?P<value>[A-Z_]+)(?(bold)\*\*)')
 MAX_FORWARD_CHARS = 12000
 TIMEOUTS = {'claude': 900, 'codex': 1800, 'dot': 1200, 'local': 900}
 DOT_POLL_SECONDS = 10
@@ -52,9 +52,22 @@ LOCAL_ROLES = (None, 'reviewer', 'implementer')
 ROLE_NAMES = {'claude': 'Claude', 'dot': 'G8毛', 'codex': 'Codex', 'local': 'Local LLM'}
 
 
+def _verdict_parts(text):
+    """Only the first non-empty line can be the control header, never quoted body text."""
+    lines = (text or '').splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        header = line.strip()
+        if not header:
+            continue
+        match = VERDICT.fullmatch(header)
+        if not match:
+            return None, ''
+        return match.group('value'), ''.join(lines[index + 1:]).strip()
+    return None, ''
+
+
 def parse_verdict(text):
-    match = VERDICT.search(text or '')
-    return match.group(1) if match else None
+    return _verdict_parts(text)[0]
 
 
 class Orchestrator:
@@ -98,6 +111,9 @@ class Orchestrator:
         task = self.core.current_task
         if not self.core.current_project or not task:
             raise ValueError('請先選擇專案與任務')
+        mismatched = [agent for agent in self.agents if (self.core.agent_task(agent) or {}).get('id') != task['id']]
+        if mismatched:
+            raise ValueError('自動協作前，請將參與角色切換到目前的協作任務：' + '、'.join(ROLE_NAMES[agent] for agent in mismatched))
         offline = [agent for agent in self.agents if getattr(self.core.adapters.get(agent), 'state', '') != 'Connected']
         if offline:
             raise RuntimeError('請先連線：' + '、'.join(ROLE_NAMES[agent] for agent in offline))
@@ -178,7 +194,9 @@ class Orchestrator:
         agent = self.steps[step][0]
         self.step = step
         if len(body) > MAX_FORWARD_CHARS:
-            body = body[:MAX_FORWARD_CHARS] + f'\n\n…（內容過長已截斷，原長 {len(body)} 字元）'
+            return self._finish('paused',
+                f'{self.names[step]} 的交接內容超過上限（{len(body)}/{MAX_FORWARD_CHARS} 字元）；'
+                '未截斷或傳送，請查看原始訊息並重新整理完整交接')
         text = PROMPTS[step].format(task=self.task, body=body)
         self._note('step', self.names[step])
         def sent(_):
@@ -237,7 +255,8 @@ class Orchestrator:
 
     def _advance(self, reply):
         self._waiting = None
-        verdict, routes = parse_verdict(reply), self.steps[self.step][1]
+        verdict, body = _verdict_parts(reply)
+        routes = self.steps[self.step][1]
         if verdict not in routes:
             if self.step in self.optional:
                 return self._skip_optional('回覆沒有可用的判定')
@@ -251,7 +270,6 @@ class Orchestrator:
             if self.round >= self.max_rounds:
                 return self._finish('done', f'已達回合上限 {self.max_rounds}，最後判定：{verdict}')
             self.round += 1
-        body = VERDICT.sub('', reply, count=1).strip()
         if target == 'local_review':
             self._carry = body
         elif self.step == 'local_review':
