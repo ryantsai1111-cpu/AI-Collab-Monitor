@@ -555,11 +555,11 @@ class WorkspaceUiRefreshTests(unittest.TestCase):
         with patch("acw.ui.QMessageBox.question", side_effect=AssertionError("Preserved drafts must not ask to discard")):
             self.choose_task(self.task_b)
             for agent, panel in self.window.panels.items():
-                self.assertEqual("", panel.input.toPlainText())
+                self.assertEqual(agent + " alpha draft" if agent == "dot" else "", panel.input.toPlainText())
                 panel.input.setPlainText(agent + " beta draft")
             self.choose_task(self.task_a)
             for agent, panel in self.window.panels.items():
-                self.assertEqual(agent + " alpha draft", panel.input.toPlainText())
+                self.assertEqual(agent + (" beta draft" if agent == "dot" else " alpha draft"), panel.input.toPlainText())
             self.choose_task(self.task_b)
             for agent, panel in self.window.panels.items():
                 self.assertEqual(agent + " beta draft", panel.input.toPlainText())
@@ -1302,7 +1302,8 @@ class WorkspaceUiRefreshTests(unittest.TestCase):
             self.assertTrue(any(name in action for action in actions), name)
         for agent, panel in self.window.panels.items():
             names = [action.text() for action in panel.more_button.menu().actions()]
-            for name in ("對話", "本機歷史", "能力詳情", "原始事件", "日誌", "專案檔案"):
+            conversation_actions=("工作交接關聯", "載入更早訊息") if agent=="dot" else ("對話", "本機歷史")
+            for name in (*conversation_actions, "能力詳情", "原始事件", "日誌", "專案檔案"):
                 self.assertTrue(any(name in action for action in names), (agent, name))
         self.assert_no_adapter_actions()
 

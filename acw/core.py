@@ -6,6 +6,7 @@ import queue
 import shutil
 import threading
 import zipfile
+from contextlib import contextmanager
 from pathlib import Path
 from .security import sanitize, safe_file, is_secret_path, is_hidden_reasoning, safe_export_path, verify_screenshot, reject_link_ancestors
 from .store import Store, now, uid
@@ -23,6 +24,8 @@ class WorkspaceCore:
         self._lock=threading.RLock()
         self._queue=queue.Queue()
         self._contexts={}
+        self._operation_context=threading.local()
+        self._dot_root_lock=threading.Lock()
         self._streams={}
         self._closed=False
         self._legacy_readers={}
@@ -146,6 +149,8 @@ class WorkspaceCore:
         if settings.get('executable') or (agent=='codex' and 'executable' in settings):
             adapter.executable=settings['executable'] or ''
         if settings.get('timeout'): adapter.settings['timeout']=float(settings['timeout'])
+        if agent=='dot' and settings.get('dot_id')==getattr(adapter,'target',None) and settings.get('expected_room_id'):
+            adapter.settings['expected_room_id']=settings['expected_room_id']
         if self.agent_project(agent): self._apply_project(agent,self.agent_project(agent))
         return adapter.connect()
 
@@ -499,6 +504,8 @@ class WorkspaceCore:
         return {'agent':agent,'project_id':project['id'],'task_id':task['id'],'session_id':session_id,'imported':imported,'tools':tools}
 
     def _context(self,agent):
+        override=getattr(self._operation_context,'dot',None) if agent=='dot' else None
+        if override is not None: return override
         if agent not in self._contexts:
             task=self.agent_task(agent) or {}
             self._contexts[agent]={'task_id':task.get('id'),'project_id':task.get('project_id',(self.agent_project(agent) or {}).get('id')),
@@ -643,22 +650,26 @@ class WorkspaceCore:
         self._check_agent(agent)
         with self._lock:
             if is_hidden_reasoning({'type':event_type}): return self._record('redaction',agent,content='Hidden reasoning event excluded')
-            if event_type=='session': self._map_session(agent,str(payload.get('session_id') or payload.get('id') or ''))
+            if event_type=='session' and self._context(agent).get('scope')!='dot_conversation':
+                self._map_session(agent,str(payload.get('session_id') or payload.get('id') or ''))
             if event_type=='send_ack' and agent=='dot':
                 message_id=self._context(agent).get('outbound_message_id')
                 if message_id:
-                    self.store.update('messages',{'id':message_id},{'metadata':{'native_id':payload.get('native_id',''),'source':'manual send receipt'}})
+                    self.store.update('messages',{'id':message_id},{'metadata':{'native_id':payload.get('native_id',''),'native_room_id':getattr(self.adapters.get(agent),'native_room_id',''),'source':'manual send receipt'}})
             if event_type=='message_snapshot':
-                context=self._context(agent)
-                if not context.get('task_id'): raise ValueError('Select a task before reading Dot history')
+                conversation=self._context(agent) if agent=='dot' and self._context(agent).get('scope')=='dot_conversation' else None
+                context=conversation or self._context(agent)
+                if not context.get('task_id') and conversation is None: raise ValueError('Select a task before reading Dot history')
                 native_id=str(payload.get('native_id',''))
-                existing=next((x for x in self.messages(task_id=context['task_id'],agent=agent)
-                    if x.get('session_id')==context.get('session_id') and (x.get('metadata') or {}).get('native_id')==native_id),None)
+                if not native_id: raise ValueError('Native message identity is required')
+                rows=self.get_history(agent,context.get('session_id')) if conversation is not None else self.messages(task_id=context['task_id'],agent=agent)
+                existing=next((x for x in rows
+                    if x.get('task_id')==context.get('task_id') and x.get('session_id')==context.get('session_id') and (x.get('metadata') or {}).get('native_id')==native_id),None)
                 message_id=existing['id'] if existing else uid('msg-')
                 payload['message_id']=message_id
-                event=self._record(event_type,agent,**payload)
-                values=dict(content=payload.get('content',''),role=payload.get('role','event'),status='complete',
-                    raw_ref=event['raw_ref'],metadata={'native_id':native_id,'native_timestamp':payload.get('native_timestamp',''),'source':'manual snapshot; not streaming'})
+                event=self._record(event_type,agent,**dict(payload,task_id=context.get('task_id'),session_id=context.get('session_id','')))
+                values=dict(content=sanitize(payload.get('content','')),role=payload.get('role','event'),status='complete',
+                    raw_ref=event['raw_ref'],metadata={'native_id':native_id,'native_room_id':getattr(self.adapters.get(agent),'native_room_id',''),'native_timestamp':payload.get('native_timestamp',''),'source':'manual snapshot; not streaming'})
                 if existing: self.store.update('messages',{'id':message_id},values)
                 else: self.store.insert('messages',dict(id=message_id,task_id=context['task_id'],agent=agent,
                     session_id=context.get('session_id',''),timestamp=now(),**values))
@@ -733,6 +744,85 @@ class WorkspaceCore:
         values.append(max(1,min(int(limit),100000)))
         return self.store.query('SELECT * FROM events'+(' WHERE '+' AND '.join(clauses) if clauses else '')+' ORDER BY timestamp DESC,rowid DESC LIMIT ?',values)
 
+    def dot_conversation_messages(self,limit=None):
+        """Cached native conversation projection; never used as task handoff input."""
+        adapter=self.adapters.get('dot')
+        target=getattr(adapter,'target','')
+        if not target: return []
+        room=getattr(adapter,'native_room_id','') or getattr(adapter,'settings',{}).get('expected_room_id','')
+        if not room and getattr(adapter,'_require_room_provenance',False): return []
+        rows=self.get_history('dot',target)
+        unique={}
+        for row in rows:
+            if row.get('role') not in ('user','assistant'): continue
+            if room and (row.get('metadata') or {}).get('native_room_id')!=room: continue
+            native=(row.get('metadata') or {}).get('native_id')
+            key=('native',native) if native else ('local',row['id'])
+            previous=unique.get(key)
+            rank=lambda item:(item.get('task_id') is None,str(item.get('timestamp') or ''),item['id'])
+            if previous is None or rank(row)>=rank(previous): unique[key]=row
+        from datetime import datetime, timezone
+        def chronology(row):
+            value=(row.get('metadata') or {}).get('native_timestamp') or row.get('timestamp','')
+            try:
+                stamp=datetime.fromisoformat(str(value).replace('Z','+00:00'))
+                if stamp.tzinfo is None: stamp=stamp.replace(tzinfo=timezone.utc)
+                return stamp.timestamp()
+            except (ValueError,TypeError): return 0
+        result=[]
+        for row in sorted(unique.values(),key=chronology):
+            displayed=dict(row)
+            displayed['view_scope']='dot_conversation'
+            displayed['timestamp']=(row.get('metadata') or {}).get('native_timestamp') or row.get('timestamp','')
+            result.append(displayed)
+        return result[-max(1,int(limit)):] if limit is not None else result
+
+    @contextmanager
+    def _dot_root_operation(self):
+        if not self._dot_root_lock.acquire(blocking=False):
+            raise RuntimeError('Another dot conversation operation is active')
+        old=getattr(self._operation_context,'dot',None)
+        adapter=self._adapter('dot')
+        self._operation_context.dot={'task_id':None,'project_id':None,'session_id':adapter.target,'scope':'dot_conversation'}
+        try: yield self._operation_context.dot
+        finally:
+            self._operation_context.dot=old
+            self._dot_root_lock.release()
+
+    def connect_dot_conversation(self):
+        adapter=self._adapter('dot')
+        with self._dot_root_operation():
+            if not self.connect('dot'): return False
+            if adapter.native_room_id:
+                saved=self.get_setting('agent.dot',{}) or {}
+                self.set_setting('agent.dot',dict(saved,dot_id=adapter.target,dot_name=adapter.target_name,expected_room_id=adapter.native_room_id))
+            # Called only after a Connect+initial-read confirmation in the UI.
+            adapter.authorize_manual_action('messages')
+            return adapter.refresh_messages(False)
+
+    def read_dot_conversation(self,older=False):
+        adapter=self._adapter('dot')
+        if adapter.state!='Connected' or not getattr(adapter,'target',''):
+            raise RuntimeError('Connect the selected dot before loading its conversation')
+        with self._dot_root_operation(): return adapter.refresh_messages(older)
+
+    def send_dot_conversation(self,content):
+        adapter=self._adapter('dot')
+        if adapter.state!='Connected' or not getattr(adapter,'target',''):
+            raise RuntimeError('Connect the selected dot before sending')
+        if not str(content).strip(): raise ValueError('Message is empty')
+        with self._dot_root_operation() as context:
+            message_id=uid('msg-')
+            context['outbound_message_id']=message_id
+            self.store.insert('messages',dict(id=message_id,task_id=None,agent='dot',session_id=adapter.target,
+                role='user',content=sanitize(content),timestamp=now(),metadata={'source':'ongoing dot conversation','native_room_id':getattr(adapter,'native_room_id','')}))
+            self._record('prompt_sent','dot',message_id=message_id,content=content)
+            try: return adapter.send_message(content)
+            except Exception as exc:
+                self.store.update('messages',{'id':message_id},{'status':'failed'})
+                self._record('error','dot',content=str(exc))
+                raise
+
     def get_history(self,agent,session_id=None):
         if session_id: return self.store.query('SELECT * FROM messages WHERE agent=? AND session_id=? ORDER BY timestamp,rowid',(agent,session_id))
         return self.messages(agent=agent)
@@ -759,7 +849,8 @@ class WorkspaceCore:
         if not source: raise ValueError('Source message does not exist')
         if source['role']!='assistant': raise ValueError('Select an assistant response for handoff')
         if source['status']!='complete': raise ValueError('Wait for a complete response before handoff')
-        task=self.get_task(source['task_id'])
+        task=self.get_task(source['task_id']) if source.get('task_id') else None
+        if not task: raise ValueError('This dot conversation message is not associated with a Workspace task; select task-specific evidence for handoff')
         project=self.get_project(task['project_id'])
         timestamp=now()
         metadata={'source_agent':source['agent'],'target_agent':target_agent,'task_id':task['id'],'project_id':project['id'],

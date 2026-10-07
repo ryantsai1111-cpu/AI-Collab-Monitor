@@ -102,8 +102,9 @@ class DotOfflineTests(unittest.TestCase):
         from scripts import dot_cli_entry
         original=list(sys.argv);original_path=list(sys.path);calls=[]
         try:
-            with patch.object(sys,'argv',['entry','send','--dot-id','selected','--','A\n--auth SECRET_IS_NOT_CONFIG']),patch.object(dot_cli_entry.runpy,'run_module',side_effect=lambda *a,**kw:calls.append(list(sys.argv))):
+            with patch.object(sys,'argv',['entry','send','--dot-id','selected','--expected-room','fixture-room','--','A\n--auth SECRET_IS_NOT_CONFIG']),patch.object(dot_cli_entry.runpy,'run_module',side_effect=lambda *a,**kw:calls.append(list(sys.argv))),patch.object(dot_cli_entry,'install_room_guard') as guard:
                 dot_cli_entry.main()
+                self.assertEqual(guard.call_args.args[1:],('selected','fixture-room'))
             self.assertEqual(calls,[['chatgpt-dot-cli','--json','send','--dot-id=selected','--','A\n--auth SECRET_IS_NOT_CONFIG']])
             with patch.object(sys,'argv',['entry','list','--auth','forbidden']),patch.object(dot_cli_entry.runpy,'run_module',side_effect=AssertionError('CLI FORBIDDEN')):
                 with self.assertRaises(ValueError):dot_cli_entry.main()

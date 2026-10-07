@@ -87,10 +87,11 @@ class DotFollowTests(unittest.TestCase):
         self.tick()
         self.tick()
         self.assertIsNone(self.panel._dot_follow, "Two identical reads in a row end the follow")
-        self.assertEqual("G8毛 已回覆", self.panel.notice.text())
-        replies = [m["content"] for m in self.core.messages(agent="dot") if m["role"] == "assistant"]
+        self.assertEqual("已讀取新回覆 · 尚無原生完成訊號", self.panel.notice.text())
+        replies = [m["content"] for m in self.core.dot_conversation_messages() if m["role"] == "assistant"]
         self.assertIn("你指的是哪個專案？", replies)
         self.assertIn("我先確認專案", replies)
+        self.assertFalse(any(m["content"] in replies for m in self.core.messages(agent="dot")))
         with self.assertRaises(PermissionError):
             self.dot.refresh_messages(False)
         self.assertEqual([], self.window.reported_errors)
