@@ -40,7 +40,7 @@ def main():
     def newest(paths): return str(max(paths,key=lambda p:p.stat().st_mtime)) if paths else ''
     for agent, cls, default in [('claude',ClaudeAdapter,newest(claudes)),('dot',DotAdapter,''),('codex',CodexAdapter,newest(codexes)),('local',make_local_adapter,'')]:
         settings=core.get_setting('agent.'+agent,{}) or {}
-        exe=settings.pop('executable',default)
+        exe=settings.pop('executable','') or default
         settings.setdefault('attachment_roots',[str(core.store.artifact_dir)])
         if agent=='local':
             settings.setdefault('codex_executable',newest(codexes))

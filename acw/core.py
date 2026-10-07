@@ -29,6 +29,8 @@ class WorkspaceCore:
         self._native_discovery={}
         self.current_project_id=self.store.get_setting('current_project_id')
         self.current_task_id=self.store.get_setting('current_task_id')
+        self._agent_selections={agent:self.store.get_setting('selection.'+agent) for agent in AGENTS
+                                if self.store.get_setting('selection.'+agent) is not None}
         self._recover()
         for agent,adapter in (adapters or {}).items():
             self.set_adapter(agent,adapter)
@@ -44,6 +46,54 @@ class WorkspaceCore:
     @property
     def current_task(self):
         return self.get_task(self.current_task_id) if self.current_task_id else None
+
+    def agent_project(self,agent):
+        self._check_agent(agent)
+        selection=self._agent_selections.get(agent)
+        return self.get_project(selection['project_id']) if selection else self.current_project
+
+    def agent_task(self,agent):
+        self._check_agent(agent)
+        selection=self._agent_selections.get(agent)
+        if selection is None: return self.current_task
+        return self.get_task(selection['task_id']) if selection.get('task_id') else None
+
+    def _assert_agent_idle(self,agent):
+        if getattr(self._adapter(agent),'state','') in ('Busy','Connecting') or agent in self._streams:
+            raise RuntimeError('Wait for or stop this agent before changing its project or task: '+agent)
+
+    def _select_agent_context(self,agent,project,task=None):
+        self._assert_agent_idle(agent)
+        selection={'project_id':project['id'],'task_id':task['id'] if task else None}
+        self._agent_selections[agent]=selection
+        self.set_setting('selection.'+agent,selection)
+        self._contexts.pop(agent,None)
+        self._native_discovery.pop(agent,None)
+        self._apply_project(agent,project)
+        self._record('agent_context_changed',agent,project_id=project['id'],content=task['title'] if task else project['name'])
+
+    def select_agent_project(self,agent,project_id):
+        project=self.get_project(project_id)
+        if not project: raise ValueError('Unknown project')
+        self._select_agent_context(agent,project)
+        return project
+
+    def select_agent_task(self,agent,task_id):
+        task=self.get_task(task_id)
+        if not task: raise ValueError('Unknown task')
+        self._select_agent_context(agent,self.get_project(task['project_id']),task)
+        return task
+
+    def create_agent_task(self,agent,title):
+        self._assert_agent_idle(agent)
+        project=self.agent_project(agent)
+        if not project: raise ValueError('Select a project for this agent first')
+        task=self.create_task(title,project['id'],select=False)
+        self.select_agent_task(agent,task['id'])
+        return task
+
+    def _reset_shared_contexts(self):
+        self._contexts={agent:context for agent,context in self._contexts.items() if agent in self._agent_selections}
 
     def _recover(self):
         for message in self.store.query("SELECT id,task_id,agent,session_id FROM messages WHERE status='streaming'"):
@@ -91,11 +141,12 @@ class WorkspaceCore:
             if adapter._process:
                 adapter.disconnect()
             adapter=self.set_adapter(agent,replacement)
-        if not self.current_project and settings.get('default_project'):
-            self.select_project(settings['default_project'])
-        if settings.get('executable'): adapter.executable=settings['executable']
+        if not self.agent_project(agent) and settings.get('default_project'):
+            self.select_agent_project(agent,settings['default_project'])
+        if settings.get('executable') or (agent=='codex' and 'executable' in settings):
+            adapter.executable=settings['executable'] or ''
         if settings.get('timeout'): adapter.settings['timeout']=float(settings['timeout'])
-        if self.current_project: self._apply_project(agent,self.current_project)
+        if self.agent_project(agent): self._apply_project(agent,self.agent_project(agent))
         return adapter.connect()
 
     def disconnect(self,agent):
@@ -161,28 +212,30 @@ class WorkspaceCore:
             if task and task['project_id']!=project_id:
                 self.current_task_id=None
                 self.set_setting('current_task_id',None)
-            self._contexts.clear()
+            self._reset_shared_contexts()
             self._record('project_changed',project_id=project_id,content=project['name'])
         if sync: self.sync_project()
         return project
 
-    def _project_metadata(self,project):
-        task=self.current_task
+    def _project_metadata(self,project,agent=None):
+        task=self.agent_task(agent) if agent else self.current_task
         branch=self.git_snapshot(project['id']).get('branch') or project['active_branch']
         return {'project_id':project['id'],'project_name':project['name'],'repo_name':Path(project['repo_path']).name,
                 'branch':branch,'task_id':task['id'] if task else None,'task_title':task['title'] if task else None}
 
     def _apply_project(self,agent,project):
         path='' if agent=='dot' else project[f'{agent}_cwd'] or project['repo_path']
-        self._adapter(agent).set_project(path,self._project_metadata(project))
+        self._adapter(agent).set_project(path,self._project_metadata(project,agent))
 
     def sync_project(self):
         project=self.current_project
         if not project: raise ValueError('Select a project first')
-        for agent in self.adapters: self._apply_project(agent,project)
+        for agent in self.adapters:
+            selected=self.agent_project(agent)
+            if selected: self._apply_project(agent,selected)
         self._record('project_synced',content=project['name'],metadata=self._project_metadata(project))
 
-    def create_task(self,title,project_id=None,**metadata):
+    def create_task(self,title,project_id=None,*,select=True,**metadata):
         project=self.get_project(project_id or self.current_project_id)
         if not project: raise ValueError('Select a project before creating a task')
         if not str(title).strip(): raise ValueError('Task title is required')
@@ -193,7 +246,7 @@ class WorkspaceCore:
                   status=status,created_by=metadata.pop('created_by','user'),current_owner=metadata.pop('current_owner','user'),
                   notes=metadata.pop('notes',''),metadata=metadata)
         self.store.insert('tasks',task)
-        self.select_task(task['id'])
+        if select: self.select_task(task['id'])
         return self.get_task(task['id'])
 
     def get_task(self,task_id): return self.store.get('tasks',{'id':task_id})
@@ -221,7 +274,7 @@ class WorkspaceCore:
             self.current_task_id=task_id
             self.set_setting('current_project_id',task['project_id'])
             self.set_setting('current_task_id',task_id)
-            self._contexts.clear()
+            self._reset_shared_contexts()
             self._record('task_changed',task_id=task_id,content=task['title'])
         return task
 
@@ -240,7 +293,7 @@ class WorkspaceCore:
     def discover_sessions(self,agent,limit=100,offset=0):
         """Explicit operator action only; discovers metadata without mapping or resuming."""
         adapter=self._adapter(agent)
-        project=self.current_project
+        project=self.agent_project(agent)
         if not project: raise ValueError('Select a project before native session discovery')
         directory=str(Path(project['repo_path']).resolve())
         if not getattr(adapter,'cwd','') or Path(adapter.cwd).resolve()!=Path(directory):
@@ -249,7 +302,7 @@ class WorkspaceCore:
             records=sanitize(adapter.list_sessions(native=True,limit=limit,offset=offset))
         else:
             records=sanitize(adapter.list_sessions())
-        if self.current_project_id!=project['id'] or Path(adapter.cwd).resolve()!=Path(directory):
+        if (self.agent_project(agent) or {}).get('id')!=project['id'] or Path(adapter.cwd).resolve()!=Path(directory):
             raise PermissionError('Project changed during native discovery; discover again in the selected project')
         with self._lock:
             existing=self._native_discovery.get(agent)
@@ -282,7 +335,7 @@ class WorkspaceCore:
     def native_history(self,agent,session_id,limit=200,offset=0):
         """Explicit selected native preview, never persisted or mapped into workspace tasks."""
         adapter=self._adapter(agent)
-        project=self.current_project
+        project=self.agent_project(agent)
         if not project: raise ValueError('Select a project before viewing native history')
         if isinstance(limit,bool) or not isinstance(limit,int) or not 1<=limit<=500:
             raise ValueError('Native history page limit must be between 1 and 500')
@@ -308,7 +361,7 @@ class WorkspaceCore:
             cleaned=sanitize(str(exc))
             if cleaned==str(exc): raise
             raise RuntimeError(cleaned) from None
-        if self.current_project_id!=project['id'] or Path(adapter.cwd).resolve()!=directory:
+        if (self.agent_project(agent) or {}).get('id')!=project['id'] or Path(adapter.cwd).resolve()!=directory:
             raise PermissionError('Project changed during native history read; preview discarded')
         return sanitize(result)
 
@@ -326,7 +379,7 @@ class WorkspaceCore:
         metadata={key:record[key] for key in ('source','branch','createdAt','updatedAt','created_at','updated_at','modelProvider') if key in record}
         metadata.update(imported_native=True,read_only=True)
         cwd=str(record.get('cwd') or record.get('projectPath') or record.get('directory') or '')
-        project=self.current_project
+        project=self.agent_project(agent)
         project_id=project['id'] if project and cwd and Path(cwd).resolve()==Path(project['repo_path']).resolve() else None
         title=str(record.get('title') or record.get('name') or record.get('summary') or record.get('firstPrompt') or record.get('preview') or '')
         self.store.insert('sessions',dict(identity,task_id=None,project_id=project_id,title=title,cwd=cwd,
@@ -374,15 +427,20 @@ class WorkspaceCore:
             except OSError: continue
         return self.create_project(directory.name or str(directory),directory)
 
-    def open_desktop_project(self,directory,title='新對話'):
+    def open_desktop_project(self,directory,title='新對話',*,agent=None):
         """Select (or create) the project for a listed folder and start a fresh task in it."""
-        self._assert_idle()
+        if agent: self._assert_agent_idle(agent)
+        else: self._assert_idle()
         project=self._project_for_directory(directory)
-        self.select_project(project['id'])
-        task=self.create_task(title)
+        if agent:
+            self.select_agent_project(agent,project['id'])
+            task=self.create_agent_task(agent,title)
+        else:
+            self.select_project(project['id'])
+            task=self.create_task(title)
         return {'project_id':project['id'],'task_id':task['id']}
 
-    def open_desktop_session(self,record,history_limit=200):
+    def open_desktop_session(self,record,history_limit=200,*,independent=False):
         """Map one explicitly chosen local conversation to a project and task, with its visible history.
 
         Never contacts the agent: resuming stays a separate explicit call."""
@@ -392,9 +450,11 @@ class WorkspaceCore:
         if agent not in ('claude','codex'): raise ValueError('Local conversations are available for Claude and Codex only')
         session_id=str(record.get('id') or '').lower()
         if not _valid_id(session_id): raise ValueError('Invalid session identifier')
-        self._assert_idle()
+        if independent: self._assert_agent_idle(agent)
+        else: self._assert_idle()
         project=self._project_for_directory(str(record.get('cwd') or ''))
-        self.select_project(project['id'])
+        if independent: self.select_agent_project(agent,project['id'])
+        else: self.select_project(project['id'])
         title=sanitize(str(record.get('title') or session_id))[:200]
         tasks=self.list_tasks(project_id=project['id'])
         mapped=[t for t in tasks if t.get(agent+'_session')==session_id]
@@ -402,7 +462,10 @@ class WorkspaceCore:
         # shares the title is reused only when it has no conversation of this role yet.
         task=(next((t for t in mapped if t['title']==title),None) or (mapped[0] if mapped else None)
               or next((t for t in tasks if t['title']==title and not t.get(agent+'_session')),None))
-        if task: self.select_task(task['id'])
+        if independent:
+            if task: self.select_agent_task(agent,task['id'])
+            else: task=self.create_agent_task(agent,title)
+        elif task: self.select_task(task['id'])
         else: task=self.create_task(title)
         for other in mapped:
             if other['id']!=task['id']: self.store.update('tasks',{'id':other['id']},{agent+'_session':'','updated_at':now()})
@@ -411,7 +474,7 @@ class WorkspaceCore:
         if self.store.get('sessions',identity): self.store.update('sessions',identity,fields)
         else: self.store.insert('sessions',dict(identity,**fields,created_at=now(),metadata={'source':agent+'-local','imported_native':True}))
         self.store.update('tasks',{'id':task['id']},{agent+'_session':session_id,'updated_at':now()})
-        self._contexts.clear()
+        self._contexts.pop(agent,None)
         known={(m['role'],str(m['content']).strip()) for m in self.messages(task['id'],agent)}
         imported=tools=0
         for item in read_history(agent,session_id,history_limit):
@@ -437,8 +500,8 @@ class WorkspaceCore:
 
     def _context(self,agent):
         if agent not in self._contexts:
-            task=self.current_task or {}
-            self._contexts[agent]={'task_id':task.get('id'),'project_id':task.get('project_id',self.current_project_id),
+            task=self.agent_task(agent) or {}
+            self._contexts[agent]={'task_id':task.get('id'),'project_id':task.get('project_id',(self.agent_project(agent) or {}).get('id')),
                                    'session_id':task.get(agent+'_session','')}
         return self._contexts[agent]
 
@@ -459,19 +522,20 @@ class WorkspaceCore:
         if task: self.store.update('tasks',{'id':task['id']},{agent+'_session':session_id,'updated_at':now()})
 
     def create_session(self,agent):
-        self._require_task()
+        self._require_task(agent)
         adapter=self._adapter(agent)
         if not self.capabilities(agent).get('supports_sessions'): raise NotImplementedError(f'{agent}: sessions Unsupported')
         if getattr(adapter,'state','')=='Busy': raise RuntimeError('Wait for the active turn before creating a session')
-        self._contexts[agent]={'task_id':self.current_task_id,'project_id':self.current_project_id,'session_id':''}
-        self._apply_project(agent,self.current_project)
+        task=self.agent_task(agent)
+        self._contexts[agent]={'task_id':task['id'],'project_id':task['project_id'],'session_id':''}
+        self._apply_project(agent,self.agent_project(agent))
         result=adapter.create_session()
         sid=result.get('id',result.get('session_id','')) if isinstance(result,dict) else result
         if isinstance(sid,str) and sid: self._map_session(agent,sid)
         return result
 
     def resume_session(self,agent,session_id):
-        self._require_task()
+        self._require_task(agent)
         adapter=self._adapter(agent)
         if not self.capabilities(agent).get('supports_sessions'): raise NotImplementedError(f'{agent}: sessions Unsupported')
         if getattr(adapter,'state','')=='Busy': raise RuntimeError('Wait for the active turn before resuming a session')
@@ -480,12 +544,13 @@ class WorkspaceCore:
             if (saved.get('metadata') or {}).get('local_harness',adapter.local_harness)!=adapter.local_harness:
                 raise ValueError('此本地對話使用不同 Harness；請切回原 Harness 或建立新對話')
         if saved and agent!='dot':
-            project=self.current_project
+            project=self.agent_project(agent)
             expected=project.get(agent+'_cwd') or project['repo_path']
             if saved.get('cwd') and Path(saved['cwd']).resolve()!=Path(expected).resolve():
                 raise ValueError('此對話屬於不同工作目錄：'+saved['cwd']+'。請先選擇該專案與任務，再按 Resume；本次沒有恢復 session。')
-        self._contexts[agent]={'task_id':self.current_task_id,'project_id':self.current_project_id,'session_id':session_id}
-        self._apply_project(agent,self.current_project)
+        task=self.agent_task(agent)
+        self._contexts[agent]={'task_id':task['id'],'project_id':task['project_id'],'session_id':session_id}
+        self._apply_project(agent,self.agent_project(agent))
         result=adapter.resume_session(session_id)
         self._map_session(agent,session_id)
         self._record('session_changed',agent,content='Resumed '+session_id)
@@ -495,11 +560,11 @@ class WorkspaceCore:
         if not self.store.get('sessions',{'agent':agent,'id':session_id}): raise ValueError('Unknown session')
         self.store.update('sessions',{'agent':agent,'id':session_id},{'title':title,'updated_at':now()})
 
-    def _require_task(self):
-        if not self.current_task: raise ValueError('Select or create a task first')
+    def _require_task(self,agent=None):
+        if not (self.agent_task(agent) if agent else self.current_task): raise ValueError('Select or create a task first')
 
     def send_message(self,agent,content,model=None,effort=None,attachments=None):
-        self._require_task()
+        self._require_task(agent)
         adapter=self._adapter(agent)
         if getattr(adapter,'state','Disconnected')!='Connected': raise RuntimeError(f'{agent}: connect backend and wait until ready before sending')
         if not str(content).strip() and not attachments: raise ValueError('Message is empty')
@@ -511,14 +576,14 @@ class WorkspaceCore:
         if effort and not caps.get('supports_effort'): raise NotImplementedError('Effort selection Unsupported')
         if attachments:
             if not caps.get('supports_files'): raise NotImplementedError('Attachments Unsupported')
-            attachments=[str(self.safe_artifact_path(path)) for path in attachments]
-        task=self.current_task
+            attachments=[str(self.safe_artifact_path(path,agent=agent)) for path in attachments]
+        task=self.agent_task(agent)
         mapped=task.get(agent+'_session','')
         active=getattr(adapter,'session_id','')
         if mapped and active!=mapped: raise RuntimeError('Resume the mapped session before sending to this task')
         if active and not mapped: raise RuntimeError('Create or explicitly resume a session for this task before sending')
         self._contexts[agent]={'task_id':task['id'],'project_id':task['project_id'],'session_id':mapped}
-        self._apply_project(agent,self.current_project)
+        self._apply_project(agent,self.agent_project(agent))
         message_id=uid('msg-')
         self._contexts[agent]['outbound_message_id']=message_id
         self.store.insert('messages',dict(id=message_id,task_id=task['id'],agent=agent,session_id=mapped,role='user',
@@ -652,14 +717,16 @@ class WorkspaceCore:
         return events
 
     def messages(self,task_id=None,agent=None):
-        task_id=task_id or self.current_task_id
+        if task_id is None and agent in self._agent_selections and not self.agent_task(agent): return []
+        task_id=task_id or ((self.agent_task(agent) or {}).get('id') if agent else self.current_task_id)
         clauses,values=[],[]
         if task_id: clauses.append('task_id=?'); values.append(task_id)
         if agent: clauses.append('agent=?'); values.append(agent)
         return self.store.query('SELECT * FROM messages'+(' WHERE '+' AND '.join(clauses) if clauses else '')+' ORDER BY timestamp,rowid',values)
 
     def events(self,task_id=None,agent=None,limit=1000):
-        task_id=task_id or self.current_task_id
+        if task_id is None and agent in self._agent_selections and not self.agent_task(agent): return []
+        task_id=task_id or ((self.agent_task(agent) or {}).get('id') if agent else self.current_task_id)
         clauses,values=[],[]
         if task_id: clauses.append('task_id=?'); values.append(task_id)
         if agent: clauses.append('agent=?'); values.append(agent)
@@ -697,6 +764,9 @@ class WorkspaceCore:
         timestamp=now()
         metadata={'source_agent':source['agent'],'target_agent':target_agent,'task_id':task['id'],'project_id':project['id'],
                   'project':project['name'],'branch':task['branch'],'timestamp':timestamp,'source_session':source['session_id']}
+        target=self.agent_task(target_agent) or {}
+        metadata.update(target_task_id=target.get('id'),target_project_id=target.get('project_id'),
+                        target_session=target.get(target_agent+'_session',''))
         original=source['content']
         annotation=sanitize(annotation)
         envelope='Handoff metadata:\n'+json.dumps(metadata,ensure_ascii=False,indent=2)+'\n\nOriginal content:\n'+original
@@ -713,7 +783,12 @@ class WorkspaceCore:
         record=self.store.get('handoffs',{'id':handoff_id})
         if not record: raise ValueError('Handoff preview does not exist')
         if record['status']!='prepared': raise ValueError('This handoff has already been attempted; prepare a new preview to retry')
-        if record['task_id']!=self.current_task_id: raise ValueError('Select the handoff task before sending')
+        target=self.agent_task(record['target_agent']) or {}
+        expected=(record.get('metadata') or {}).get('target_task_id',record['task_id'])
+        if target.get('id')!=expected: raise ValueError('Target agent task changed; prepare the handoff again')
+        metadata=record.get('metadata') or {}
+        if 'target_session' in metadata and target.get(record['target_agent']+'_session','')!=metadata['target_session']:
+            raise ValueError('Target agent session changed; prepare the handoff again')
         self.store.update('handoffs',{'id':handoff_id},{'status':'sending'})
         try: result=self.send_message(record['target_agent'],record['handoff_message'])
         except Exception:
@@ -748,9 +823,10 @@ class WorkspaceCore:
             self.store.archive_enabled=bool(value)
             self.store.archive_logs()
 
-    def safe_artifact_path(self,path):
+    def safe_artifact_path(self,path,*,agent=None):
         roots=[self.store.artifact_dir]
-        if self.current_project: roots.append(self.current_project['repo_path'])
+        project=self.agent_project(agent) if agent else self.current_project
+        if project: roots.append(project['repo_path'])
         return safe_file(path,roots)
 
     def open_path(self,path):

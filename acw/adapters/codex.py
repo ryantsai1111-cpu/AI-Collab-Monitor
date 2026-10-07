@@ -25,6 +25,7 @@ class CodexAdapter(Adapter):
 
     def __init__(self, emit, executable="", **settings):
         super().__init__(emit, executable, **settings)
+        self._auto_executable = None
         self._process = None
         self._pending = {}
         self._private_request_ids = set()
@@ -296,6 +297,28 @@ class CodexAdapter(Adapter):
     def _process_env(self):
         return None
 
+    def _resolve_executable(self):
+        """Refresh automatic paths after desktop updates; preserve custom overrides."""
+        executable = self.executable if self.executable != self._auto_executable else ""
+        local = os.environ.get("LOCALAPPDATA") if os.name == "nt" else None
+        root = Path(local) / "OpenAI" / "Codex" / "bin" if local else None
+        managed = bool(root and executable and Path(executable).name.lower() == "codex.exe"
+                       and Path(executable).parent.parent.resolve() == root.resolve())
+        if executable and not managed:
+            return executable
+        candidates = []
+        if root:
+            for path in root.glob("*/codex.exe"):
+                try:
+                    if path.is_file():
+                        candidates.append((path.stat().st_mtime, str(path)))
+                except OSError:
+                    # An updater may remove an older build during discovery.
+                    continue
+        selected = max(candidates)[1] if candidates else shutil.which("codex") or ""
+        self._auto_executable = selected
+        return selected
+
     def connect(self):
         if self._process and self._process.poll() is None and self.state in ("Connected", "Busy"):
             return self.capabilities
@@ -305,8 +328,7 @@ class CodexAdapter(Adapter):
         self._approvals.clear()
         self.last_error = ""
         self._session_ready = False
-        if not self.executable:
-            self.executable = shutil.which("codex") or ""
+        self.executable = self._resolve_executable()
         if not self.executable:
             self.set_state("Offline")
             raise FileNotFoundError("Official Codex executable not configured")

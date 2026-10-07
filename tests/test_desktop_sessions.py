@@ -273,7 +273,8 @@ class CoreAndUiTests(DesktopSessionFixture):
             window = OfflineWindow(self.core)
             try:
                 window.open_desktop_session(listed[0], resume=True)
-                self.assertEqual(thread, self.core.current_task["codex_session"])
+                self.assertEqual(thread, self.core.agent_task("codex")["codex_session"])
+                self.assertIsNone(self.core.current_task)
                 self.assertEqual(["修這個", "修好了"], [m["content"] for m in self.core.messages(agent="codex")])
                 events = {e["type"]: e["payload"] for e in self.core.events(agent="codex") if e["type"] in ("command", "file_edit")}
                 self.assertEqual("listing", events["command"]["output"])
@@ -291,7 +292,8 @@ class CoreAndUiTests(DesktopSessionFixture):
         try:
             window.open_desktop_session(self.record, resume=False)
             self.assertNotIn("resume_session", [call[0] for call in self.adapters["claude"].calls])
-            self.assertEqual(SESSION, self.core.current_task["claude_session"])
+            self.assertEqual(SESSION, self.core.agent_task("claude")["claude_session"])
+            self.assertIsNone(self.core.current_task)
             window.open_desktop_session(self.record, resume=True)
             self.assertIn(("resume_session", SESSION), self.adapters["claude"].calls)
             self.assertEqual([], window.reported_errors)
