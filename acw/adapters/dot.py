@@ -1,5 +1,6 @@
 """Human-triggered unofficial pinned CLI; no startup calls or polling."""
 import json, re, subprocess, sys, unicodedata
+from datetime import datetime, timezone
 from pathlib import Path
 from .base import Adapter, Capabilities
 from ..security import sanitize
@@ -29,13 +30,14 @@ DISCLOSURE = ('Unofficial integration. This action launches the pinned chatgpt-d
     'messages are read or sent. No automatic login, polling or relay. '
     'Continue only for your intended G8毛 Dot. ')
 
-def cli_runner(operation, dot_id='', text='', before=''):
+def cli_runner(operation, dot_id='', text='', before='', expected_room=''):
     root=Path(__file__).resolve().parents[2]
     python=Path(sys.executable)
     if python.name.lower()=='pythonw.exe': python=python.with_name('python.exe')
     args=[str(python),'-X','utf8','-I',str(root/'scripts'/'dot_cli_entry.py'),operation]
     if dot_id: args += ['--dot-id='+dot_id]
     if before: args += ['--before='+before]
+    if expected_room: args += ['--expected-room='+expected_room]
     if operation=='send': args += ['--',text]
     proc=subprocess.Popen(args,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
                           creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
@@ -51,11 +53,14 @@ class DotAdapter(Adapter):
     def __init__(self, emit, executable='', runner=None, **settings):
         super().__init__(emit, executable, **settings)
         self._runner=runner or cli_runner
+        self._require_room_provenance=runner is None
         self.target=settings.get('dot_id','')
         self.target_name=normalized_dot_name(settings.get('dot_name',''))
         if self.target and (not valid_dot_id(self.target) or self.target_name!='G8毛'):
             self.target='';self.target_name=''
         self._ticket=None
+        self.native_room_id=''
+        self.last_read_at=''
         self.before=''
         self._history=[]
         self.metadata = {}
@@ -88,14 +93,21 @@ class DotAdapter(Adapter):
         if operation!='list' and not self.target: raise ValueError('Select Dot first')
         previous=self.state;self.set_state('Busy')
         try:
+            if operation!='list' and self._require_room_provenance:
+                if not self.native_room_id: raise RuntimeError('No verified existing conversation; connect first')
+                kwargs['expected_room']=self.native_room_id
             result=sanitize(self._runner(operation,dot_id=self.target if operation!='list' else '',**kwargs))
+            if operation!='list' and self._require_room_provenance:
+                if not isinstance(result,dict) or result.get('dot_id')!=self.target or result.get('messaging_room_id')!=self.native_room_id:
+                    raise RuntimeError('Conversation provenance mismatch; response was not imported')
             if operation=='list':
                 items=result.get('items',[]) if isinstance(result,dict) else result
                 if not isinstance(items,list) or not all(isinstance(x,dict) for x in items): raise RuntimeError('Malformed Dot list response')
             elif operation=='messages':
                 if not isinstance(result,dict) or not isinstance(result.get('messages'),list) or not all(isinstance(x,dict) for x in result['messages']): raise RuntimeError('Malformed Dot messages response')
                 if not isinstance(result.get('lines',[]),list): raise RuntimeError('Malformed Dot speaker metadata')
-            elif not isinstance(result,dict):raise RuntimeError('Malformed Dot send receipt')
+            elif not isinstance(result,dict) or not isinstance(result.get('id'),str) or not result['id'].strip():
+                raise RuntimeError('Send acceptance is uncertain: missing native message receipt. Check history before resending.')
             return result
         except Exception as exc:
             self.last_error=str(sanitize(str(exc)));self.emit('error',content=self.last_error);self.set_state('Error');raise
@@ -128,8 +140,10 @@ class DotAdapter(Adapter):
         if not valid_dot_id(dot_id): raise ValueError('Unsupported Dot identifier type/control/size; selection was not saved')
         name=normalized_dot_name(name)
         if name!='G8毛': raise ValueError('Only the approved G8毛 Dot is in scope')
+        if dot_id!=self.target: self.settings.pop('expected_room_id',None)
         self.target,self.target_name=dot_id,str(sanitize(name))
-        self._ticket=None;self.session_id='';self.last_error='';self._refresh_capabilities()
+        self._ticket=None;self.session_id='';self.last_error='';self.before='';self._history=[]
+        self.native_room_id='';self.last_read_at='';self._refresh_capabilities()
         self.set_state('Disconnected')
     @checked_action
     def connect(self):
@@ -143,6 +157,14 @@ class DotAdapter(Adapter):
         if normalized_dot_name(chosen.get('display_name',''))!='G8毛':
             self.set_state('Error');raise RuntimeError('Selected Dot name differs from approved G8毛; connection refused')
         self.target_name=normalized_dot_name(sanitize(chosen.get('display_name',self.target_name)))
+        room=chosen.get('messaging_room_id','')
+        if self._require_room_provenance and (not isinstance(room,str) or not room):
+            self.set_state('Error');raise RuntimeError('Selected dot has no existing conversation; creating a room is disabled')
+        expected=self.settings.get('expected_room_id','') or self.native_room_id
+        if expected and room!=expected:
+            self.set_state('Error');raise RuntimeError('Selected dot does not match the expected conversation; nothing was read')
+        self.native_room_id=room if isinstance(room,str) else ''
+        if self.native_room_id: self.settings['expected_room_id']=self.native_room_id
         self.version='0.2.2 / '+COMMIT;self.session_id=self.target;self._refresh_capabilities()
         self.last_error=''
         self.emit('session',session_id=self.target,native_room_id=chosen.get('messaging_room_id',''),content='Existing Dot identity: '+self.target_name+'; this is not a new chat thread')
@@ -174,7 +196,8 @@ class DotAdapter(Adapter):
             self.emit('message_snapshot',native_id=native_id,role=role,content=text,
                       native_timestamp=item.get('created_at',''),source='Manual paginated snapshot; not streaming')
         if messages: self.before=str(messages[0].get('id',''))
-        self.emit('history_page',count=len(messages),before=self.before,content='Manual snapshot loaded; no polling')
+        self.last_read_at=datetime.now(timezone.utc).isoformat(timespec='seconds')
+        self.emit('history_page',count=len(messages),before=self.before,content='Conversation page loaded; not streaming',loaded_at=self.last_read_at)
         self._history=list(messages)
         self.set_state('Connected')
         return len(messages)
@@ -191,7 +214,8 @@ class DotAdapter(Adapter):
     def set_project(self, path, metadata=None):
         self.metadata = dict(metadata or {})
         self.cwd = ''
-        self.emit('project', metadata=self.metadata, content='Metadata only; dot has no filesystem connection.')
+        self.emit('project', metadata=self.metadata, content='Workspace association only; this messaging connector does not expose the dot cloud computer.')
     def diagnostics(self):
         return {**super().diagnostics(), 'metadata':self.metadata,'selected_dot':self.target,
-                'integration':'Unofficial / live validation pending','background_polling':False}
+                'integration':'Unofficial / live validation pending','background_polling':False,
+                'native_room_id':self.native_room_id,'last_read_at':self.last_read_at}

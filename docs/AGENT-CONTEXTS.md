@@ -30,8 +30,6 @@ Claude, Codex and Local LLM retain their existing backend session capabilities. 
 
 Validated 308 tests across the role-context, Core, desktop-session, orchestration, UI, approval, local-provider, Codex/Claude/Dot, discovery, security, inspection and session-label suites: 305 passed and 3 opt-in live tests skipped. Syntax parsing and `git diff --check` passed.
 
-The offline UI screenshot is omitted from this publication pending a separate privacy review. Offline layout validation does not establish live backend acceptance.
-
 `tests/test_agent_contexts.py` exercises independent contexts for all four roles, own-role idle checks, concurrent event/transcript routing, native discovery/history, attachment scopes, persistence without connection, cross-project resume rejection, target-aware handoffs, draft restoration, desktop Codex opening while Claude is busy, and automatic collaboration rejection.
 
 A Codex protocol integration regression uses the real adapter with a labelled in-memory transport and verifies that `thread/start` receives Codex's selected directory and `thread/resume` stays in that project. No live inference or existing user conversation is used by these tests.
