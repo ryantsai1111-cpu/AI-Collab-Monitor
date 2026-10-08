@@ -24,7 +24,10 @@ class DotOfflineUITests(unittest.TestCase):
         self.window=MainWindow(self.core);self.window.resize(1500,1000);self.window.show();self.panel=self.window.panels['dot'];QTest.qWait(40)
     def wait(self):
         until=time.monotonic()+10
-        while self.window.workers and time.monotonic()<until:QTest.qWait(20)
+        while self.window.workers and time.monotonic()<until:
+            QTest.qWait(20)
+            # Explicitly release the GIL so Python-backed Qt workers can progress.
+            time.sleep(.001)
         self.assertFalse(self.window.workers);self.window.poll_events();QTest.qWait(20)
     def tearDown(self):
         self.wait();self.window.grab().save(str(OUT/(self._testMethodName+'.png')))
@@ -38,7 +41,7 @@ class DotOfflineUITests(unittest.TestCase):
     def test_startup_no_transport_and_truthful_controls(self):
         self.assertEqual(self.runner.calls,[]);self.assertTrue(self.panel.dot_select.isEnabled())
         self.assertFalse(self.panel.model.isEnabled());self.assertFalse(self.panel.effort.isEnabled())
-        self.assertFalse(self.panel.dot_refresh.isEnabled());self.assertIn('Unofficial',self.panel.notice.text())
+        self.assertFalse(self.panel.dot_refresh.isEnabled());self.assertIn('非官方',self.panel.notice.text())
     def test_cancel_connect_never_calls_transport(self):
         self.adapter.configure_target('selected','G8毛');self.window.refresh_agent('dot')
         with patch.object(QMessageBox,'exec',return_value=QMessageBox.No):QTest.mouseClick(self.panel.connect_button,Qt.LeftButton)
@@ -136,18 +139,18 @@ class DotOfflineUITests(unittest.TestCase):
         self.assertFalse(self.panel.attach_button.isVisible());self.assertTrue(self.panel.dot_refresh.isEnabled())
         self.panel.input.setPlainText('A\nOFFLINE ORIGINAL')
         with patch.object(QMessageBox,'exec',return_value=QMessageBox.Yes):QTest.mouseClick(self.panel.send_button,Qt.LeftButton)
-        self.wait();self.assertEqual(self.runner.sent,'A\nOFFLINE ORIGINAL');self.assertEqual(len(self.runner.calls),2)
+        self.wait();self.assertEqual(self.runner.sent,'A\nOFFLINE ORIGINAL');self.assertEqual(len(self.runner.calls),3)
         with patch.object(QMessageBox,'exec',return_value=QMessageBox.Yes):QTest.mouseClick(self.panel.dot_refresh,Qt.LeftButton)
-        self.wait();self.assertEqual(len(self.core.messages(agent='dot')),2)
+        self.wait();self.assertEqual(len(self.core.dot_conversation_messages()),2)
         self.assertTrue(any(card.message.get('role')=='assistant' for card in self.panel.cards.values()))
-        QTest.qWait(300);self.window.poll_events();self.assertEqual(len(self.runner.calls),3)
+        QTest.qWait(300);self.window.poll_events();self.assertEqual(len(self.runner.calls),4)
     def test_cancel_send_preserves_draft_and_does_not_send(self):
         self.connect_fixture();self.panel.input.setPlainText('UNSENT A')
         with patch.object(QMessageBox,'exec',return_value=QMessageBox.No):QTest.mouseClick(self.panel.send_button,Qt.LeftButton)
-        self.wait();self.assertEqual(self.panel.input.toPlainText(),'UNSENT A');self.assertEqual(len(self.runner.calls),1)
+        self.wait();self.assertEqual(self.panel.input.toPlainText(),'UNSENT A');self.assertEqual(len(self.runner.calls),2)
     def test_monitor_mode_prohibits_select_read_send(self):
         self.connect_fixture();self.panel.set_monitor(True)
         for control in (self.panel.dot_select,self.panel.dot_refresh,self.panel.dot_older,self.panel.send_button):self.assertFalse(control.isEnabled())
-        self.assertTrue(self.panel.input.isReadOnly());self.assertEqual(len(self.runner.calls),1)
+        self.assertTrue(self.panel.input.isReadOnly());self.assertEqual(len(self.runner.calls),2)
 
 if __name__=='__main__':unittest.main()

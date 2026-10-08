@@ -286,7 +286,7 @@ class MessageCard(QFrame):
         self.heading.setWordWrap(False)
         footer.addWidget(self.heading)
         footer.addStretch()
-        if role == "assistant":
+        if role == "assistant" and panel.agent != "dot":
             self.forward_button = QToolButton()
             self.forward_button.setObjectName("ghost")
             self.forward_button.setText("轉交 ▾")
@@ -306,7 +306,7 @@ class MessageCard(QFrame):
         menu.addAction("Copy", lambda: self.copy(False))
         menu.addAction("複製含中繼資料", lambda: self.copy(True))
         menu.addAction("檢視原始事件", lambda: panel.window.open_raw(self.message))
-        if role == "assistant":
+        if role == "assistant" and panel.agent != "dot":
             menu.addSeparator()
             for target in AGENTS:
                 if target != panel.agent:
@@ -320,7 +320,10 @@ class MessageCard(QFrame):
         self.message["content"] = content
         cursor = self.body.textCursor()
         start, end = cursor.anchor(), cursor.position()
-        self.body.render(plain(content), self.role == "assistant")
+        display = plain(content)
+        if not display and self.message.get('agent') == 'dot':
+            display = '〔此訊息沒有文字內容；附件或其他非文字內容尚未支援顯示〕'
+        self.body.render(display, self.role == "assistant")
         size = len(self.body.toPlainText())
         cursor = self.body.textCursor()
         cursor.setPosition(min(start, size))
@@ -504,8 +507,11 @@ class AgentPanel(QFrame):
         self.more_button.setToolTip("對話、歷史、能力、原始事件與日誌")
         self.more_button.setPopupMode(QToolButton.InstantPopup)
         more = QMenu(self.more_button)
-        more.addAction("對話…", lambda: window.show_sessions(agent))
-        more.addAction("本機歷史…", self.show_session_history)
+        more.addAction("工作交接關聯…" if agent=="dot" else "對話…", lambda: window.show_sessions(agent))
+        if agent=="dot":
+            more.addAction("載入更早訊息…",lambda:self.read_dot(True))
+        else:
+            more.addAction("本機歷史…", self.show_session_history)
         if agent == "codex":
             more.addAction("Codex 本機對話…", lambda: window.show_desktop_sessions("codex"))
         if agent == "claude":
@@ -514,7 +520,7 @@ class AgentPanel(QFrame):
         more.addSeparator()
         more.addAction("原始事件…", lambda: window.show_agent_events(agent))
         more.addAction("日誌…", lambda: window.open_logs(agent))
-        more.addAction("專案檔案", window.open_project)
+        more.addAction("專案檔案", lambda: window.open_project(agent))
         if agent != "dot":
             more.addSeparator()
             mode_menu = more.addMenu("核准方式")
@@ -528,6 +534,10 @@ class AgentPanel(QFrame):
         self.more_button.setMenu(more)
         header.addWidget(self.more_button)
         layout.addLayout(header)
+        self.context_button = button("選擇專案與對話…", lambda: window.show_sessions(agent), f"context_{agent}")
+        self.context_button.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        layout.addWidget(self.context_button)
+        if agent=="dot": self.context_button.hide()
         self.notice = label("能力尚未偵測 · 請在準備好時連線", True)
         # One quiet line; the full text stays in the tooltip.
         self.notice.setWordWrap(False)
@@ -541,6 +551,26 @@ class AgentPanel(QFrame):
         session_layout = QVBoxLayout(self.session_controls)
         session_layout.setContentsMargins(0, 8, 0, 0)
         session_layout.setSpacing(8)
+        self.project = QComboBox()
+        self.project.setObjectName(f"project_{agent}")
+        self.project.setAccessibleName(f"{ROLE_NAMES[agent]} 專案")
+        self.project.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.project.setMinimumContentsLength(10)
+        self.project.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.project.currentIndexChanged.connect(self.project_selected)
+        session_layout.addWidget(self.project)
+        task_row = QHBoxLayout()
+        self.task = QComboBox()
+        self.task.setObjectName(f"task_{agent}")
+        self.task.setAccessibleName(f"{ROLE_NAMES[agent]} 任務")
+        self.task.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.task.setMinimumContentsLength(10)
+        self.task.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.task.currentIndexChanged.connect(self.task_selected)
+        task_row.addWidget(self.task, 1)
+        self.new_task_button = button("新增任務", self.new_task, f"new_task_{agent}")
+        task_row.addWidget(self.new_task_button)
+        session_layout.addLayout(task_row)
         self.session_search = QLineEdit()
         self.session_search.setObjectName(f"session_search_{agent}")
         self.session_search.setPlaceholderText("搜尋已保存的對話…")
@@ -576,7 +606,15 @@ class AgentPanel(QFrame):
             dot_controls.addWidget(self.dot_refresh)
             dot_controls.addWidget(self.dot_older)
             session_layout.addLayout(dot_controls)
-            session_layout.addWidget(label("Unofficial adapter · each live action needs your consent. No automatic reads or relay.", True))
+            session_layout.addWidget(label("Workspace 專案與任務僅供交接關聯，不會切換 G8毛 的持續對話。", True))
+            for control in (self.session_search,self.session,self.current_session_label,self.new_button,
+                            self.resume_button,self.rename_button,self.discover_button,self.session_details):
+                control.hide()
+            self.dot_select.setText("選擇 G8毛")
+            self.dot_older.setText("載入更早訊息")
+            self.dot_bind = button('將對話關聯到交接任務',self.bind_dot_task,'bind_dot_task')
+            self.dot_bind.setToolTip('僅在 Workspace 保存此任務的交接對象，不建立、切換或讀取 dot 對話')
+            session_layout.addWidget(self.dot_bind)
         self.cwd_label = label("工作目錄：尚未選擇", True)
         self.cwd_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         # A long unbreakable path must not widen the sidebar past its viewport.
@@ -584,6 +622,8 @@ class AgentPanel(QFrame):
         self.branch_label = label("分支：—", True)
         session_layout.addWidget(self.cwd_label)
         session_layout.addWidget(self.branch_label)
+        if agent == 'dot':
+            self.cwd_label.hide(); self.branch_label.hide()
         session_layout.addStretch()
 
         self.pending_review = button("Pending backend approval · Review…", self.review_pending_approval, f"pending_approval_{agent}")
@@ -642,6 +682,8 @@ class AgentPanel(QFrame):
         model_row.addWidget(self.model, 3)
         model_row.addWidget(self.effort, 2)
         composer.addLayout(model_row)
+        if agent == 'dot':
+            self.model.hide(); self.effort.hide()
         controls = QHBoxLayout()
         self.attach_button = button("Attach", self.attach)
         self.attach_button.setAccessibleName(f"Attach files to {ROLE_NAMES[agent]}")
@@ -660,6 +702,8 @@ class AgentPanel(QFrame):
         self.approval_button.setVisible(agent != "dot")
         controls.addWidget(self.approval_button)
         self._dot_follow = None
+        self._dot_status_note = ""
+        self.dot_visible_limit = 200
         if agent == "dot":
             self.dot_refresh_inline = button("Refresh", lambda: self.read_dot(False), "refresh_dot_inline")
             self.dot_refresh_inline.setToolTip("讀取 G8毛 的最新回覆")
@@ -792,11 +836,15 @@ class AgentPanel(QFrame):
         else:
             if self.agent == 'dot' and not self.dot_consent('connect'): return
             # Claude Code needs a working directory; guide instead of failing with a terse error.
-            if self.agent in ('claude', 'local') and not self.window.core.current_project:
+            if self.agent in ('claude', 'local') and not self.window.core.agent_project(self.agent):
                 self.window.require_project(ROLE_NAMES[self.agent] + " 需要先有專案資料夾才能連線。")
                 return
             self.set_state("Connecting")
-            self.window.run(lambda: self.window.core.connect(self.agent), lambda _: self.window.refresh_agent(self.agent), self.agent)
+            operation = self.connect_dot_conversation if self.agent == 'dot' else lambda: self.window.core.connect(self.agent)
+            self.window.run(operation, lambda _: self.window.reload_context(), self.agent)
+
+    def connect_dot_conversation(self):
+        return self.window.core.connect_dot_conversation()
 
     def dot_consent(self, action):
         if self.monitor: return False
@@ -807,7 +855,8 @@ class AgentPanel(QFrame):
         box.setTextFormat(Qt.PlainText)
         follow = ('\nAfter this send the workspace reads this Dot for replies automatically, about every 8 seconds '
                   'for up to 5 minutes, then stops.') if action == 'send' else ''
-        box.setText(DISCLOSURE+'\nAction: '+action+'\nTarget: '+target+follow+'\nStreaming / server Stop / attachments / New chat: Unsupported.')
+        initial = '\n連接後會立即讀取這個 dot 既有對話的最近一頁訊息；不會建立新對話。' if action == 'connect' else ''
+        box.setText(DISCLOSURE+'\nAction: '+action+'\nTarget: '+target+initial+follow+'\n此連接器不提供串流、伺服器停止、附件或建立新對話。')
         box.setDefaultButton(QMessageBox.No)
         if box.exec() != QMessageBox.Yes: return False
         adapter.authorize_manual_action(action)
@@ -825,8 +874,9 @@ class AgentPanel(QFrame):
                 self.window.show_error('This approved integration is scoped to G8毛. No other Dot was selected.'); return
             adapter=self.window.core.adapters['dot'];adapter.configure_target(item['id'],item['name'])
             saved=self.window.core.get_setting('agent.dot',{}) or {}
+            if saved.get('dot_id')!=item['id']: saved.pop('expected_room_id',None)
             self.window.core.set_setting('agent.dot',dict(saved,dot_id=item['id'],dot_name=item['name']))
-            self.window.refresh_agent('dot')
+            self.window.reload_context()
             self.window.footer.setText('G8毛 selection saved. Click Connect Dot and review its separate consent; no conversation has been read.')
         self.window.run(self.window.core.adapters['dot'].discover_targets, selected, 'dot')
 
@@ -861,15 +911,19 @@ class AgentPanel(QFrame):
         if dialog.exec()!=QDialog.Accepted:return None
         return choices.currentData()
 
+    def bind_dot_task(self):
+        adapter=self.window.core.adapters['dot']
+        self.window.run(lambda:self.window.core.resume_session('dot',adapter.target),lambda _:self.window.reload_context(),'dot')
+
     def read_dot(self, older=False):
         if self.connection_state != 'Connected' or self.monitor: return
-        if not self.window.core.current_task:
-            self.window.show_error('Select a task before retrieving messages.'); return
-        adapter=self.window.core.adapters['dot']
-        if self.window.core.current_task.get('dot_session') != adapter.target:
-            self.window.show_error('Resume the selected existing Dot for this task first.'); return
+        if self.window.orchestrator and self.window.orchestrator.active:
+            self.window.show_error('自動協作進行中，請先結束這一輪再手動讀取持續對話。'); return
         if not self.dot_consent('messages'): return
-        self.window.run(lambda: adapter.refresh_messages(older), agent='dot')
+        def loaded(_):
+            if older: self.dot_visible_limit += 32
+            self.window.reload_context()
+        self.window.run(lambda: self.window.core.read_dot_conversation(older), loaded, agent='dot')
 
     def update_capabilities(self, value):
         self.capabilities = asdict(value)
@@ -963,7 +1017,9 @@ class AgentPanel(QFrame):
     def set_state(self, state):
         old_state = self.connection_state
         self.connection_state = state
-        self.state.setText(STATE_LABELS.get(state, "狀態待確認（" + state + "）"))
+        self.state.setText(({'Connected':'通道已連接','Busy':'正在傳輸','Connecting':'正在連接'}.get(state)
+                            if self.agent == 'dot' else None) or STATE_LABELS.get(state, "狀態待確認（" + state + "）"))
+        if self.agent == 'dot': self.state.setToolTip('這是 Workspace 訊息通道狀態，不代表 dot 所有工作的執行狀態')
         color = STATE_COLORS.get(state, STATE_IDLE)
         self.state.setStyleSheet(f"color: {color};")
         if state in ("Disconnected", "Offline"):
@@ -984,13 +1040,18 @@ class AgentPanel(QFrame):
                 self.notice.setToolTip(error)
 
     def update_controls(self):
-        ready = self.connection_state == "Connected" and not self.monitor
+        operating = bool(getattr(self.window, '_agent_operations', {}).get(self.agent))
+        ready = self.connection_state == "Connected" and not self.monitor and not operating
         busy = self.connection_state == "Busy"
         cap = self.capabilities
         files_supported = self.attachment_supported()
         blocked = self.agent == "dot" and not cap.get("supports_sessions")
         settings = self.window.core.get_setting("agent." + self.agent, {}) or {}
         enabled = settings.get("enabled", True)
+        changing = busy or self.connection_state == 'Connecting' or self.monitor or operating or getattr(self.window, '_opening_agent', None) == self.agent
+        self.project.setEnabled(not changing)
+        self.task.setEnabled(not changing)
+        self.new_task_button.setEnabled(not changing and bool(self.window.core.agent_project(self.agent)))
         local_missing = self.agent == 'local' and not (str(settings.get('base_url') or '').strip() and str(settings.get('model') or '').strip())
         self.connect_button.setEnabled(enabled and not blocked and not busy and self.connection_state != "Connecting" and (not local_missing or self.connection_state == 'Connected'))
         self.send_button.setEnabled(ready and not blocked and not (self.attachments and not files_supported) and not (self._effort_invalid and self.effort.currentData() is None))
@@ -1010,8 +1071,16 @@ class AgentPanel(QFrame):
             self.dot_refresh.setEnabled(ready)
             self.dot_refresh_inline.setEnabled(ready)
             self.dot_older.setEnabled(ready)
-            self.stop_button.setToolTip('Unsupported: no server cancellation; manual reads are not streaming')
-            self.new_button.setToolTip('Unsupported: map an existing Dot identity with Resume')
+            self.dot_bind.setEnabled(ready and bool(self.window.core.agent_task('dot')))
+            self.stop_button.hide()
+            self.new_button.setToolTip('此連接器不會建立新的 dot 對話')
+            adapter=self.window.core.adapters.get('dot')
+            stamp=getattr(adapter,'last_read_at','')
+            if self.connection_state != 'Error':
+                self.notice.setText(self._dot_status_note or ('持續對話 · 已載入最近訊息，可讀取更早內容' if stamp else '持續對話 · 連接後載入最近訊息'))
+            self.notice.setToolTip('非官方訊息連接器。畫面顯示最近 '+str(self.dot_visible_limit)+' 則以內的已載入訊息，可按載入更早訊息。快照可能不完整。最後成功讀取：'+(stamp or '尚未讀取'))
+            if self.window.orchestrator and self.window.orchestrator.active:
+                self.send_button.setEnabled(False);self.dot_refresh.setEnabled(False);self.dot_refresh_inline.setEnabled(False);self.dot_older.setEnabled(False)
         self.attach_button.setVisible(files_supported)
         self.attach_button.setEnabled(ready and files_supported)
         self.input.setAcceptDrops(files_supported and not self.monitor)
@@ -1035,7 +1104,10 @@ class AgentPanel(QFrame):
             self.notice.setText("本地模型設定已備妥 · 請按「連線」")
             self.notice.setToolTip(self.notice.text())
         elif self.agent == 'dot':
-            self.input.setPlaceholderText("手動傳送文字；按重新整理讀取回覆。無串流／伺服器停止。")
+            self.input.setPlaceholderText("傳送訊息給 G8毛，繼續原本的對話…")
+        if self.agent == 'dot' and self.connection_state == 'Error':
+            error=getattr(self.window.core.adapters.get('dot'),'last_error','')
+            if error: self.notice.setText(error);self.notice.setToolTip(error)
 
     def set_monitor(self, monitor):
         self.monitor = monitor
@@ -1081,7 +1153,57 @@ class AgentPanel(QFrame):
         SessionHistoryDialog(self.window, self.agent).exec()
 
     def new_session(self):
-        self.window.run(lambda: self.window.core.create_session(self.agent), lambda _: self.window.reload_context(), self.agent)
+        def create():
+            if not self.window.core.agent_task(self.agent):
+                self.window.core.create_agent_task(self.agent, "新對話 " + datetime.now().strftime("%m-%d %H:%M"))
+            return self.window.core.create_session(self.agent)
+        self.window.run(create, lambda _: self.window.reload_context(), self.agent)
+
+    def refresh_projects(self):
+        core = self.window.core
+        project, task = core.agent_project(self.agent) or {}, core.agent_task(self.agent) or {}
+        projects = core.list_projects()
+        for combo in (self.project, self.task):
+            combo.blockSignals(True)
+            combo.clear()
+        self.project.addItem("選擇此角色的專案…", None)
+        for row in projects:
+            self.project.addItem(project_label(row, projects), row['id'])
+        self.project.setCurrentIndex(max(0, self.project.findData(project.get('id'))))
+        self.task.addItem("選擇此角色的任務…", None)
+        if project:
+            for row in core.list_tasks(project_id=project['id']):
+                self.task.addItem(task_label(row, projects), row['id'])
+        self.task.setCurrentIndex(max(0, self.task.findData(task.get('id'))))
+        for combo in (self.project, self.task): combo.blockSignals(False)
+        title = (project.get('name') or '選擇專案') + ' › ' + (task.get('title') or '選擇任務')
+        self.context_button.setText('交接關聯：'+compact(title, 36) if self.agent=='dot' else compact(title,48))
+        self.context_button.setToolTip(title + ('\n僅供 Workspace 交接使用；不會切換或建立 dot 對話' if self.agent=='dot' else '\n只切換此角色的專案、任務與對話'))
+
+    def project_selected(self, *_):
+        pid = self.project.currentData()
+        current = (self.window.core.agent_project(self.agent) or {}).get('id')
+        if pid and pid != current and not self.window._loading:
+            if self.window.confirm_agent_context_change(self.agent):
+                self.window.run(lambda: self.window.core.select_agent_project(self.agent, pid),
+                                lambda _: self.window.reload_context(), self.agent)
+            else: self.refresh_projects()
+
+    def task_selected(self, *_):
+        tid = self.task.currentData()
+        current = (self.window.core.agent_task(self.agent) or {}).get('id')
+        if tid and tid != current and not self.window._loading:
+            if self.window.confirm_agent_context_change(self.agent):
+                self.window.run(lambda: self.window.core.select_agent_task(self.agent, tid),
+                                lambda _: self.window.reload_context(), self.agent)
+            else: self.refresh_projects()
+
+    def new_task(self):
+        if not self.window.confirm_agent_context_change(self.agent): return
+        title, ok = QInputDialog.getText(self, '新增此角色的任務', '任務名稱')
+        if ok and title.strip():
+            self.window.run(lambda: self.window.core.create_agent_task(self.agent, title.strip()),
+                            lambda _: self.window.reload_context(), self.agent)
 
     def resume_session(self):
         sid = self.session.currentData()
@@ -1128,11 +1250,15 @@ class AgentPanel(QFrame):
         content = self.input.toPlainText()
         if not content.strip() or not self.send_button.isEnabled():
             return
-        if not self.window.core.current_task:
-            self.window.require_task()
+        if self.agent != 'dot' and not self.window.core.agent_task(self.agent):
+            self.window.show_sessions(self.agent)
+            self.window.show_error("請先為此角色選擇或建立任務。")
             return
         model, effort, attachments = self.model.currentData(), self.effort.currentData(), list(self.attachments)
-        if self.agent == 'dot' and not self.dot_consent('send'): return
+        if self.agent == 'dot':
+            if self.window.orchestrator and self.window.orchestrator.active:
+                self.window.show_error('請先結束自動協作，再傳送持續對話訊息。');return
+            if not self.dot_consent('send'): return
         self.set_state("Busy")
         self.input.clear()
         self.clear_attachments()
@@ -1142,25 +1268,26 @@ class AgentPanel(QFrame):
             if self.agent == 'dot':
                 # A network timeout does not tell whether G8毛 received it; sending again may duplicate.
                 self.window.footer.setText("傳送沒有得到確認：訊息可能已經送出。請先按「重新整理」確認，再決定要不要重送。")
-        self.window.run(lambda: self.window.core.send_message(self.agent, content, model=model, effort=effort, attachments=attachments or None),
+        self.window.run(lambda: self.window.core.send_dot_conversation(content) if self.agent=='dot' else self.window.core.send_message(self.agent, content, model=model, effort=effort, attachments=attachments or None),
                         (lambda _: self.follow_dot_replies()) if self.agent == 'dot' else None, agent=self.agent, on_error=failed)
 
     def _dot_replies(self):
-        return tuple((m["id"], len(str(m["content"]))) for m in self.window.core.messages(agent="dot") if m.get("role") == "assistant")
+        return tuple((m["id"], len(str(m["content"]))) for m in self.window.core.dot_conversation_messages() if m.get("role") == "assistant")
 
     def follow_dot_replies(self):
         """After a consented send, read G8毛 for its reply for a few minutes so the answer shows up here."""
         adapter = self.window.core.adapters.get("dot")
         run = self.window.orchestrator
-        task = self.window.core.current_task or {}
-        if not hasattr(adapter, "grant_run") or (run and run.active) or task.get("dot_session") != getattr(adapter, "target", None):
+        task = self.window.core.agent_task(self.agent) or {}
+        if not hasattr(adapter, "grant_run") or (run and run.active) or not getattr(adapter, "target", None):
             return
         try:
             adapter.grant_run(45)
         except Exception:
             return
-        self._dot_follow = {"until": time.monotonic() + 300, "baseline": self._dot_replies(), "seen": None, "stable": 0, "task": task.get("id")}
+        self._dot_follow = {"until": time.monotonic() + 300, "baseline": self._dot_replies(), "seen": None, "stable": 0, "target": adapter.target}
         self._dot_timer.start(8000)
+        self._dot_status_note="已送出 · 正在讀取回覆（最多 5 分鐘）"
         self.notice.setText("已送出 · 正在自動讀取 G8毛 的回覆（最多 5 分鐘）")
 
     def stop_dot_follow(self, note=""):
@@ -1172,6 +1299,7 @@ class AgentPanel(QFrame):
         if hasattr(adapter, "revoke_run") and not (run and run.active):
             adapter.revoke_run()
         if note:
+            self._dot_status_note=note
             self.notice.setText(note)
             self.notice.setToolTip(note)
 
@@ -1179,9 +1307,11 @@ class AgentPanel(QFrame):
         follow = self._dot_follow
         if follow is None:
             return self._dot_timer.stop()
+        if self.window.orchestrator and self.window.orchestrator.active:
+            return self.stop_dot_follow()
         if self.connection_state == "Busy":
             return
-        if self.monitor or self.connection_state != "Connected" or (self.window.core.current_task or {}).get("id") != follow["task"]:
+        if self.monitor or self.connection_state != "Connected" or getattr(self.window.core.adapters.get("dot"),"target",None) != follow["target"]:
             return self.stop_dot_follow()
         if time.monotonic() > follow["until"]:
             return self.stop_dot_follow("已停止自動讀取 · 需要時請按「重新整理」")
@@ -1194,8 +1324,8 @@ class AgentPanel(QFrame):
                 follow["stable"] = follow["stable"] + 1 if current == follow["seen"] else 0
                 follow["seen"] = current
                 if follow["stable"] >= 2:
-                    self.stop_dot_follow("G8毛 已回覆")
-        self.window.run(lambda: self.window.core.adapters["dot"].refresh_messages(False), done, agent="dot",
+                    self.stop_dot_follow("已讀取新回覆 · 尚無原生完成訊號")
+        self.window.run(lambda: self.window.core.read_dot_conversation(False), done, agent="dot",
                         on_error=lambda _: self.stop_dot_follow("讀取回覆失敗 · 請按「重新整理」再試"))
 
     def stop(self):
@@ -1211,7 +1341,8 @@ class AgentPanel(QFrame):
             if item.widget():
                 item.widget().hide()
                 item.widget().deleteLater()
-        self.empty = label("這個任務尚無訊息", True)
+        dot_empty="這一頁沒有可顯示的文字訊息；可嘗試載入更早訊息。" if getattr(self.window.core.adapters.get("dot"),"last_read_at","") else "尚未載入 G8毛 的對話。連接後會讀取最近訊息。"
+        self.empty = label(dot_empty if self.agent=="dot" else "這個任務尚無訊息", True)
         self.empty.setAlignment(Qt.AlignCenter)
         self.transcript_layout.insertWidget(0, self.empty)
 
@@ -1848,7 +1979,7 @@ class SessionNavigator(QWidget):
         from .desktop_sessions import group_by_project
         agent, query = self.agent, self.search.text().casefold().strip()
         selected = (self.selected() or {}).get("id")
-        current = (self.window.core.current_task or {}).get(agent + "_session")
+        current = (self.window.core.agent_task(agent) or {}).get(agent + "_session")
         self.tree.clear()
         shown, focus = 0, None
         for group in group_by_project(self.sessions[agent] or []):
@@ -1960,10 +2091,13 @@ class HandoffDialog(QDialog):
         self.preview = window.core.prepare_handoff(identifier(message), target)
         layout = QVBoxLayout(self)
         layout.addWidget(label(f"{ROLE_NAMES.get(message.get('agent'), message.get('agent', ''))} → {ROLE_NAMES[target]}", False))
-        task = window.core.current_task or {}
-        project = window.core.current_project or {}
+        task = window.core.get_task(self.preview['task_id']) or {}
+        project = window.core.get_project(self.preview['project_id']) or {}
         projects = window.core.list_projects()
         layout.addWidget(label(f"任務：{task_label(task, projects)}\n專案：{project_label(project, projects)}\nBranch: {task.get('branch', '')}", True))
+        target_task = window.core.agent_task(target) or {}
+        target_project = window.core.agent_project(target) or {}
+        layout.addWidget(label(f"接收任務：{task_label(target_task, projects)}\n接收專案：{project_label(target_project, projects)}", True))
         rows = window.core.sessions(message.get('agent'))
         source_row = next((r for r in rows if session_identity(r) == message.get('session_id')), {'id': message.get('session_id')})
         layout.addWidget(label('來源對話：' + session_display(source_row, message.get('agent', ''), projects)['label'], True))
@@ -2018,6 +2152,9 @@ class MainWindow(QMainWindow):
         self._git_busy = False
         self._git_clock = 0
         self._context_views = {}
+        self._agent_views = {}
+        self._loaded_agent_keys = {}
+        self._agent_operations = {}
         self._loaded_context_key = None
         self._layout_updating = False
         self._grid_sizes = [400] * len(AGENTS)
@@ -2315,6 +2452,11 @@ class MainWindow(QMainWindow):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.poll_events)
         self.timer.start(100)
+        # Follow conversations that the desktop apps keep writing to while they are shown here.
+        self._sync_stamp, self._sync_floor, self._syncing = {}, {}, set()
+        self.sync_timer = QTimer(self)
+        self.sync_timer.timeout.connect(self.sync_local_conversations)
+        self.sync_timer.start(3000)
         QTimer.singleShot(0, self, self.update_workspace_layout)
 
     def context_key(self):
@@ -2322,7 +2464,14 @@ class MainWindow(QMainWindow):
         return (identifier(self.core.current_project or {}), identifier(task),
                 tuple(task.get(agent + "_session") or "" for agent in AGENTS))
 
+    def agent_context_key(self, agent):
+        if agent=='dot': return ('dot-conversation',getattr(self.core.adapters.get('dot'),'target',''))
+        task = self.core.agent_task(agent) or {}
+        return (agent, identifier(self.core.agent_project(agent) or {}), identifier(task), task.get(agent + '_session') or '')
+
     def save_context_state(self):
+        for agent, key in self._loaded_agent_keys.items():
+            self._agent_views[key] = self.panels[agent].capture_view_state()
         if self._loaded_context_key is not None:
             self._context_views[self._loaded_context_key] = {
                 "panels": {agent: panel.capture_view_state() for agent, panel in self.panels.items()},
@@ -2503,6 +2652,9 @@ class MainWindow(QMainWindow):
     def run(self, operation, callback=None, agent=None, on_error=None):
         worker = Worker(operation)
         self.workers.add(worker)
+        if agent:
+            self._agent_operations[agent] = self._agent_operations.get(agent, 0) + 1
+            self.panels[agent].update_controls()
         def failed(message):
             if agent:
                 self.panels[agent].set_state("Error")
@@ -2525,7 +2677,12 @@ class MainWindow(QMainWindow):
                     failed(message)
             worker.signals.result.connect(delivered)
         worker.signals.error.connect(failed)
-        worker.signals.finished.connect(lambda: self.workers.discard(worker))
+        def finished():
+            self.workers.discard(worker)
+            if agent:
+                self._agent_operations[agent] -= 1
+                self.panels[agent].update_controls()
+        worker.signals.finished.connect(finished)
         self.pool.start(worker)
         return worker
 
@@ -2554,7 +2711,10 @@ class MainWindow(QMainWindow):
             if not task_id and key != self._loaded_context_key:
                 continue
             view.get("panels", {}).get(agent, {}).get("pending", {}).pop(request_id, None)
-        current_task_id = identifier(self.core.current_task or {})
+        for key, view in self._agent_views.items():
+            if key[0] == agent and (not task_id or key[2] == task_id):
+                view.get('pending', {}).pop(request_id, None)
+        current_task_id = identifier(self.core.agent_task(agent) or {})
         if not task_id or task_id == current_task_id:
             self.panels[agent].resolve_pending_approval(request_id)
 
@@ -2611,27 +2771,32 @@ class MainWindow(QMainWindow):
             self.context_title.setText(compact(full_title, 90))
             self.context_title.setToolTip(full_title)
             for agent, panel in self.panels.items():
-                view = saved_view.get("panels", {}).get(agent, {})
-                self.reconcile_pending_approvals(view, agent, identifier(task))
+                agent_project = self.core.agent_project(agent) or {}
+                agent_task = self.core.agent_task(agent) or {}
+                agent_key = self.agent_context_key(agent)
+                view = self._agent_views.get(agent_key, {})
+                self.reconcile_pending_approvals(view, agent, identifier(agent_task))
                 panel._restoring_view = True
                 panel.clear_conversation()
                 shown = TRANSCRIPT_EVENTS
-                history = [(str(message.get("timestamp") or ""), 0, message) for message in self.core.messages(agent=agent)
+                transcript_messages=self.core.dot_conversation_messages(limit=panel.dot_visible_limit) if agent=="dot" else self.core.messages(agent=agent)
+                history = [(str((message.get("metadata") or {}).get("native_timestamp") or message.get("timestamp") or ""), 0, message) for message in transcript_messages
                            if message.get("role") in ("user", "assistant")]
                 history += [(str(event.get("timestamp") or ""), 1, event) for event in reversed(self.core.events(agent=agent, limit=400))
-                            if event.get("type") in shown]
+                            if agent != "dot" and event.get("type") in shown]
                 # Stable sort: equal timestamps keep messages before events, as before.
-                for _, is_event, row in sorted(history, key=lambda entry: entry[:2]):
+                for _, is_event, row in (history if agent == "dot" else sorted(history, key=lambda entry: entry[:2])):
                     if is_event:
                         pending_id = row.get("request_id") or (row.get("payload") or {}).get("request_id")
                         panel.add_event(row, historical=pending_id not in view.get("pending", {}))
                     else:
                         panel.add_message(row)
-                panel.cwd_label.setText(("中繼資料：" if agent == "dot" else "工作目錄：") + (project.get("name", "尚未選擇") if agent == "dot" else project.get(f"{agent}_cwd") or project.get("repo_path") or project.get("repo") or "尚未選擇"))
+                panel.cwd_label.setText(("中繼資料：" if agent == "dot" else "工作目錄：") + (agent_project.get("name", "尚未選擇") if agent == "dot" else agent_project.get(f"{agent}_cwd") or agent_project.get("repo_path") or "尚未選擇"))
                 panel.cwd_label.setToolTip(panel.cwd_label.text())
-                panel.branch_label.setText("分支：" + (task.get("branch") or project.get("active_branch") or "—"))
+                panel.branch_label.setText("分支：" + (agent_task.get("branch") or agent_project.get("active_branch") or "—"))
                 self.refresh_agent(agent)
                 panel.restore_view_state(view)
+                self._loaded_agent_keys[agent] = agent_key
             self._loaded_context_key = key
             if hasattr(self, "navigator") and self.navigator.sessions[self.navigator.agent] is not None:
                 self.navigator.fill()
@@ -2665,7 +2830,15 @@ class MainWindow(QMainWindow):
             panel.update_capabilities(cap)
             diag = self.core.diagnostics(agent)
             panel.set_state(diag.get("state", "Disconnected"))
-            panel.refresh_sessions(self.core.sessions(agent), diag.get("session") or (self.core.current_task or {}).get(f"{agent}_session"))
+            panel.refresh_projects()
+            project = self.core.agent_project(agent) or {}
+            task = self.core.agent_task(agent) or {}
+            sessions = self.core.sessions(agent)
+            if agent != "dot" and agent in self.core._agent_selections:
+                directory = project.get(agent + '_cwd') or project.get('repo_path')
+                sessions = [row for row in sessions if row.get('project_id') == project.get('id')
+                            or (directory and row.get('cwd') and Path(row['cwd']).resolve() == Path(directory).resolve())]
+            panel.refresh_sessions(sessions, task.get(f"{agent}_session"))
             if diag.get("last_error"):
                 panel.notice.setText(diag["last_error"])
                 panel.notice.setToolTip(diag["last_error"])
@@ -2692,11 +2865,13 @@ class MainWindow(QMainWindow):
         if self._git_clock >= 100 and not self._git_busy and self.core.current_project and not self._close_pending:
             self._git_clock = 0
             self._git_busy = True
+            git_project_id = self.core.current_project_id
             def loaded_git(snapshot):
                 self._git_busy = False
                 for agent in ("claude", "codex", "local"):
-                    self.panels[agent].branch_label.setText(self.branch_text(snapshot))
-            self.run(self.core.git_snapshot, loaded_git, on_error=lambda _: setattr(self, "_git_busy", False))
+                    if (self.core.agent_project(agent) or {}).get('id') == git_project_id:
+                        self.panels[agent].branch_label.setText(self.branch_text(snapshot))
+            self.run(lambda: self.core.git_snapshot(git_project_id), loaded_git, on_error=lambda _: setattr(self, "_git_busy", False))
         try:
             events = self.core.drain_events()
         except Exception as exc:
@@ -2706,6 +2881,7 @@ class MainWindow(QMainWindow):
             return
         latest_delta = {event.get("message_id"): index for index, event in enumerate(events) if event.get("type") == "message_delta"}
         current_task_id = identifier(self.core.current_task or {})
+        dot_changed=False
         for index, event in enumerate(events):
             agent, kind = event.get("agent"), event.get("type")
             panel = self.panels.get(agent)
@@ -2716,7 +2892,13 @@ class MainWindow(QMainWindow):
                 self.refresh_agent(agent)
             if panel and kind in ("approval_response", "approval_cancelled"):
                 self.resolve_cached_approval(event)
-            if event.get("task_id") and event.get("task_id") != current_task_id:
+            displayed_task_id = identifier(self.core.agent_task(agent) or {}) if panel else current_task_id
+            if agent=='dot' and kind in ('message_snapshot','prompt_sent','history_page'):
+                target=getattr(self.core.adapters.get('dot'),'target','')
+                if target and (event.get('session_id')==target or kind=='history_page'):
+                    dot_changed=True
+                continue
+            if event.get("task_id") and event.get("task_id") != displayed_task_id:
                 continue
             if kind == "message_delta" and latest_delta.get(event.get("message_id")) != index:
                 continue
@@ -2733,6 +2915,10 @@ class MainWindow(QMainWindow):
                 panel.add_event(event)
             if self.mode.currentData() == "Timeline":
                 self.add_timeline_event(event)
+        if dot_changed:
+            panel=self.panels['dot'];view=panel.capture_view_state();panel.clear_conversation()
+            for message in self.core.dot_conversation_messages(limit=panel.dot_visible_limit): panel.add_message(message)
+            panel.restore_view_state(view);self.refresh_agent('dot')
         if self.details_toggle.isChecked():
             self.refresh_work_details()
         error_panel=next((panel for panel in self.panels.values() if panel.connection_state=='Error'),None)
@@ -2753,23 +2939,72 @@ class MainWindow(QMainWindow):
 
     def _opening_done(self, *_):
         self._opening = False
+        self._opening_agent = None
         if not (self.orchestrator and self.orchestrator.active):
             for control in (self.project_combo, self.task_combo, self.navigator):
                 control.setEnabled(True)
+        for panel in self.panels.values(): panel.update_controls()
 
-    def _opening_begin(self):
+    def _opening_begin(self, agent):
         # One open at a time: a second one landing mid-resume would attach the conversation to the wrong task.
-        if getattr(self, "_opening", False) or not self.confirm_context_change():
+        if getattr(self, "_opening", False) or not self.confirm_agent_context_change(agent):
             return False
         self._opening = True
+        self._opening_agent = agent
+        self.panels[agent].update_controls()
         for control in (self.project_combo, self.task_combo, self.navigator):
             control.setEnabled(False)
         return True
 
-    def open_desktop_session(self, record, resume=True):
-        if not self._opening_begin():
+    def sync_local_conversations(self):
+        """Show what Claude Desktop or Codex appended to an open conversation, without reopening it."""
+        from .desktop_sessions import history_stamp
+        if getattr(self, "_opening", False) or self._close_pending:
             return
+        for agent in ("claude", "codex"):
+            panel = self.panels[agent]
+            task = self.core.agent_task(agent) or {}
+            session_id = str(task.get(agent + "_session") or "").lower()
+            if not session_id or agent in self._syncing:
+                continue
+            key = (agent, session_id)
+            if panel.connection_state in ("Busy", "Connecting"):
+                # This role is producing the new content itself; it is already on screen through the live stream.
+                self._sync_floor[key] = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + ".999Z"
+                continue
+            stamp = history_stamp(agent, session_id)
+            if stamp is None or stamp == self._sync_stamp.get(key):
+                continue
+            first = key not in self._sync_stamp
+            self._sync_stamp[key] = stamp
+            if first and key not in self._sync_floor:
+                # Whatever is already stored was imported when the conversation was opened.
+                stored = [str(row.get("timestamp") or "") for row in self.core.messages(task["id"], agent)]
+                stored += [str(row.get("timestamp") or "") for row in self.core.events(task["id"], agent, limit=1)]
+                self._sync_floor[key] = max(stored, default="")
+                continue
+            self._syncing.add(agent)
+            def done(result, agent=agent, key=key, panel=panel):
+                self._syncing.discard(agent)
+                self._sync_floor[key] = max(self._sync_floor.get(key, ""), result["latest"])
+                current = self.core.agent_task(agent) or {}
+                if result["task_id"] != current.get("id") or not result["items"]:
+                    return
+                for kind, row in result["items"]:
+                    if kind == "message":
+                        panel.add_message(row)
+                    else:
+                        panel.add_event(row, historical=True)
+                if hasattr(self, "navigator") and self.navigator.sessions.get(agent) is not None:
+                    self.footer.setText(f"{ROLE_NAMES[agent]} 對話已同步 · 新增 {len(result['items'])} 筆")
+            floor = self._sync_floor.get(key, "")
+            self.run(lambda agent=agent, floor=floor: self.core.sync_local_history(agent, floor), done,
+                     on_error=lambda _, agent=agent: self._syncing.discard(agent))
+
+    def open_desktop_session(self, record, resume=True):
         agent = record.get("agent", "claude")
+        if not self._opening_begin(agent):
+            return
         def opened(result):
             self.reload_context()
             self.focus_role(agent)
@@ -2785,10 +3020,10 @@ class MainWindow(QMainWindow):
                     return self.core.resume_session(agent, result["session_id"])
                 self.run(continue_session, lambda _: (self._opening_done(), self.reload_context(), self.refresh_agent(agent)),
                          agent, on_error=self._opening_done)
-        self.run(lambda: self.core.open_desktop_session(record), opened, on_error=self._opening_done)
+        self.run(lambda: self.core.open_desktop_session(record, independent=True), opened, agent, on_error=self._opening_done)
 
     def new_desktop_conversation(self, directory, agent="claude"):
-        if not self._opening_begin():
+        if not self._opening_begin(agent):
             return
         title = "新對話 " + datetime.now().strftime("%m-%d %H:%M")
         def opened(_):
@@ -2800,7 +3035,7 @@ class MainWindow(QMainWindow):
                 return self.core.create_session(agent)
             self.run(start, lambda _: (self._opening_done(), self.reload_context(), self.refresh_agent(agent)),
                      agent, on_error=self._opening_done)
-        self.run(lambda: self.core.open_desktop_project(directory, title), opened, on_error=self._opening_done)
+        self.run(lambda: self.core.open_desktop_project(directory, title, agent=agent), opened, agent, on_error=self._opening_done)
 
     def focus_role(self, agent):
         self._preferred_agent = agent
@@ -2869,20 +3104,24 @@ class MainWindow(QMainWindow):
         """Start one bounded run. `consented` is the user's run-scoped G8毛 authorisation from the dialog."""
         if not consented:
             return
+        if self.orchestrator and self.orchestrator.active:
+            self.show_error('已有自動協作正在進行');return
+        self.panels['dot'].stop_dot_follow()
         dot = self.core.adapters["dot"]
+        run=None
         def dispatch(operation, done, failed):
             self.run(operation, done, on_error=failed)
         try:
             run = Orchestrator(self.core, task, dispatch, max_rounds=rounds, local_role=local_role,
-                               has_pending_approval=lambda: any(panel.pending_approval_events for panel in self.panels.values()))
+                               has_pending_approval=lambda: any(self.panels[agent].pending_approval_events for agent in run.agents))
             if getattr(dot, "state", "") == "Connected" and hasattr(dot, "grant_run"):
-                dot.grant_run(400)
+                dot.grant_run(400,owner=run.run_id)
             self.orchestrator = run
             run.start()
         except Exception as exc:
             self.orchestrator = None
-            if hasattr(dot, "revoke_run"):
-                dot.revoke_run()
+            if run is not None and hasattr(dot, "revoke_run"):
+                dot.revoke_run(owner=run.run_id)
             self.show_error(str(exc))
             return
         self.set_auto_collab_lock(True)
@@ -2909,7 +3148,7 @@ class MainWindow(QMainWindow):
             self.run_timer.stop()
             dot = self.core.adapters.get("dot")
             if hasattr(dot, "revoke_run"):
-                dot.revoke_run()
+                dot.revoke_run(owner=run.run_id)
             self.set_auto_collab_lock(False)
             self.reload_context()
 
@@ -2987,10 +3226,21 @@ class MainWindow(QMainWindow):
             self.run(create, lambda _: self.reload_context())
 
     def confirm_context_change(self):
-        if any(panel.connection_state == "Busy" for panel in self.panels.values()):
+        if any(panel.connection_state in ("Busy", "Connecting") for panel in self.panels.values()) or any(self._agent_operations.values()):
             self.show_error("Wait for or stop active turns before changing project or task.")
             return False
         # Navigation saves drafts locally in memory. It never sends or discards them.
+        self.save_context_state()
+        return True
+
+    def confirm_agent_context_change(self, agent):
+        if self.orchestrator and self.orchestrator.active:
+            self.show_error("請先停止自動協作，再切換角色的專案或任務。")
+            return False
+        panel = self.panels[agent]
+        if panel.connection_state in ('Busy', 'Connecting') or self._agent_operations.get(agent) or getattr(self, '_opening_agent', None) == agent:
+            self.show_error("請等待或停止此角色的作業，再切換它的專案或任務。")
+            return False
         self.save_context_state()
         return True
 
@@ -3092,10 +3342,11 @@ class MainWindow(QMainWindow):
     def populate_flow_menu(self, menu):
         menu.clear()
         for number, source, target in ((1, "claude", "dot"), (2, "dot", "codex")):
-            messages = [message for message in self.core.messages(agent=source)
+            source_task=self.core.agent_task(source) or {}
+            messages = [message for message in (self.core.messages(task_id=source_task["id"],agent=source) if source_task else [])
                         if message.get("role") == "assistant" and message.get("status", "complete") == "complete"]
             state = self.panels[target].connection_state
-            blocked = target == "dot" and not self.panels[target].capabilities.get("supports_sessions")
+            blocked = target == "dot" and (not self.panels[target].capabilities.get("supports_sessions") or (self.core.agent_task("dot") or {}).get("dot_session") != getattr(self.core.adapters.get("dot"),"target",None))
             reason = " · 受阻" if blocked else " · 請先連線目標角色" if state != "Connected" else " · 尚無來源回覆" if not messages else ""
             action = menu.addAction(f"第 {number} 步：最新 {ROLE_NAMES[source]} 回覆 → {ROLE_NAMES[target]}{reason}")
             action.setEnabled(bool(messages) and state == "Connected" and not blocked)
@@ -3129,9 +3380,11 @@ class MainWindow(QMainWindow):
 
     def auto_approve(self, agent, event, request_id):
         """Answer a request without asking when the user's chosen mode or an "always allow" rule covers it."""
+        if self.orchestrator and self.orchestrator.active:
+            return False  # A collaboration run never inherits automatic tool approval.
         if self.mode.currentData() == "Monitor" or not self.core.capabilities(agent).get("supports_approval"):
             return False
-        cwd = getattr(self.core.adapters.get(agent), "cwd", "") or (self.core.current_project or {}).get("repo_path", "")
+        cwd = getattr(self.core.adapters.get(agent), "cwd", "") or (self.core.agent_project(agent) or {}).get("repo_path", "")
         if not approvals.decide(self.approval_mode(agent), event.get("details"), cwd, self.panels[agent].approval_rules):
             return False
         self.run(lambda: self.core.approve(agent, request_id, True), agent=agent)
@@ -3204,8 +3457,8 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self.show_error(str(exc))
 
-    def open_project(self):
-        project = self.core.current_project or {}
+    def open_project(self, agent=None):
+        project = (self.core.agent_project(agent) if agent in AGENTS else self.core.current_project) or {}
         path = project.get("repo_path") or project.get("repo")
         if path:
             if not QDesktopServices.openUrl(QUrl.fromLocalFile(path)):
@@ -3428,7 +3681,7 @@ class MainWindow(QMainWindow):
                         item.setData(0, Qt.UserRole, name)
                         files.addTopLevelItem(item)
             for panel in self.panels.values():
-                if panel.agent != "dot":
+                if panel.agent != "dot" and (self.core.agent_project(panel.agent) or {}).get('id') == snapshot.get('project_id', self.core.current_project_id):
                     panel.branch_label.setText(self.branch_text(snapshot))
         self.run(lambda: self.core.git_snapshot(), loaded)
         for event in self.core.events(limit=3000):
@@ -3723,4 +3976,3 @@ class MainWindow(QMainWindow):
         self.timer.stop()
         self._closed = True
         event.accept()
-

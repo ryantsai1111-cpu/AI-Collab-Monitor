@@ -268,7 +268,7 @@ class CoreTests(unittest.TestCase):
         self.core.connect('claude')
         self.assertEqual(27,self.adapters['claude'].settings['timeout'])
 
-    def test_default_project_only_applies_when_no_global_selection(self):
+    def test_default_project_only_applies_when_agent_has_no_selection(self):
         alternate=self.core.create_project('Saved default',self.repo)
         self.core.set_setting('agent.claude',{'default_project':alternate['id']})
         self.core.connect('claude')
@@ -276,7 +276,8 @@ class CoreTests(unittest.TestCase):
         self.core.current_project_id=None
         self.core.current_task_id=None
         self.core.connect('claude')
-        self.assertEqual(alternate['id'],self.core.current_project_id)
+        self.assertIsNone(self.core.current_project_id)
+        self.assertEqual(alternate['id'],self.core.agent_project('claude')['id'])
         self.assertEqual(alternate['id'],self.adapters['claude'].metadata['project_id'])
 
     def test_all_known_secret_split_indices_stay_out_of_database_and_raw(self):

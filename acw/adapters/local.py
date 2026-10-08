@@ -45,22 +45,87 @@ class _LocalSettings:
         self.capabilities.efforts = []
         self.capabilities.supports_effort = False
 
+    def _redact_local_text(self, value, *, include_partial=False):
+        """Replace credential spans without modifying text needed for matching.
+
+        Overlapping credentials and matches are merged first, so replacing a
+        shorter match cannot expose the remainder of a longer one. A streaming
+        accumulator also hides a possible credential prefix at its tail.
+        """
+        spans = []
+        for credential in self._credential_values:
+            if not isinstance(credential, str) or not credential:
+                continue
+            offset = 0
+            while True:
+                match_start = value.find(credential, offset)
+                if match_start < 0:
+                    break
+                start, end = match_start, match_start + len(credential)
+                # A configured key may itself be the prefix of a recognizable
+                # credential. Removing only that prefix would defeat Core's
+                # generic filter and leave its suffix exposed. Mask the whole
+                # enclosing token, while preserving separated ordinary prose.
+                if not value[start].isspace():
+                    while start and not value[start - 1].isspace():
+                        start -= 1
+                if not value[end - 1].isspace():
+                    while end < len(value) and not value[end].isspace():
+                        end += 1
+                spans.append((start, end))
+                offset = match_start + 1  # Include overlapping occurrences.
+            if include_partial:
+                for length in range(min(len(value), len(credential) - 1), 0, -1):
+                    if value.endswith(credential[:length]):
+                        spans.append((len(value) - length, len(value)))
+                        break
+        if not spans:
+            return value
+        merged = []
+        for start, end in sorted(spans):
+            if merged and start <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
+        parts, offset = [], 0
+        for start, end in merged:
+            parts.extend((value[offset:start], '[REDACTED]'))
+            offset = end
+        parts.append(value[offset:])
+        return ''.join(parts)
+
     def _redact_local(self, value):
         if isinstance(value, str):
-            for credential in self._credential_values:
-                value = value.replace(credential, '[REDACTED]')
-            return value
+            return self._redact_local_text(value)
         if isinstance(value, dict):
             return {self._redact_local(k): self._redact_local(v) for k, v in value.items()}
         if isinstance(value, (list, tuple)):
             return [self._redact_local(item) for item in value]
         return value
 
+    def redact_visible_text(self, value):
+        """Core's pure in-memory whole-accumulator redaction hook.
+
+        API keys need not follow a recognizable generic credential format.
+        Raw fragments must be accumulated before this hook runs. Prefix tails
+        remain conservatively masked even when a message ends ambiguously.
+        """
+        return self._redact_local_text(value, include_partial=True)
+
+    def _local_event_payload(self, kind, payload):
+        clean = self._redact_local(payload)
+        if kind == 'message_delta' and isinstance(payload.get('content'), str):
+            # Only Core's RAM accumulator receives original visible fragments.
+            # It calls redact_visible_text before UI or persistence; all other
+            # fields and raw/end callbacks retain local credential redaction.
+            clean['content'] = payload['content']
+        return clean
+
     def _emit(self, kind, **payload):
-        return super()._emit(kind, **self._redact_local(payload))
+        return super()._emit(kind, **self._local_event_payload(kind, payload))
 
     def _event(self, kind, **payload):
-        return super()._event(kind, **self._redact_local(payload))
+        return super()._event(kind, **self._local_event_payload(kind, payload))
 
     def _error(self, error):
         return super()._error(self._redact_local(str(error)))
@@ -126,6 +191,12 @@ class _LocalSettings:
         result = self._redact_local(super().diagnostics())
         result.update(harness=self.local_harness, models_source='Local model setting')
         return result
+
+    def get_history(self, *args, **kwargs):
+        return self._redact_local(super().get_history(*args, **kwargs))
+
+    def get_native_history(self, *args, **kwargs):
+        return self._redact_local(super().get_native_history(*args, **kwargs))
 
 
 class LocalCodexAdapter(_LocalSettings, CodexAdapter):

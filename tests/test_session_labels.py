@@ -44,7 +44,10 @@ class HumanSessionLabels(unittest.TestCase):
 
     def wait(self):
         until=time.monotonic()+5
-        while self.window.workers and time.monotonic()<until:QTest.qWait(20)
+        while self.window.workers and time.monotonic()<until:
+            QTest.qWait(20)
+            # Explicitly release the GIL so Python-backed Qt workers can progress.
+            time.sleep(.001)
         self.assertFalse(self.window.workers);self.window.poll_events();QTest.qWait(20)
 
     def tearDown(self):
@@ -163,5 +166,45 @@ class HumanSessionLabels(unittest.TestCase):
         self.assertEqual(dialog.preview['source_session'],'opaque-claude-0')
         self.assertEqual(dialog.preview['source_message'],message['content'])
         self.assertEqual(dialog.preview['status'],'prepared');dialog.close()
+
+class WorkerWaitHelperTests(unittest.TestCase):
+    """Check the real helpers without starting windows or changing their budgets."""
+    def helpers(self):
+        import test_dot_ui
+        import test_session_labels
+        return ((test_dot_ui, test_dot_ui.DotOfflineUITests, 10),
+                (test_session_labels, HumanSessionLabels, 5))
+
+    def test_worker_polling_yields_and_drains_completion(self):
+        from types import SimpleNamespace
+        for module, case_type, budget in self.helpers():
+            with self.subTest(helper=case_type.__name__):
+                case=case_type('runTest'); workers={object()}; events=[]
+                case.window=SimpleNamespace(workers=workers, poll_events=lambda:events.append('poll'))
+                def qwait(milliseconds):
+                    self.assertEqual(milliseconds,20)
+                    events.append('qt')
+                    if 'yield' in events:workers.clear()
+                def sleep(seconds):
+                    self.assertEqual(seconds,.001);events.append('yield')
+                with patch.object(module.time,'monotonic',side_effect=[100,100,100]), \
+                        patch.object(module.time,'sleep',side_effect=sleep), \
+                        patch.object(module.QTest,'qWait',side_effect=qwait):
+                    case.wait()
+                self.assertEqual(events,['qt','yield','qt','yield','poll','qt'])
+                self.assertFalse(workers)
+
+    def test_worker_timeout_still_fails_at_original_deadline(self):
+        from types import SimpleNamespace
+        for module, case_type, budget in self.helpers():
+            with self.subTest(helper=case_type.__name__):
+                case=case_type('runTest'); workers={object()}; polled=[]
+                case.window=SimpleNamespace(workers=workers, poll_events=lambda:polled.append(True))
+                with patch.object(module.time,'monotonic',side_effect=[100,100+budget]), \
+                        patch.object(module.time,'sleep') as sleep, \
+                        patch.object(module.QTest,'qWait') as qwait:
+                    with self.assertRaises(AssertionError):case.wait()
+                self.assertTrue(workers);self.assertEqual(polled,[])
+                sleep.assert_not_called();qwait.assert_not_called()
 
 if __name__=='__main__':unittest.main()

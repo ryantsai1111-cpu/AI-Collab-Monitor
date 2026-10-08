@@ -7,6 +7,7 @@ or live-backend certification.
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -21,6 +22,14 @@ from acw.store import now
 
 
 class OfflineContractsTests(unittest.TestCase):
+    def fixture_symlink(self,link,target,*,target_is_directory=False):
+        try:
+            link.symlink_to(target,target_is_directory=target_is_directory)
+        except OSError as exc:
+            if sys.platform=='win32' and getattr(exc,'winerror',None)==1314:
+                self.skipTest('Windows fixture cannot create symlinks (WinError 1314); no privilege or security settings changed')
+            raise
+
     def setUp(self):
         self.guards = []
         for target in ("socket.create_connection", "socket.socket.connect", "urllib.request.urlopen", "subprocess.Popen"):
@@ -177,7 +186,7 @@ class OfflineContractsTests(unittest.TestCase):
         outside = self.root / "outside.txt"
         outside.write_text("outside fixture", encoding="utf-8")
         link = self.root / "one/repo/linked-report.txt"
-        link.symlink_to(outside)
+        self.fixture_symlink(link,outside)
         with self.assertRaises(PermissionError):
             self.core.safe_artifact_path(link)
 
@@ -225,14 +234,27 @@ class OfflineContractsTests(unittest.TestCase):
                 with self.assertRaises(PermissionError):
                     self.core.export_task(self.task_a["id"], "json", target)
                 self.assertFalse(target.exists())
-        link = self.root / "linked-output"
-        (self.root / "real-output").mkdir()
-        link.symlink_to(self.root / "real-output", target_is_directory=True)
-        with self.assertRaises(PermissionError):
-            self.core.export_task(self.task_a["id"], "json", link / "task.json")
         with self.assertRaises(ValueError):
             self.core.export_task(self.task_a["id"], "json", self.root / "task.txt")
         self.assertFalse((self.root / "task.txt").exists())
+
+    def test_exports_reject_symlink_destination(self):
+        link=self.root/'linked-output'
+        target=self.root/'real-output';target.mkdir()
+        self.fixture_symlink(link,target,target_is_directory=True)
+        with self.assertRaises(PermissionError):
+            self.core.export_task(self.task_a['id'],'json',link/'task.json')
+
+    def test_symlink_fixture_skips_only_windows_missing_privilege(self):
+        error=OSError('Synthetic missing symlink privilege');error.winerror=1314
+        link=self.root/'fixture-link'
+        with patch('sys.platform','win32'),patch.object(Path,'symlink_to',side_effect=error):
+            with self.assertRaises(unittest.SkipTest):self.fixture_symlink(link,self.root)
+        other=OSError('Synthetic unrelated error');other.winerror=5
+        with patch('sys.platform','win32'),patch.object(Path,'symlink_to',side_effect=other):
+            with self.assertRaises(OSError):self.fixture_symlink(link,self.root)
+        with patch('sys.platform','linux'),patch.object(Path,'symlink_to',side_effect=error):
+            with self.assertRaises(OSError):self.fixture_symlink(link,self.root)
 
     def test_task_json_html_and_zip_exports_preserve_text_without_unescaped_markup(self):
         text = "中文完整回覆 <script>literal source</script>"

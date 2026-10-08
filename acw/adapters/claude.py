@@ -59,6 +59,10 @@ class _NodeSessionSDK:
                           limit=limit or 200,offset=offset)
 
 
+class _CancellationOwnershipChanged(RuntimeError):
+    pass
+
+
 class ClaudeAdapter(Adapter):
     agent = 'claude'
 
@@ -66,6 +70,9 @@ class ClaudeAdapter(Adapter):
         super().__init__(emit, executable, **settings)
         self._process = None
         self._write_lock = threading.Lock()
+        self._operation_lock = threading.RLock()
+        self._send_generation = 0
+        self._accepted_operation = None
         self._pending = {}
         self._approvals = {}
         self._tools = {}
@@ -94,7 +101,13 @@ class ClaudeAdapter(Adapter):
         self._mcp_snapshot = None
 
     def _event(self, kind, **data):
-        self.emit(kind, **sanitize(data))
+        clean = sanitize(data)
+        if kind == 'message_delta' and isinstance(data.get('content'), str):
+            # Core accumulates visible text in memory and sanitizes the whole
+            # message before any UI/persistence boundary. Per-chunk filtering
+            # would lose the prefix of credentials split across native deltas.
+            clean['content'] = data['content']
+        self.emit(kind, **clean)
 
     def _error(self, error):
         self.last_error = sanitize(str(error))
@@ -216,20 +229,24 @@ class ClaudeAdapter(Adapter):
                     values.append(value)
         return values
 
-    def _write(self, message):
-        with self._write_lock:
-            if not self._process or self._process.poll() is not None or self._process.stdin.closed:
+    def _write(self, message, *, expected_operation=None, dispatch_guard=None):
+        with self._operation_lock, self._write_lock:
+            if expected_operation is not None and self.active_operation_id() != expected_operation:
+                raise _CancellationOwnershipChanged('Claude operation changed before interrupt dispatch')
+            if self._closed or not self._process or self._process.poll() is not None or self._process.stdin.closed:
                 raise RuntimeError('Claude disconnected')
+            if dispatch_guard: dispatch_guard(final=True)
             self._process.stdin.write(json.dumps(message, ensure_ascii=False) + '\n')
             self._process.stdin.flush()
 
-    def _request(self, request, timeout=30):
+    def _request(self, request, timeout=30, *, expected_operation=None):
         request_id = 'acw_' + uuid.uuid4().hex
         ready = threading.Event()
         pending = {'ready': ready, 'response': None}
         self._pending[request_id] = pending
         try:
-            self._write({'type': 'control_request', 'request_id': request_id, 'request': request})
+            options = {'expected_operation': expected_operation} if expected_operation is not None else {}
+            self._write({'type': 'control_request', 'request_id': request_id, 'request': request}, **options)
             if not ready.wait(timeout):
                 raise TimeoutError('Claude control request timed out: ' + request['subtype'])
             response = pending['response'] or {}
@@ -242,29 +259,39 @@ class ClaudeAdapter(Adapter):
     def _read_stdout(self, process):
         try:
             for line in process.stdout:
+                with self._operation_lock:
+                    if process is not self._process or self._closed:
+                        break
                 try:
                     message = json.loads(line)
                 except (ValueError, TypeError):
                     self._event('error', content='Claude returned invalid JSON: ' + line[:2000])
                     continue
-                self._handle(message)
+                self._handle(message, process=process)
         except Exception as exc:
-            if not self._closed:
-                self._error(exc)
+            with self._operation_lock:
+                if process is self._process and not self._closed:
+                    self._error(exc)
         finally:
-            for pending in list(self._pending.values()):
-                pending['response'] = {'subtype': 'error', 'error': self.last_error or self._last_stderr or 'Claude process disconnected'}
-                pending['ready'].set()
-            self._idle.set()
-            if process is self._process and not self._closed:
-                self.set_state('Disconnected')
-                self._event('event', content='Claude process disconnected; reconnect preserves the recorded session')
+            with self._operation_lock:
+                if process is self._process:
+                    self._accepted_operation = None
+                    for pending in list(self._pending.values()):
+                        pending['response'] = {'subtype': 'error', 'error': self.last_error or self._last_stderr or 'Claude process disconnected'}
+                        pending['ready'].set()
+                    self._idle.set()
+                    if not self._closed:
+                        self.set_state('Disconnected')
+                        self._event('event', content='Claude process disconnected; reconnect preserves the recorded session')
 
     def _read_stderr(self, process):
         for line in process.stderr:
-            if line.strip():
-                self._last_stderr = sanitize(line.rstrip())
-                self._event('event', role='system', content=self._last_stderr, stream='stderr')
+            with self._operation_lock:
+                if process is not self._process or self._closed:
+                    break
+                if line.strip():
+                    self._last_stderr = sanitize(line.rstrip())
+                    self._event('event', role='system', content=self._last_stderr, stream='stderr')
 
     def _remember_session(self, session_id):
         if session_id:
@@ -286,7 +313,17 @@ class ClaudeAdapter(Adapter):
         self._message_open = False
         self._message_text = ''
 
-    def _handle(self, original):
+    def _handle(self, original, *, process=None):
+        with self._operation_lock:
+            if process is not None and (process is not self._process or self._closed):
+                return
+            if (original.get('type') == 'result' and original.get('session_id')
+                    and self.session_id and original['session_id'] != self.session_id):
+                self._event('event', content='Ignored result from another Claude session', status='ignored')
+                return
+            return self._handle_current(original)
+
+    def _handle_current(self, original):
         # Apply the persistence boundary before exposing raw events. In particular,
         # thinking and signature blocks are never forwarded to logs or the UI.
         message = self._safe_raw(original)
@@ -338,7 +375,7 @@ class ClaudeAdapter(Adapter):
                 self._event('event', content=message.get('subtype', 'system'), details=message)
         elif kind == 'stream_event':
             # The raw-log sanitizer intentionally omits incomplete stream fragments.
-            # Decode native fields in RAM, then sanitize emitted visible text separately.
+            # Decode only visible text in RAM for Core's whole-message filter.
             event = original.get('event', {})
             event_type = event.get('type')
             if event_type == 'message_start':
@@ -352,7 +389,7 @@ class ClaudeAdapter(Adapter):
                     text = delta.get('text', '')
                     self._message_text += text
                     self._turn_text += text
-                    self._event('message_delta', content=text, delta=text, role='assistant',
+                    self._event('message_delta', content=text, role='assistant',
                                 message_id=self._message_id)
             elif event_type == 'message_stop':
                 self._finish_message()
@@ -378,18 +415,21 @@ class ClaudeAdapter(Adapter):
                     if block.get('type') == 'tool_result':
                         self._tool_result(block, message.get('tool_use_result'))
         elif kind == 'result':
-            self._finish_message()
-            self._resume = bool(self.session_id)
-            status = 'interrupted' if self._stopping else ('error' if message.get('is_error') else 'completed')
-            self._event('event', content='Claude turn ' + status, status=status,
-                        duration_ms=message.get('duration_ms'), details=message)
-            expected_interrupt = self._stopping and message.get('terminal_reason') == 'aborted_streaming'
-            self._stopping = False
-            if message.get('is_error') and not expected_interrupt:
-                self._error(message.get('result') or message.get('errors') or message.get('subtype'))
-            else:
-                self.set_state('Connected')
-            self._idle.set()
+            with self._operation_lock:
+                self._accepted_operation = None
+                self._finish_message()
+                self._resume = bool(self.session_id)
+                status = 'interrupted' if self._stopping else ('error' if message.get('is_error') else 'completed')
+                self._event('event', content='Claude turn ' + status, status=status,
+                            duration_ms=message.get('duration_ms'), details=message)
+                expected_interrupt = self._stopping and message.get('terminal_reason') == 'aborted_streaming'
+                self._stopping = False
+                if message.get('is_error') and not expected_interrupt:
+                    self._error(message.get('result') or message.get('errors') or message.get('subtype'))
+                else:
+                    self.set_state('Connected')
+                self._idle.set()
+
 
     def _tool_start(self, block):
         tool_id = block.get('id', '')
@@ -477,7 +517,7 @@ class ClaudeAdapter(Adapter):
                 blocks.append({'type': 'text', 'text': label + '\n' + clean})
         return blocks
 
-    def send_message(self, content, model=None, effort=None, attachments=None):
+    def send_message(self, content, model=None, effort=None, attachments=None, dispatch_guard=None):
         if self.state != 'Connected':
             raise RuntimeError('Claude must be connected and idle before sending')
         outbound_content = self._prepare_content(content, attachments)
@@ -492,22 +532,57 @@ class ClaudeAdapter(Adapter):
         elif model != self._model:
             self._request({'subtype': 'set_model', 'model': model})
             self._model = model
-        self._turn_text = ''
-        self._message_text = ''
-        self._completed_ids.clear()
-        self._stopping = False
-        self._idle.clear()
-        self.set_state('Busy')
+        with self._operation_lock:
+            if self.state != 'Connected':
+                raise RuntimeError('Claude operation changed during send preparation')
+            if dispatch_guard: dispatch_guard()
+            self._send_generation += 1
+            token = (self._send_generation, id(self._process), self.session_id)
+            self._accepted_operation = token
+            self._turn_text = ''
+            self._message_text = ''
+            self._completed_ids.clear()
+            self._stopping = False
+            self._idle.clear()
+            self.set_state('Busy')
+            try:
+                options = {'dispatch_guard': dispatch_guard} if dispatch_guard is not None else {}
+                self._write({'type': 'user', 'message': {'role': 'user', 'content': outbound_content},
+                             'parent_tool_use_id': None, 'session_id': self.session_id}, **options)
+                self._history.setdefault(self.session_id, []).append({'role': 'user', 'content': sanitize(content)})
+            except Exception as exc:
+                if self._accepted_operation == token:
+                    self._accepted_operation = None
+                self._idle.set()
+                self._error(exc)
+                raise
+
+    def active_operation_id(self):
+        """RAM-only local send generation/process/session guard, not native authentication."""
+        with self._operation_lock:
+            token = self._accepted_operation
+            if (self._closed or self.state != 'Busy' or token is None or
+                    token != (self._send_generation, id(self._process), self.session_id)):
+                return None
+            return token
+
+    def stop_if_owned(self, expected):
+        with self._operation_lock:
+            if expected is None or self.active_operation_id() != expected:
+                return False
+            self._stopping = True
         try:
-            self._write({'type': 'user', 'message': {'role': 'user', 'content': outbound_content},
-                         'parent_tool_use_id': None, 'session_id': self.session_id})
-            self._history.setdefault(self.session_id, []).append({'role': 'user', 'content': sanitize(content)})
-        except Exception as exc:
-            self._idle.set()
-            self._error(exc)
-            raise
+            self._request({'subtype': 'interrupt'}, expected_operation=expected)
+        except _CancellationOwnershipChanged:
+            return False
+        with self._operation_lock:
+            if self.active_operation_id() != expected:
+                return False
+            self._event('event', content='Claude interrupt acknowledged; waiting for turn result', status='stopping')
+        return True
 
     def stop(self):
+        # Explicit manual Stop keeps its existing current-operation behavior.
         if self.state != 'Busy':
             return False
         self._stopping = True

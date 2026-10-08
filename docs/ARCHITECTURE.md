@@ -17,6 +17,8 @@ The UI never builds a shell command to invoke an agent. Core calls adapters, ada
 
 ## Data and recovery
 
+Each agent can select its own project/task and map its own native session. Role selections are persisted in existing settings rows, without a schema change. Shared workspace navigation provides the initial default; explicit role selections remain independent. See [Independent agent projects and sessions](AGENT-CONTEXTS.md) for UI behavior, routing, collaboration checks and provider limits.
+
 SQLite tables: projects, tasks, sessions, messages, events, handoffs, artifacts, settings. A task maps its three native backend session IDs. Session names are Workspace-local labels where backend rename is unsupported. Backend-native session imports must be explicitly requested; existing work sessions are not silently resumed.
 
 Raw JSONL preserves safe backend fields. Hidden reasoning, credentials and potentially fragmented sensitive payloads are omitted/redacted; records identify this exception to byte-for-byte fidelity. Message source and handoff payload are separate immutable facts; annotations do not overwrite source content.

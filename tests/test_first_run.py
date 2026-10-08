@@ -62,9 +62,10 @@ class FirstRunGuidanceTests(unittest.TestCase):
         self.adapters["codex"].state = "Connected"
         self.window.refresh_agent("codex")
         panel.input.setPlainText("keep me")
-        with patch.object(self.window, "require_task") as guide:
+        with patch.object(self.window, "show_sessions") as guide:
             panel.send()
-        guide.assert_called_once()
+        guide.assert_called_once_with("codex")
+        self.assertTrue(any("選擇或建立任務" in str(error) for error in self.window.reported_errors))
         self.assertEqual("keep me", panel.input.toPlainText())
         self.assertNotIn("send", [call[0] for call in self.adapters["codex"].calls])
 
