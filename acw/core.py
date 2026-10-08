@@ -1,12 +1,14 @@
 """UI-independent workspace orchestration. No adapter is connected on startup."""
 from __future__ import annotations
 import html
+import hashlib
 import json
 import queue
 import shutil
 import threading
 import zipfile
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
+from functools import wraps
 from pathlib import Path
 from .security import sanitize, safe_file, is_secret_path, is_hidden_reasoning, safe_export_path, verify_screenshot, reject_link_ancestors
 from .store import Store, now, uid
@@ -16,6 +18,20 @@ TASK_STATUSES = ('NEW','PLANNING','REVIEWING','READY','IMPLEMENTING','VERIFYING'
 ARTIFACT_TYPES = {'diff','patch','test','test log','report','screenshot','jsonl','markdown'}
 ARTIFACT_SUFFIXES={'diff':'.diff','patch':'.patch','test':'.log','test log':'.log','report':'.txt','jsonl':'.jsonl','markdown':'.md'}
 
+def _synchronized(method):
+    @wraps(method)
+    def guarded(self,*args,**kwargs):
+        with self._lock: return method(self,*args,**kwargs)
+    return guarded
+
+
+def _agent_action(method):
+    @wraps(method)
+    def guarded(self,agent,*args,**kwargs):
+        with self._agent_operation(agent): return method(self,agent,*args,**kwargs)
+    return guarded
+
+
 class WorkspaceCore:
     def __init__(self,data_dir,adapters=None):
         self.store=Store(data_dir)
@@ -24,6 +40,9 @@ class WorkspaceCore:
         self._lock=threading.RLock()
         self._queue=queue.Queue()
         self._contexts={}
+        self._operations={}
+        self._active_requests={}
+        self._adapter_epochs={}
         self._operation_context=threading.local()
         self._dot_root_lock=threading.Lock()
         self._streams={}
@@ -62,18 +81,40 @@ class WorkspaceCore:
         return self.get_task(selection['task_id']) if selection.get('task_id') else None
 
     def _assert_agent_idle(self,agent):
-        if getattr(self._adapter(agent),'state','') in ('Busy','Connecting') or agent in self._streams:
+        if agent in self._operations or getattr(self._adapter(agent),'state','') in ('Busy','Connecting') or agent in self._streams:
             raise RuntimeError('Wait for or stop this agent before changing its project or task: '+agent)
 
+    @contextmanager
+    def _idle_agent_operations(self,agents):
+        # Reserve under the Core lock, but never hold it across adapter I/O or
+        # reader joins. Callbacks retain their old context until reassociation.
+        stack=ExitStack()
+        try:
+            with self._lock:
+                if self._closed: raise RuntimeError('Workspace is closed')
+                for agent in agents: self._assert_agent_idle(agent)
+                for agent in agents: stack.enter_context(self._agent_operation(agent))
+            yield
+        finally: stack.close()
+
     def _select_agent_context(self,agent,project,task=None):
-        self._assert_agent_idle(agent)
-        selection={'project_id':project['id'],'task_id':task['id'] if task else None}
-        self._agent_selections[agent]=selection
-        self.set_setting('selection.'+agent,selection)
-        self._contexts.pop(agent,None)
-        self._native_discovery.pop(agent,None)
-        self._apply_project(agent,project)
-        self._record('agent_context_changed',agent,project_id=project['id'],content=task['title'] if task else project['name'])
+        with self._idle_agent_operations([agent]):
+            self._apply_agent_context(agent,project,task)
+
+    def _apply_agent_context(self,agent,project,task=None):
+        adapter=self._adapter(agent)
+        metadata=self._project_metadata(project,agent)
+        metadata.update(task_id=task['id'] if task else None,task_title=task['title'] if task else None)
+        path='' if agent=='dot' else project[f'{agent}_cwd'] or project['repo_path']
+        adapter.set_project(path,metadata)
+        with self._lock:
+            if self.adapters.get(agent) is not adapter: raise RuntimeError('Adapter changed during project selection')
+            selection={'project_id':project['id'],'task_id':task['id'] if task else None}
+            self._agent_selections[agent]=selection
+            self.set_setting('selection.'+agent,selection)
+            self._contexts.pop(agent,None)
+            self._native_discovery.pop(agent,None)
+            self._record('agent_context_changed',agent,project_id=project['id'],content=task['title'] if task else project['name'])
 
     def select_agent_project(self,agent,project_id):
         project=self.get_project(project_id)
@@ -88,12 +129,12 @@ class WorkspaceCore:
         return task
 
     def create_agent_task(self,agent,title):
-        self._assert_agent_idle(agent)
-        project=self.agent_project(agent)
-        if not project: raise ValueError('Select a project for this agent first')
-        task=self.create_task(title,project['id'],select=False)
-        self.select_agent_task(agent,task['id'])
-        return task
+        with self._idle_agent_operations([agent]):
+            project=self.agent_project(agent)
+            if not project: raise ValueError('Select a project for this agent first')
+            task=self.create_task(title,project['id'],select=False)
+            self._apply_agent_context(agent,project,task)
+            return task
 
     def _reset_shared_contexts(self):
         self._contexts={agent:context for agent,context in self._contexts.items() if agent in self._agent_selections}
@@ -103,20 +144,33 @@ class WorkspaceCore:
             self.store.update('messages',{'id':message['id']},{'status':'interrupted'})
             self._record('recovery',message['agent'],task_id=message['task_id'],session_id=message['session_id'],
                          content='Previous stream interrupted; history restored. Prompt was not resent.')
+        for message in self.store.query("SELECT id FROM messages WHERE role='user' AND status IN ('pending','sending')"):
+            self.store.update('messages',{'id':message['id']},{'status':'delivery_unknown'})
         for handoff in self.store.query("SELECT id FROM handoffs WHERE status='sending'"):
             self.store.update('handoffs',{'id':handoff['id']},{'status':'delivery_unknown'})
 
+    @_synchronized
     def set_adapter(self,agent,adapter):
         self._check_agent(agent)
+        stream=self._streams.pop(agent,None)
+        if stream:
+            # Keep only previously redacted complete lines; discard the old
+            # raw tail instead of applying a new adapter's credential policy.
+            self.store.update('messages',{'id':stream['id']},{'status':'interrupted'})
+            self._record('recovery',agent,content='Adapter replaced; previous stream interrupted without replay')
+        self._active_requests.pop(agent,None)
+        self._adapter_epochs[agent]=self._adapter_epochs.get(agent,0)+1
         adapter.emit=self.make_emitter(agent)
         self.adapters[agent]=adapter
         return adapter
 
     def make_emitter(self,agent):
         self._check_agent(agent)
+        epoch=self._adapter_epochs.get(agent,0)
         def emit(kind,**payload):
-            if not self._closed:
-                return self.ingest_event(agent,kind,**payload)
+            with self._lock:
+                if not self._closed and self._adapter_epochs.get(agent,0)==epoch:
+                    return self.ingest_event(agent,kind,**payload)
         return emit
 
     @staticmethod
@@ -129,6 +183,18 @@ class WorkspaceCore:
         return self.adapters[agent]
 
     def connect(self,agent):
+        # Default-project selection uses the normal idle guard before reserving
+        # this connection. Its own lock prevents close/selection mid-setup.
+        with self._lock:
+            if self._closed: raise RuntimeError('Workspace is closed')
+            settings=self.get_setting('agent.'+agent,{})
+            if not settings.get('enabled',True): raise RuntimeError(f'{agent}: disabled in Settings')
+            default_project=settings.get('default_project') if not (agent=='dot' and self._context(agent).get('scope')=='dot_conversation') and not self.agent_project(agent) else None
+        if default_project: self.select_agent_project(agent,default_project)
+        return self._connect_reserved(agent)
+
+    @_agent_action
+    def _connect_reserved(self,agent):
         adapter=self._adapter(agent)
         settings=self.get_setting('agent.'+agent,{})
         if not settings.get('enabled',True): raise RuntimeError(f'{agent}: disabled in Settings')
@@ -144,8 +210,6 @@ class WorkspaceCore:
             if adapter._process:
                 adapter.disconnect()
             adapter=self.set_adapter(agent,replacement)
-        if not self.agent_project(agent) and settings.get('default_project'):
-            self.select_agent_project(agent,settings['default_project'])
         if settings.get('executable') or (agent=='codex' and 'executable' in settings):
             adapter.executable=settings['executable'] or ''
         if settings.get('timeout'): adapter.settings['timeout']=float(settings['timeout'])
@@ -154,6 +218,7 @@ class WorkspaceCore:
         if self.agent_project(agent): self._apply_project(agent,self.agent_project(agent))
         return adapter.connect()
 
+    @_agent_action
     def disconnect(self,agent):
         return self._adapter(agent).disconnect()
 
@@ -177,6 +242,7 @@ class WorkspaceCore:
             return sanitize(result)
         return {'data_dir':str(self.data_dir),'project':self.current_project,'task':self.current_task,
                 'agents':{a:self.diagnostics(a) for a in AGENTS},'automatic_orchestration':'OFF',
+                  'native_message_lookup':'indexed' if self.store.native_lookup_index else 'scoped_scan_fallback',
                   'raw_policy':'Secret redaction and hidden reasoning exclusion override raw fidelity.'}
 
     def attachment_capability(self,agent,model=None):
@@ -201,16 +267,32 @@ class WorkspaceCore:
         return self.get_project(project_id)
 
     def _assert_idle(self):
-        busy=[a for a,v in self.adapters.items() if getattr(v,'state','')=='Busy']
+        busy=[a for a,v in self.adapters.items() if getattr(v,'state','') in ('Busy','Connecting') or a in self._operations or a in self._streams]
         if busy: raise RuntimeError('Stop or wait for active agents before changing task/project: '+', '.join(busy))
 
     def select_project(self,project_id,sync=True,*,drafts=None,confirmed=False):
+        with self._idle_agent_operations(list(self.adapters)):
+            return self._select_reserved_project(project_id,sync,drafts=drafts,confirmed=confirmed)
+
+    def _select_reserved_project(self,project_id,sync=True,*,drafts=None,confirmed=False):
         project=self.get_project(project_id)
         if not project: raise ValueError('Unknown project')
-        if project_id!=self.current_project_id:
-            self._assert_idle()
-            if drafts and any(str(v).strip() for v in drafts.values()) and not confirmed:
-                raise PermissionError('Confirm discarding unsent drafts before changing project')
+        changed=project_id!=self.current_project_id
+        if changed and drafts and any(str(v).strip() for v in drafts.values()) and not confirmed:
+            raise PermissionError('Confirm discarding unsent drafts before changing project')
+        if sync:
+            # Drain old adapter processes before changing shared context, so
+            # shutdown diagnostics cannot be attributed to the new project.
+            for agent,adapter in list(self.adapters.items()):
+                selected=self.agent_project(agent) if agent in self._agent_selections else project
+                if not selected: continue
+                metadata=self._project_metadata(selected,agent)
+                if agent not in self._agent_selections and changed:
+                    metadata.update(task_id=None,task_title=None)
+                path='' if agent=='dot' else selected[f'{agent}_cwd'] or selected['repo_path']
+                adapter.set_project(path,metadata)
+                if self.adapters.get(agent) is not adapter: raise RuntimeError('Adapter changed during project synchronization')
+        if changed:
             self.current_project_id=project_id
             self.set_setting('current_project_id',project_id)
             task=self.current_task
@@ -219,7 +301,7 @@ class WorkspaceCore:
                 self.set_setting('current_task_id',None)
             self._reset_shared_contexts()
             self._record('project_changed',project_id=project_id,content=project['name'])
-        if sync: self.sync_project()
+        if sync: self._record('project_synced',content=project['name'],metadata=self._project_metadata(project))
         return project
 
     def _project_metadata(self,project,agent=None):
@@ -233,6 +315,10 @@ class WorkspaceCore:
         self._adapter(agent).set_project(path,self._project_metadata(project,agent))
 
     def sync_project(self):
+        with self._idle_agent_operations(list(self.adapters)):
+            return self._sync_reserved_project()
+
+    def _sync_reserved_project(self):
         project=self.current_project
         if not project: raise ValueError('Select a project first')
         for agent in self.adapters:
@@ -240,7 +326,9 @@ class WorkspaceCore:
             if selected: self._apply_project(agent,selected)
         self._record('project_synced',content=project['name'],metadata=self._project_metadata(project))
 
+    @_synchronized
     def create_task(self,title,project_id=None,*,select=True,**metadata):
+        if select: self._assert_idle()
         project=self.get_project(project_id or self.current_project_id)
         if not project: raise ValueError('Select a project before creating a task')
         if not str(title).strip(): raise ValueError('Task title is required')
@@ -270,6 +358,7 @@ class WorkspaceCore:
             clauses.append('(t.title LIKE ? OR t.notes LIKE ? OR t.id LIKE ?)'); values.extend(['%'+search+'%']*3)
         return self.store.query('SELECT t.* FROM tasks t'+(' WHERE '+' AND '.join(clauses) if clauses else '')+' ORDER BY t.created_at DESC',values)
 
+    @_synchronized
     def select_task(self,task_id):
         task=self.get_task(task_id)
         if not task: raise ValueError('Unknown task')
@@ -480,28 +569,51 @@ class WorkspaceCore:
         else: self.store.insert('sessions',dict(identity,**fields,created_at=now(),metadata={'source':agent+'-local','imported_native':True}))
         self.store.update('tasks',{'id':task['id']},{agent+'_session':session_id,'updated_at':now()})
         self._contexts.pop(agent,None)
-        known={(m['role'],str(m['content']).strip()) for m in self.messages(task['id'],agent)}
-        imported=tools=0
-        for item in read_history(agent,session_id,history_limit):
+        added=self._import_local_items(agent,session_id,task['id'],read_history(agent,session_id,history_limit))
+        imported,tools=sum(kind=='message' for kind,_ in added),sum(kind=='event' for kind,_ in added)
+        self._record('session_imported',agent,task_id=task['id'],session_id=session_id,
+                     content=f'Local conversation opened; {imported} messages and {tools} tool records imported. Resume is a separate action.')
+        return {'agent':agent,'project_id':project['id'],'task_id':task['id'],'session_id':session_id,'imported':imported,'tools':tools}
+
+    def _import_local_items(self,agent,session_id,task_id,items):
+        """Store visible messages and tool records read from a local conversation file; returns what was new, in order."""
+        known={(m['role'],str(m['content']).strip()) for m in self.messages(task_id,agent)}
+        added=[]
+        for item in items:
             item_id='desktop-'+session_id+'-'+item['id']
             if not item['id']: continue
             if item['kind']=='message':
                 content=sanitize(item['content'])
                 if is_hidden_reasoning(content) or (item['role'],str(content).strip()) in known: continue
                 if self.store.get('messages',{'id':item_id}): continue
-                self.store.insert('messages',dict(id=item_id,task_id=task['id'],agent=agent,session_id=session_id,
+                self.store.insert('messages',dict(id=item_id,task_id=task_id,agent=agent,session_id=session_id,
                     role=item['role'],content=content,timestamp=item['timestamp'] or now(),status='complete',
                     metadata={'source':agent+'-local','imported':True}))
-                imported+=1
+                known.add((item['role'],str(content).strip()))
+                added.append(('message',item_id))
             elif not self.store.get('events',{'id':item_id}):
                 payload=sanitize({'tool':item['tool'],'summary':item['summary'],'input':item['input'],'output':item['output'],'imported':True})
                 if item['type']=='command': payload['command']=payload['summary']
-                self.store.insert('events',dict(id=item_id,task_id=task['id'],agent=agent,session_id=session_id,type=item['type'],
+                self.store.insert('events',dict(id=item_id,task_id=task_id,agent=agent,session_id=session_id,type=item['type'],
                     status='imported',timestamp=item['timestamp'] or now(),summary=str(payload['summary'])[:600],raw_ref='',payload=payload))
-                tools+=1
-        self._record('session_imported',agent,task_id=task['id'],session_id=session_id,
-                     content=f'Local conversation opened; {imported} messages and {tools} tool records imported. Resume is a separate action.')
-        return {'agent':agent,'project_id':project['id'],'task_id':task['id'],'session_id':session_id,'imported':imported,'tools':tools}
+                added.append(('event',item_id))
+        return added
+
+    def sync_local_history(self,agent,after=''):
+        """Bring in what another app has appended to this role's mapped local conversation since `after`.
+
+        Read-only towards that app, and never contacts the agent."""
+        from .desktop_sessions import read_history, _valid_id
+        empty={'task_id':None,'session_id':'','items':[],'latest':after}
+        if agent not in ('claude','codex'): return empty
+        task=self.agent_task(agent)
+        session_id=str((task or {}).get(agent+'_session') or '').lower()
+        if not task or not _valid_id(session_id): return empty
+        items=[item for item in read_history(agent,session_id) if str(item['timestamp'])>after]
+        added=self._import_local_items(agent,session_id,task['id'],items)
+        rows=[(kind,self.store.get('messages' if kind=='message' else 'events',{'id':item_id})) for kind,item_id in added]
+        latest=max([after]+[str(item['timestamp']) for item in items])
+        return {'task_id':task['id'],'session_id':session_id,'items':rows,'latest':latest}
 
     def _context(self,agent):
         override=getattr(self._operation_context,'dot',None) if agent=='dot' else None
@@ -528,6 +640,7 @@ class WorkspaceCore:
         else: self.store.insert('sessions',dict(identity,**fields,title=session_id,created_at=now()))
         if task: self.store.update('tasks',{'id':task['id']},{agent+'_session':session_id,'updated_at':now()})
 
+    @_agent_action
     def create_session(self,agent):
         self._require_task(agent)
         adapter=self._adapter(agent)
@@ -541,6 +654,7 @@ class WorkspaceCore:
         if isinstance(sid,str) and sid: self._map_session(agent,sid)
         return result
 
+    @_agent_action
     def resume_session(self,agent,session_id):
         self._require_task(agent)
         adapter=self._adapter(agent)
@@ -570,6 +684,7 @@ class WorkspaceCore:
     def _require_task(self,agent=None):
         if not (self.agent_task(agent) if agent else self.current_task): raise ValueError('Select or create a task first')
 
+    @_agent_action
     def send_message(self,agent,content,model=None,effort=None,attachments=None):
         self._require_task(agent)
         adapter=self._adapter(agent)
@@ -591,14 +706,46 @@ class WorkspaceCore:
         if active and not mapped: raise RuntimeError('Create or explicitly resume a session for this task before sending')
         self._contexts[agent]={'task_id':task['id'],'project_id':task['project_id'],'session_id':mapped}
         self._apply_project(agent,self.agent_project(agent))
+        capture=getattr(self._operation_context,'send_capture',None)
+        dispatch_guard=(capture or {}).get('dispatch_guard')
+        if dispatch_guard: dispatch_guard()
         message_id=uid('msg-')
         self._contexts[agent]['outbound_message_id']=message_id
+        capture=getattr(self._operation_context,'send_capture',None)
+        extra={}
+        if capture is not None and capture['agent']==agent:
+            capture['local_message_id']=message_id
+            extra={'orchestration':dict(capture['metadata'])}
+        active_request={'message_id':message_id,'owner':(capture or {}).get('run_id'),'adapter':adapter,'session_id':mapped,'native_turn_id':''}
+        self._active_requests[agent]=active_request
         self.store.insert('messages',dict(id=message_id,task_id=task['id'],agent=agent,session_id=mapped,role='user',
-                                         content=content,timestamp=now(),metadata={'attachments':attachments or []}))
+                                         content=content,timestamp=now(),status='sending',metadata=dict(extra,attachments=attachments or [])))
         self._record('prompt_sent',agent,message_id=message_id,content=content,model=model,effort=effort)
-        try: return adapter.send_message(content,model=model,effort=effort,attachments=attachments)
+        dispatch_state={'started':False}
+        try:
+            probe=getattr(self._operation_context,'dispatch_probe',None)
+            options={'model':model,'effort':effort,'attachments':attachments}
+            if dispatch_guard:
+                def native_dispatch_guard(*,final=False):
+                    dispatch_guard()
+                    if final:
+                        dispatch_state['started']=True
+                        if probe is not None: probe['dispatched']=True
+                native_dispatch_guard()
+                options['dispatch_guard']=native_dispatch_guard
+            else:
+                dispatch_state['started']=True
+                if probe is not None: probe['dispatched']=True
+            result=adapter.send_message(content,**options)
+            self.store.update('messages',{'id':message_id},{'status':'complete'})
+            identity=getattr(adapter,'active_operation_id',None)
+            cancel_token=identity() if callable(identity) else None
+            with self._lock:
+                if self._active_requests.get(agent) is active_request:
+                    active_request['cancel_token']=cancel_token
+            return result
         except Exception as exc:
-            self.store.update('messages',{'id':message_id},{'status':'failed'})
+            self.store.update('messages',{'id':message_id},{'status':'delivery_unknown' if dispatch_state['started'] else 'failed'})
             self._record('error',agent,content=str(exc))
             raise
 
@@ -649,27 +796,37 @@ class WorkspaceCore:
         event_type=kind
         self._check_agent(agent)
         with self._lock:
+            if self._closed: return None
             if is_hidden_reasoning({'type':event_type}): return self._record('redaction',agent,content='Hidden reasoning event excluded')
             if event_type=='session' and self._context(agent).get('scope')!='dot_conversation':
                 self._map_session(agent,str(payload.get('session_id') or payload.get('id') or ''))
             if event_type=='send_ack' and agent=='dot':
                 message_id=self._context(agent).get('outbound_message_id')
                 if message_id:
-                    self.store.update('messages',{'id':message_id},{'metadata':{'native_id':payload.get('native_id',''),'native_room_id':getattr(self.adapters.get(agent),'native_room_id',''),'source':'manual send receipt'}})
+                    row=self.store.get('messages',{'id':message_id}) or {}
+                    metadata=dict(row.get('metadata') or {},native_id=payload.get('native_id',''),native_room_id=getattr(self.adapters.get(agent),'native_room_id',''),source='manual send receipt')
+                    self.store.update('messages',{'id':message_id},{'metadata':metadata,'status':'complete'})
             if event_type=='message_snapshot':
-                conversation=self._context(agent) if agent=='dot' and self._context(agent).get('scope')=='dot_conversation' else None
+                conversation=None
+                if agent=='dot':
+                    target=getattr(self.adapters.get(agent),'target','')
+                    if not target: raise ValueError('A selected Dot identity is required before importing snapshots')
+                    conversation={'task_id':None,'session_id':target,'scope':'dot_conversation'}
                 context=conversation or self._context(agent)
                 if not context.get('task_id') and conversation is None: raise ValueError('Select a task before reading Dot history')
                 native_id=str(payload.get('native_id',''))
                 if not native_id: raise ValueError('Native message identity is required')
-                rows=self.get_history(agent,context.get('session_id')) if conversation is not None else self.messages(task_id=context['task_id'],agent=agent)
-                existing=next((x for x in rows
-                    if x.get('task_id')==context.get('task_id') and x.get('session_id')==context.get('session_id') and (x.get('metadata') or {}).get('native_id')==native_id),None)
+                room=getattr(self.adapters.get(agent),'native_room_id','')
+                existing=self.store.find_native_message(agent,context.get('session_id',''),context.get('task_id'),room,native_id)
+                incoming=sanitize(payload.get('content',''))
+                prior_meta=(existing or {}).get('metadata') or {}
+                if existing and existing.get('content')==incoming and existing.get('role')==payload.get('role','event') and existing.get('status')=='complete' and prior_meta.get('native_timestamp','')==payload.get('native_timestamp',''):
+                    return dict(type=event_type,agent=agent,message_id=existing['id'],task_id=context.get('task_id'),session_id=context.get('session_id',''),unchanged=True)
                 message_id=existing['id'] if existing else uid('msg-')
                 payload['message_id']=message_id
                 event=self._record(event_type,agent,**dict(payload,task_id=context.get('task_id'),session_id=context.get('session_id','')))
                 values=dict(content=sanitize(payload.get('content','')),role=payload.get('role','event'),status='complete',
-                    raw_ref=event['raw_ref'],metadata={'native_id':native_id,'native_room_id':getattr(self.adapters.get(agent),'native_room_id',''),'native_timestamp':payload.get('native_timestamp',''),'source':'manual snapshot; not streaming'})
+                    raw_ref=event['raw_ref'],metadata=dict(prior_meta,native_id=native_id,native_room_id=room,native_timestamp=payload.get('native_timestamp',''),content_kind=payload.get('content_kind','text'),source='manual snapshot; not streaming'))
                 if existing: self.store.update('messages',{'id':message_id},values)
                 else: self.store.insert('messages',dict(id=message_id,task_id=context['task_id'],agent=agent,
                     session_id=context.get('session_id',''),timestamp=now(),**values))
@@ -685,7 +842,8 @@ class WorkspaceCore:
                 content=str(payload.get('content',payload.get('delta','')) or '')
                 if event_type=='message_delta': stream['text']+=content
                 elif content: stream['text']=content
-                clean_content=sanitize(stream['text'])
+                redact=getattr(self.adapters.get(agent),'redact_visible_text',lambda text:text)
+                clean_content=sanitize(redact(stream['text']))
                 payload['full_content']=clean_content
                 payload['message_id']=stream['id']
                 payload['content']=clean_content
@@ -694,7 +852,7 @@ class WorkspaceCore:
                 event=self._record(event_type,agent,**payload)
                 # Preserve complete lines while holding the unfinished line in memory:
                 # a credential can cross arbitrary chunk boundaries, including its identifying prefix.
-                persistent_content=clean_content if event_type=='message_end' else sanitize(stream['text'][:stream['text'].rfind('\n')+1])
+                persistent_content=clean_content if event_type=='message_end' else sanitize(redact(stream['text'][:stream['text'].rfind('\n')+1]))
                 self.store.update('messages',{'id':stream['id']},{'content':persistent_content,'status':status,'raw_ref':event['raw_ref'],
                                                                'session_id':self._context(agent).get('session_id','')})
                 if event_type=='message_end': self._streams.pop(agent,None)
@@ -778,13 +936,31 @@ class WorkspaceCore:
         return result[-max(1,int(limit)):] if limit is not None else result
 
     @contextmanager
+    def _agent_operation(self,agent):
+        owner=threading.get_ident()
+        with self._lock:
+            if self._closed: raise RuntimeError('Workspace is closed')
+            current=self._operations.get(agent)
+            if current and current[0]!=owner: raise RuntimeError('Another operation is active for '+agent)
+            self._operations[agent]=(owner,(current[1] if current else 0)+1)
+        try: yield
+        finally:
+            with self._lock:
+                current=self._operations.get(agent)
+                if current and current[0]==owner:
+                    if current[1]>1: self._operations[agent]=(owner,current[1]-1)
+                    else: self._operations.pop(agent,None)
+
+    @contextmanager
     def _dot_root_operation(self):
+        adapter=self._adapter('dot')
         if not self._dot_root_lock.acquire(blocking=False):
             raise RuntimeError('Another dot conversation operation is active')
         old=getattr(self._operation_context,'dot',None)
-        adapter=self._adapter('dot')
-        self._operation_context.dot={'task_id':None,'project_id':None,'session_id':adapter.target,'scope':'dot_conversation'}
-        try: yield self._operation_context.dot
+        try:
+            with self._agent_operation('dot'):
+                self._operation_context.dot={'task_id':None,'project_id':None,'session_id':adapter.target,'scope':'dot_conversation'}
+                yield self._operation_context.dot
         finally:
             self._operation_context.dot=old
             self._dot_root_lock.release()
@@ -814,14 +990,103 @@ class WorkspaceCore:
         with self._dot_root_operation() as context:
             message_id=uid('msg-')
             context['outbound_message_id']=message_id
+            self._active_requests['dot']={'message_id':message_id,'owner':None,'adapter':adapter,'session_id':adapter.target,'native_turn_id':''}
             self.store.insert('messages',dict(id=message_id,task_id=None,agent='dot',session_id=adapter.target,
-                role='user',content=sanitize(content),timestamp=now(),metadata={'source':'ongoing dot conversation','native_room_id':getattr(adapter,'native_room_id','')}))
+                role='user',content=sanitize(content),timestamp=now(),status='sending',metadata={'source':'ongoing dot conversation','native_room_id':getattr(adapter,'native_room_id','')}))
             self._record('prompt_sent','dot',message_id=message_id,content=content)
-            try: return adapter.send_message(content)
+            try:
+                result=adapter.send_message(content)
+                self.store.update('messages',{'id':message_id},{'status':'complete'})
+                return result
             except Exception as exc:
-                self.store.update('messages',{'id':message_id},{'status':'failed'})
+                self.store.update('messages',{'id':message_id},{'status':'delivery_unknown'})
                 self._record('error','dot',content=str(exc))
                 raise
+
+    def _validate_run_contract(self,contract,*,receipt=False):
+        agent=contract.get('agent')
+        self._check_agent(agent)
+        task=self.agent_task(agent) or {};project=self.agent_project(agent) or {};adapter=self._adapter(agent)
+        if self.current_task_id!=contract.get('task_id') or task.get('id')!=contract.get('task_id') or project.get('id')!=contract.get('project_id'):
+            raise RuntimeError('Orchestration task/project binding changed')
+        if task.get(agent+'_session','')!=contract.get('session_id') or getattr(adapter,'session_id','')!=contract.get('session_id'):
+            raise RuntimeError('Orchestration session binding changed')
+        if agent=='dot' and (not contract.get('dot_id') or not contract.get('room_id') or adapter.target!=contract['dot_id'] or getattr(adapter,'native_room_id','')!=contract['room_id']):
+            raise RuntimeError('Orchestration Dot identity/room binding changed')
+        if receipt:
+            active=self._active_requests.get(agent) or {}
+            if active.get('owner')!=contract.get('run_id') or active.get('message_id')!=contract.get('local_request_id') or active.get('adapter') is not adapter:
+                raise RuntimeError('Orchestration request ownership changed')
+        return adapter
+
+    def send_orchestration_message(self,agent,text,contract):
+        if contract.get('agent')!=agent or text!=contract.get('prompt'):
+            raise ValueError('Orchestration request does not match its contract')
+        if not contract.get('run_id') or not contract.get('correlation_id'): raise ValueError('Missing correlation identity')
+        with self._agent_operation(agent):
+            adapter=self._validate_run_contract(contract)
+            previous=getattr(self._operation_context,'send_capture',None)
+            def dispatch_guard():
+                run_guard=contract.get('_dispatch_guard')
+                if callable(run_guard): run_guard()
+                if self._validate_run_contract(contract) is not adapter:
+                    raise RuntimeError('Orchestration adapter changed before dispatch')
+            capture={'agent':agent,'run_id':contract['run_id'],'dispatch_guard':dispatch_guard,'metadata':{key:contract.get(key) for key in ('run_id','step_sequence','correlation_id','step','task_id','project_id')}}
+            self._operation_context.send_capture=capture
+            try:
+                if agent=='dot':
+                    with adapter.operation_scope(owner=contract['run_id']): result=self.send_message(agent,text)
+                else: result=self.send_message(agent,text)
+                local=capture['local_message_id']
+                stored=self.store.get('messages',{'id':local}) or {}
+                native=(stored.get('metadata') or {}).get('native_id','') if agent=='dot' else ''
+                return {'local_message_id':local,'native_message_id':native,'result':result}
+            finally: self._operation_context.send_capture=previous
+
+    def read_dot_snapshot_for_run(self,contract):
+        if contract.get('agent')!='dot': raise ValueError('Dot snapshot contract required')
+        with self._agent_operation('dot'):
+            adapter=self._validate_run_contract(contract,receipt=True)
+            with self._dot_root_operation(),adapter.operation_scope(owner=contract['run_id']):
+                adapter.refresh_messages(False)
+                return [dict(row) for row in adapter.get_snapshot()]
+
+    def accept_orchestration_reply(self,contract,snapshot):
+        if contract.get('agent')!='dot' or snapshot.get('role')!='assistant': raise ValueError('Only a verified Dot assistant reply can be accepted here')
+        with self._lock:
+            self._validate_run_contract(contract,receipt=True)
+            if snapshot.get('native_room_id')!=contract['room_id']: raise ValueError('Reply room mismatch')
+            source=self.store.find_native_message('dot',contract['dot_id'],None,contract['room_id'],snapshot.get('native_id'))
+            if not source or source.get('role')!='assistant' or source.get('content')!=snapshot.get('content'):
+                raise ValueError('Verified root snapshot changed or is unavailable')
+            digest=hashlib.sha256(source['content'].encode()).hexdigest()
+            material=json.dumps([contract['run_id'],contract['correlation_id'],contract['dot_id'],contract['room_id'],snapshot['native_id']],ensure_ascii=False)
+            identity='orch-'+hashlib.sha256(material.encode()).hexdigest()
+            existing=self.store.get('messages',{'id':identity})
+            if existing:
+                if existing['content']!=source['content']: raise ValueError('Accepted handoff evidence is immutable')
+                return existing
+            metadata={'source_root_message_id':source['id'],'native_id':snapshot['native_id'],'native_room_id':contract['room_id'],
+                      'run_id':contract['run_id'],'correlation_id':contract['correlation_id'],'step_sequence':contract.get('step_sequence'),
+                      'native_request_id':contract.get('native_request_id'),'local_request_id':contract.get('local_request_id'),
+                      'content_sha256':digest,'source':'validated application envelope; not native completion'}
+            self.store.insert('messages',dict(id=identity,task_id=contract['task_id'],agent='dot',session_id=contract['dot_id'],
+                role='assistant',content=source['content'],timestamp=now(),status='complete',raw_ref=source.get('raw_ref',''),metadata=metadata))
+            return self.store.get('messages',{'id':identity})
+
+    def stop_orchestration_message(self,agent,contract):
+        with self._agent_operation(agent):
+            adapter=self.adapters.get(agent);active=self._active_requests.get(agent) or {}
+            if active.get('adapter') is not adapter or active.get('owner')!=contract.get('run_id') or active.get('message_id')!=contract.get('local_request_id'):
+                return False
+            if getattr(adapter,'state','')!='Busy' or getattr(adapter,'session_id','')!=contract.get('session_id'): return False
+            token=active.get('cancel_token')
+            guarded_stop=getattr(adapter,'stop_if_owned',None)
+            if token is None or not callable(guarded_stop): return False
+            result=guarded_stop(token)
+            if result:
+                self._record('stop',agent,content='Cancellation requested for the owned backend operation')
+            return bool(result)
 
     def get_history(self,agent,session_id=None):
         if session_id: return self.store.query('SELECT * FROM messages WHERE agent=? AND session_id=? ORDER BY timestamp,rowid',(agent,session_id))
@@ -851,6 +1116,8 @@ class WorkspaceCore:
         if source['status']!='complete': raise ValueError('Wait for a complete response before handoff')
         task=self.get_task(source['task_id']) if source.get('task_id') else None
         if not task: raise ValueError('This dot conversation message is not associated with a Workspace task; select task-specific evidence for handoff')
+        if not isinstance(source.get('content'),str) or not source['content'].strip():
+            raise ValueError('Source response has no text content to hand off')
         project=self.get_project(task['project_id'])
         timestamp=now()
         metadata={'source_agent':source['agent'],'target_agent':target_agent,'task_id':task['id'],'project_id':project['id'],
@@ -870,25 +1137,38 @@ class WorkspaceCore:
         return sanitize(preview)
 
     def send_handoff(self,preview):
+        identity=preview if isinstance(preview,str) else preview['id']
+        initial=self.store.get('handoffs',{'id':identity})
+        if not initial: raise ValueError('Handoff preview does not exist')
+        with self._agent_operation(initial['target_agent']):
+            return self._send_handoff(preview)
+
+    def _send_handoff(self,preview):
         handoff_id=preview if isinstance(preview,str) else preview['id']
-        record=self.store.get('handoffs',{'id':handoff_id})
-        if not record: raise ValueError('Handoff preview does not exist')
-        if record['status']!='prepared': raise ValueError('This handoff has already been attempted; prepare a new preview to retry')
-        target=self.agent_task(record['target_agent']) or {}
-        expected=(record.get('metadata') or {}).get('target_task_id',record['task_id'])
-        if target.get('id')!=expected: raise ValueError('Target agent task changed; prepare the handoff again')
-        metadata=record.get('metadata') or {}
-        if 'target_session' in metadata and target.get(record['target_agent']+'_session','')!=metadata['target_session']:
-            raise ValueError('Target agent session changed; prepare the handoff again')
-        self.store.update('handoffs',{'id':handoff_id},{'status':'sending'})
+        with self._lock:
+            record=self.store.get('handoffs',{'id':handoff_id})
+            if not record: raise ValueError('Handoff preview does not exist')
+            if record['status']!='prepared': raise ValueError('This handoff has already been attempted; prepare a new preview to retry')
+            target=self.agent_task(record['target_agent']) or {}
+            expected=(record.get('metadata') or {}).get('target_task_id',record['task_id'])
+            if target.get('id')!=expected: raise ValueError('Target agent task changed; prepare the handoff again')
+            metadata=record.get('metadata') or {}
+            if 'target_session' in metadata and target.get(record['target_agent']+'_session','')!=metadata['target_session']:
+                raise ValueError('Target agent session changed; prepare the handoff again')
+            self.store.update('handoffs',{'id':handoff_id},{'status':'sending'})
+        previous_probe=getattr(self._operation_context,'dispatch_probe',None)
+        probe={'dispatched':False};self._operation_context.dispatch_probe=probe
         try: result=self.send_message(record['target_agent'],record['handoff_message'])
         except Exception:
-            self.store.update('handoffs',{'id':handoff_id},{'status':'failed'})
+            self.store.update('handoffs',{'id':handoff_id},{'status':'delivery_unknown' if probe['dispatched'] else 'failed'})
             raise
+        finally:
+            self._operation_context.dispatch_probe=previous_probe
         self.store.update('handoffs',{'id':handoff_id},{'status':'sent'})
         self._record('handoff',record['target_agent'],handoff_id=handoff_id,source_agent=record['source_agent'],content=record['handoff_message'])
         return result
 
+    @_synchronized
     def update_handoff_annotation(self,handoff_id,annotation):
         record=self.store.get('handoffs',{'id':handoff_id})
         if not record or record['status']!='prepared': raise ValueError('Only a prepared handoff can be annotated')
@@ -1156,6 +1436,10 @@ class WorkspaceCore:
         return target
 
     def close(self):
-        self._closed=True
-        self.store.close()
+        with self._lock:
+            if self._closed: return
+            if self._operations: raise RuntimeError('Wait for in-flight workspace operations before closing')
+            self._closed=True
+            self.store.close()
+            self._streams.clear()
 

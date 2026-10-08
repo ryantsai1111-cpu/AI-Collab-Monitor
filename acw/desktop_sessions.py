@@ -306,3 +306,26 @@ def read_transcript(session_id, limit=200, roots=None):
     """Visible Claude user/assistant messages only."""
     return [{key: value for key, value in item.items() if key != 'kind'}
             for item in read_history('claude', session_id, limit, roots=roots) if item['kind'] == 'message']
+
+
+_HISTORY_FILES = {}
+
+
+def history_stamp(agent, session_id):
+    """(modified, size) of a conversation's local file, or None. Cheap enough to poll."""
+    if agent not in ('claude', 'codex') or not _valid_id(session_id):
+        return None
+    key = (agent, session_id.lower())
+    path = _HISTORY_FILES.get(key)
+    if path is None or not path.is_file():
+        pattern = '*/' + key[1] + '.jsonl' if agent == 'claude' else 'sessions/*/*/*/rollout-*' + key[1] + '.jsonl'
+        path = next((match for root in (transcript_roots() if agent == 'claude' else codex_roots())
+                     for match in Path(root).glob(pattern)), None)
+        if path is None:
+            return None
+        _HISTORY_FILES[key] = path
+    try:
+        status = path.stat()
+    except OSError:
+        return None
+    return status.st_mtime_ns, status.st_size

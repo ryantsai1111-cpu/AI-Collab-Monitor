@@ -80,7 +80,11 @@ class DotOfflineTests(unittest.TestCase):
     def test_manual_snapshot_deduplicates_send_and_repeat_read(self):
         self.connected();self.adapter.authorize_manual_action('send');self.core.send_message('dot','A')
         for _ in range(2):self.adapter.authorize_manual_action('messages');self.adapter.refresh_messages()
-        messages=self.core.messages(agent='dot');self.assertEqual(len(messages),2)
+        # Native snapshots belong to the root chat, never implicitly to this task.
+        task_messages=self.core.messages(agent='dot')
+        self.assertEqual([x['role'] for x in task_messages],['user'])
+        messages=self.core.store.query("SELECT * FROM messages WHERE agent='dot' AND task_id IS NULL ORDER BY rowid")
+        self.assertEqual(len(messages),2)
         self.assertEqual([x['role'] for x in messages],['user','assistant'])
         self.assertNotIn('FAKE_CANARY',json.dumps(messages));self.assertNotIn('message_delta',[x['type'] for x in self.core.events()])
     def test_manual_older_page_and_read_never_poll(self):

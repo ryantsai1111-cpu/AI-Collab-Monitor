@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import os
+import re
+from contextlib import contextmanager
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import tempfile
@@ -20,37 +22,81 @@ HAPPY = {"claude": ["VERDICT: PLAN_READY\n計畫內容 P", "VERDICT: APPROVED\n�
          "codex": ["VERDICT: IMPLEMENTED\n回報 R"]}
 
 
+def correlated_reply(reply, prompt):
+    """Echo the actual dispatched challenge; fixture scripts cannot guess run tokens."""
+    token = re.findall(r'ACW_REPLY: ([0-9a-f]{32}:[1-9][0-9]*:[0-9a-f]{32})', prompt)[-1]
+    lines = str(reply).splitlines(keepends=True)
+    header_index = next((i for i, line in enumerate(lines) if line.strip()), None)
+    if header_index is None:
+        return f'ACW_REPLY: {token}\nACW_END: {token}'
+    header = ''.join(lines[:header_index + 1]).rstrip('\r\n')
+    body = ''.join(lines[header_index + 1:])
+    return f'{header}\nACW_REPLY: {token}\n{body}\nACW_END: {token}'
+
+
 class Scripted(OfflineAdapter):
-    """Replies come from a script. G8毛 only shows its reply on the first read after a send."""
+    """In-memory native Dot pages and completed non-Dot replies, no network."""
     def __init__(self, agent, replies):
         super().__init__(agent)
         self.replies, self.sent, self.core, self.pending, self.fail = list(replies), [], None, False, None
+        self.native_room_id = 'fixture-room' if agent == 'dot' else ''
+        self.native_rows = []
+        self.grants = []
+
+    def grant_run(self, budget, *, owner):
+        self.grants.append(('grant', budget, owner))
+
+    def revoke_run(self, *, owner):
+        self.grants.append(('revoke', owner))
 
     def _reply(self):
         if not self.replies:
             return
+        content = correlated_reply(self.replies.pop(0), self.sent[-1])
+        if self.agent == 'dot':
+            self.native_rows.append(dict(native_id=uid('native-'), role='assistant', content=content,
+                                         native_timestamp=now(), native_room_id=self.native_room_id))
+            return
         task = self.core.current_task
-        self.core.store.insert("messages", dict(id=uid("msg-"), task_id=task["id"], agent=self.agent,
-            session_id=task.get(self.agent + "_session") or "", role="assistant", content=self.replies.pop(0),
-            timestamp=now(), status="complete", metadata={}))
+        self.core.store.insert('messages', dict(id=uid('msg-'), task_id=task['id'], agent=self.agent,
+            session_id=task.get(self.agent + '_session') or '', role='assistant', content=content,
+            timestamp=now(), status='complete', metadata={}))
 
-    def send_message(self, content, model=None, effort=None, attachments=None):
+    def send_message(self, content, model=None, effort=None, attachments=None, **kwargs):
         if self.fail:
             raise RuntimeError(self.fail)
         self.sent.append(content)
-        self.calls.append(("send", content))
-        if self.agent == "dot":
+        self.calls.append(('send', content))
+        if self.agent == 'dot':
+            native_id = uid('request-')
+            self.native_rows.append(dict(native_id=native_id, role='user', content=content,
+                                         native_timestamp=now(), native_room_id=self.native_room_id))
             self.pending = True
-        else:
-            self._reply()
-        return {"accepted": True}
+            self.emit('send_ack', native_id=native_id)
+            return {'id': native_id}
+        self._reply()
+        return {'accepted': True}
 
-    def refresh_messages(self, older=False):
-        self.calls.append(("read", older))
+    def refresh_messages(self, older=False, **kwargs):
+        self.calls.append(('read', older))
         if self.pending:
             self.pending = False
             self._reply()
-        return []
+        for row in self.native_rows:
+            self.emit('message_snapshot', native_id=row['native_id'], role=row['role'], content=row['content'],
+                      native_timestamp=row['native_timestamp'])
+        return len(self.native_rows)
+
+    @contextmanager
+    def operation_scope(self, *, owner):
+        self.operation_owner = owner
+        try:
+            yield
+        finally:
+            self.operation_owner = None
+
+    def get_snapshot(self):
+        return [dict(row) for row in self.native_rows]
 
 
 class OrchestratorTests(unittest.TestCase):
@@ -138,8 +184,9 @@ class OrchestratorTests(unittest.TestCase):
                           "dot": ["VERDICT: PASS\nG"] * 12, "codex": ["VERDICT: IMPLEMENTED\nR"] * 5}, max_rounds=2)
         run.start()
         self.advance(200)
-        self.assertEqual("done", run.state)
+        self.assertEqual("paused", run.state)
         self.assertIn("回合上限 2", run.reason)
+        self.assertIn("尚未取得最終 APPROVED", run.reason)
         self.assertEqual(2, len(self.adapters["codex"].sent))
         self.assertIn("再改", self.adapters["dot"].sent[2])
         before = self.sends()
@@ -151,7 +198,7 @@ class OrchestratorTests(unittest.TestCase):
         run.start()
         self.advance()
         self.assertEqual("paused", run.state)
-        self.assertIn("沒有可用的判定", run.reason)
+        self.assertIn("invalid verdict", run.reason)
         self.assertEqual(1, len(self.adapters["dot"].sent))
 
     def test_blocked_implementation_pauses(self):
@@ -187,7 +234,8 @@ class OrchestratorTests(unittest.TestCase):
         run = self.build({"dot": []}, timeouts={"dot": 60})
         run.start()
         self.advance(30)
-        self.assertEqual(("paused", "G8毛 逾時未回覆"), (run.state, run.reason))
+        self.assertEqual("paused", run.state)
+        self.assertIn("G8毛 逾時未回覆", run.reason)
         self.assertLessEqual(sum(call[0] == "read" for call in self.adapters["dot"].calls), 8)
         run = self.build()
         self.adapters["codex"].fail = "backend exploded"
@@ -198,15 +246,9 @@ class OrchestratorTests(unittest.TestCase):
 
     def test_old_g8_messages_with_a_verdict_are_not_mistaken_for_the_answer(self):
         run = self.build({"dot": ["VERDICT: REVISE\n真正的回覆"], "claude": ["VERDICT: PLAN_READY\nP", "VERDICT: PLAN_READY\nP2"]})
-        dot = self.adapters["dot"]
-        original = dot.refresh_messages
-        def first_read_loads_history(older=False):
-            if not dot.sent and not getattr(dot, "history_loaded", False):
-                dot.history_loaded = True
-                dot.replies.insert(0, "VERDICT: PASS\n上一次執行留下的舊訊息")
-                dot.pending = True
-            return original(older)
-        dot.refresh_messages = first_read_loads_history
+        dot = self.adapters['dot']
+        dot.native_rows.append(dict(native_id='old-verdict', role='assistant',
+            content='VERDICT: PASS\n上一次執行留下的舊訊息', native_timestamp='old', native_room_id=dot.native_room_id))
         run.start()
         self.advance()
         self.assertEqual([], self.adapters["codex"].sent, "The stale PASS must not route work to Codex")
@@ -327,6 +369,29 @@ class DotRunGrantTests(unittest.TestCase):
             dot.send_message("wrong target")
         self.assertEqual([], self.runs)
 
+    def test_owned_grant_is_not_ambient_and_cannot_be_revoked_by_another_owner(self):
+        dot = self.adapter()
+        owner, other = 'a' * 32, 'b' * 32
+        dot.grant_run(4, owner=owner)
+        with self.assertRaises(PermissionError):
+            dot.send_message('ambient root cannot borrow a run grant')
+        dot.state = 'Connected'
+        with self.assertRaises(PermissionError):
+            with dot.operation_scope(owner=other):
+                dot.send_message('another run cannot borrow it either')
+        dot.state = 'Connected'
+        dot.revoke_run(owner=other)
+        dot.revoke_run()
+        with dot.operation_scope(owner=owner):
+            dot.send_message('owned send')
+            dot.refresh_messages(False)
+        self.assertEqual(['send', 'messages'], self.runs)
+        dot.revoke_run(owner=owner)
+        with self.assertRaises(PermissionError):
+            with dot.operation_scope(owner=owner):
+                dot.send_message('revoked')
+
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -352,8 +417,8 @@ class WindowRunTests(unittest.TestCase):
         self.core.create_task("auto task")
         self.grants = []
         dot = self.adapters["dot"]
-        dot.grant_run = lambda budget: self.grants.append(("grant", budget))
-        dot.revoke_run = lambda: self.grants.append(("revoke",))
+        dot.grant_run = lambda budget, *, owner: self.grants.append(("grant", budget, owner))
+        dot.revoke_run = lambda *, owner: self.grants.append(("revoke", owner))
         for agent in ("claude", "dot", "codex"):
             self.adapters[agent].core = self.core
             self.adapters[agent].state = "Connected"
@@ -375,7 +440,7 @@ class WindowRunTests(unittest.TestCase):
     def test_run_locks_context_grants_g8_for_the_run_only_and_reports_the_result(self):
         self.window.run_auto_collab("把按鈕改成藍色", 3)
         self.window.run_timer.stop()
-        self.assertEqual(("grant", 400), self.grants[0])
+        self.assertEqual(("grant", 400, self.window.orchestrator.run_id), self.grants[0])
         self.assertFalse(self.window.task_combo.isEnabled())
         self.assertFalse(self.window.run_bar.isHidden())
         run = self.window.orchestrator
@@ -389,7 +454,7 @@ class WindowRunTests(unittest.TestCase):
         self.window.tick_auto_collab()
         self.assertEqual("done", run.state)
         self.assertIn("自動協作完成", self.window.run_status.text())
-        self.assertEqual(("revoke",), self.grants[-1])
+        self.assertEqual("revoke", self.grants[-1][0])
         self.assertTrue(self.window.task_combo.isEnabled())
         self.assertEqual([], self.window.reported_errors)
 
@@ -398,7 +463,7 @@ class WindowRunTests(unittest.TestCase):
         self.window.run_auto_collab("任務", 3)
         self.assertIsNone(self.window.orchestrator)
         self.assertIn("Codex", self.window.reported_errors[-1])
-        self.assertEqual(("revoke",), self.grants[-1])
+        self.assertEqual("revoke", self.grants[-1][0])
         self.assertTrue(self.window.task_combo.isEnabled())
         self.window.reported_errors.clear()
 
@@ -410,4 +475,4 @@ class WindowRunTests(unittest.TestCase):
         self.window.stop_auto_collab()
         self.assertEqual("stopped", self.window.orchestrator.state)
         self.assertTrue(self.window.task_combo.isEnabled())
-        self.assertEqual(("revoke",), self.grants[-1])
+        self.assertEqual("revoke", self.grants[-1][0])

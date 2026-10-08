@@ -137,7 +137,9 @@ class ClaudeContractTests(unittest.TestCase):
         self.assertTrue(any(k=='event' and d.get('status')=='interrupted' for k,d in self.events))
 
     def test_nonfatal_stderr_does_not_overwrite_inference_status(self):
-        self.adapter._read_stderr(SimpleNamespace(stderr=io.StringIO('SessionEnd hook cancelled\n')))
+        process=SimpleNamespace(stderr=io.StringIO('SessionEnd hook cancelled\n'))
+        self.adapter._process=process
+        self.adapter._read_stderr(process)
         self.assertEqual(self.adapter.last_error,'')
         self.assertEqual(self.adapter._last_stderr,'SessionEnd hook cancelled')
         self.assertTrue(any(k=='event' and d.get('stream')=='stderr' for k,d in self.events))

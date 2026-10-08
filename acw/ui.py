@@ -320,7 +320,10 @@ class MessageCard(QFrame):
         self.message["content"] = content
         cursor = self.body.textCursor()
         start, end = cursor.anchor(), cursor.position()
-        self.body.render(plain(content), self.role == "assistant")
+        display = plain(content)
+        if not display and self.message.get('agent') == 'dot':
+            display = '〔此訊息沒有文字內容；附件或其他非文字內容尚未支援顯示〕'
+        self.body.render(display, self.role == "assistant")
         size = len(self.body.toPlainText())
         cursor = self.body.textCursor()
         cursor.setPosition(min(start, size))
@@ -2449,6 +2452,11 @@ class MainWindow(QMainWindow):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.poll_events)
         self.timer.start(100)
+        # Follow conversations that the desktop apps keep writing to while they are shown here.
+        self._sync_stamp, self._sync_floor, self._syncing = {}, {}, set()
+        self.sync_timer = QTimer(self)
+        self.sync_timer.timeout.connect(self.sync_local_conversations)
+        self.sync_timer.start(3000)
         QTimer.singleShot(0, self, self.update_workspace_layout)
 
     def context_key(self):
@@ -2948,6 +2956,51 @@ class MainWindow(QMainWindow):
             control.setEnabled(False)
         return True
 
+    def sync_local_conversations(self):
+        """Show what Claude Desktop or Codex appended to an open conversation, without reopening it."""
+        from .desktop_sessions import history_stamp
+        if getattr(self, "_opening", False) or self._close_pending:
+            return
+        for agent in ("claude", "codex"):
+            panel = self.panels[agent]
+            task = self.core.agent_task(agent) or {}
+            session_id = str(task.get(agent + "_session") or "").lower()
+            if not session_id or agent in self._syncing:
+                continue
+            key = (agent, session_id)
+            if panel.connection_state in ("Busy", "Connecting"):
+                # This role is producing the new content itself; it is already on screen through the live stream.
+                self._sync_floor[key] = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + ".999Z"
+                continue
+            stamp = history_stamp(agent, session_id)
+            if stamp is None or stamp == self._sync_stamp.get(key):
+                continue
+            first = key not in self._sync_stamp
+            self._sync_stamp[key] = stamp
+            if first and key not in self._sync_floor:
+                # Whatever is already stored was imported when the conversation was opened.
+                stored = [str(row.get("timestamp") or "") for row in self.core.messages(task["id"], agent)]
+                stored += [str(row.get("timestamp") or "") for row in self.core.events(task["id"], agent, limit=1)]
+                self._sync_floor[key] = max(stored, default="")
+                continue
+            self._syncing.add(agent)
+            def done(result, agent=agent, key=key, panel=panel):
+                self._syncing.discard(agent)
+                self._sync_floor[key] = max(self._sync_floor.get(key, ""), result["latest"])
+                current = self.core.agent_task(agent) or {}
+                if result["task_id"] != current.get("id") or not result["items"]:
+                    return
+                for kind, row in result["items"]:
+                    if kind == "message":
+                        panel.add_message(row)
+                    else:
+                        panel.add_event(row, historical=True)
+                if hasattr(self, "navigator") and self.navigator.sessions.get(agent) is not None:
+                    self.footer.setText(f"{ROLE_NAMES[agent]} 對話已同步 · 新增 {len(result['items'])} 筆")
+            floor = self._sync_floor.get(key, "")
+            self.run(lambda agent=agent, floor=floor: self.core.sync_local_history(agent, floor), done,
+                     on_error=lambda _, agent=agent: self._syncing.discard(agent))
+
     def open_desktop_session(self, record, resume=True):
         agent = record.get("agent", "claude")
         if not self._opening_begin(agent):
@@ -3051,20 +3104,24 @@ class MainWindow(QMainWindow):
         """Start one bounded run. `consented` is the user's run-scoped G8毛 authorisation from the dialog."""
         if not consented:
             return
+        if self.orchestrator and self.orchestrator.active:
+            self.show_error('已有自動協作正在進行');return
+        self.panels['dot'].stop_dot_follow()
         dot = self.core.adapters["dot"]
+        run=None
         def dispatch(operation, done, failed):
             self.run(operation, done, on_error=failed)
         try:
             run = Orchestrator(self.core, task, dispatch, max_rounds=rounds, local_role=local_role,
-                               has_pending_approval=lambda: any(panel.pending_approval_events for panel in self.panels.values()))
+                               has_pending_approval=lambda: any(self.panels[agent].pending_approval_events for agent in run.agents))
             if getattr(dot, "state", "") == "Connected" and hasattr(dot, "grant_run"):
-                dot.grant_run(400)
+                dot.grant_run(400,owner=run.run_id)
             self.orchestrator = run
             run.start()
         except Exception as exc:
             self.orchestrator = None
-            if hasattr(dot, "revoke_run"):
-                dot.revoke_run()
+            if run is not None and hasattr(dot, "revoke_run"):
+                dot.revoke_run(owner=run.run_id)
             self.show_error(str(exc))
             return
         self.set_auto_collab_lock(True)
@@ -3091,7 +3148,7 @@ class MainWindow(QMainWindow):
             self.run_timer.stop()
             dot = self.core.adapters.get("dot")
             if hasattr(dot, "revoke_run"):
-                dot.revoke_run()
+                dot.revoke_run(owner=run.run_id)
             self.set_auto_collab_lock(False)
             self.reload_context()
 

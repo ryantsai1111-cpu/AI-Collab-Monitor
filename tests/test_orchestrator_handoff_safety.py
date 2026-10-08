@@ -55,7 +55,7 @@ class HandoffSafetyTests(unittest.TestCase):
 
     def test_limit_exactly_allowed_without_truncation(self):
         run = self.build()
-        run.state, run.task_id = 'running', self.core.current_task_id
+        run.start()
         body = 'X' * (MAX_FORWARD_CHARS - 4) + '限制結尾'
         self.assertEqual(MAX_FORWARD_CHARS, len(body))
         run._send('implement', body)
@@ -66,7 +66,7 @@ class HandoffSafetyTests(unittest.TestCase):
         for step in ('implement', 'review_work'):
             with self.subTest(step=step):
                 run = self.build()
-                run.state, run.task_id = 'running', self.core.current_task_id
+                run.start()
                 before = {a: list(adapter.calls) for a, adapter in self.adapters.items()}
                 run._send(step, 'X' * (MAX_FORWARD_CHARS + 1))
                 self.assertEqual('paused', run.state)

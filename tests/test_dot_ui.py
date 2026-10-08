@@ -24,7 +24,10 @@ class DotOfflineUITests(unittest.TestCase):
         self.window=MainWindow(self.core);self.window.resize(1500,1000);self.window.show();self.panel=self.window.panels['dot'];QTest.qWait(40)
     def wait(self):
         until=time.monotonic()+10
-        while self.window.workers and time.monotonic()<until:QTest.qWait(20)
+        while self.window.workers and time.monotonic()<until:
+            QTest.qWait(20)
+            # Explicitly release the GIL so Python-backed Qt workers can progress.
+            time.sleep(.001)
         self.assertFalse(self.window.workers);self.window.poll_events();QTest.qWait(20)
     def tearDown(self):
         self.wait();self.window.grab().save(str(OUT/(self._testMethodName+'.png')))

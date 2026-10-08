@@ -20,6 +20,10 @@ from .base import Adapter, Capabilities
 from ..security import sanitize, safe_file
 
 
+class _CancellationOwnershipChanged(RuntimeError):
+    pass
+
+
 class CodexAdapter(Adapter):
     agent = "codex"
 
@@ -43,6 +47,8 @@ class CodexAdapter(Adapter):
         self._started_messages = set()
         self._completed_turns = set()
         self._turn_id = ""
+        self._send_sequence = 0
+        self._accepted_operation = None
         self._turn_started = threading.Event()
         self._turn_done = threading.Event()
         self._turn_done.set()
@@ -53,20 +59,31 @@ class CodexAdapter(Adapter):
         self._stderr_tail = []
 
     def _emit(self, kind, **payload):
-        self.emit(kind, **sanitize(payload))
+        clean = sanitize(payload)
+        if kind == "message_delta" and isinstance(payload.get("content"), str):
+            # This callback feeds Core's in-memory whole-message accumulator.
+            # Filtering a chunk here destroys credential prefixes needed to
+            # redact a later chunk. Core sanitizes the accumulated message
+            # before queuing it or persisting any text; raw audits stay filtered.
+            clean["content"] = payload["content"]
+        self.emit(kind, **clean)
 
     def _error(self, error):
         self.last_error = sanitize(str(error))
         self._emit("error", content=self.last_error)
 
-    def _write(self, message):
-        with self._write_lock:
+    def _write(self, message, *, expected_operation=None, dispatch_guard=None):
+        # The final ownership/gate check and packet write share this lock.
+        with self._lock, self._write_lock:
+            if expected_operation is not None and self.active_operation_id() != expected_operation:
+                raise _CancellationOwnershipChanged("Codex operation changed before interrupt dispatch")
             if not self._process or self._process.poll() is not None:
                 raise ConnectionError("Codex app-server is disconnected")
+            if dispatch_guard: dispatch_guard(final=True)
             self._process.stdin.write(json.dumps(message, ensure_ascii=False) + "\n")
             self._process.stdin.flush()
 
-    def _request(self, method, params=None, timeout=None, *, suppress_raw=False):
+    def _request(self, method, params=None, timeout=None, *, suppress_raw=False, expected_operation=None, dispatch_guard=None):
         with self._lock:
             self._next_id += 1
             request_id = self._next_id
@@ -75,7 +92,10 @@ class CodexAdapter(Adapter):
             if suppress_raw:
                 self._private_request_ids.add(request_id)
         try:
-            self._write({"id": request_id, "method": method, "params": params or {}})
+            options = {}
+            if expected_operation is not None: options["expected_operation"] = expected_operation
+            if dispatch_guard is not None: options["dispatch_guard"] = dispatch_guard
+            self._write({"id": request_id, "method": method, "params": params or {}}, **options)
             try:
                 result = response.get(timeout=float(timeout or self.settings.get("timeout", 45)))
             except queue.Empty:
@@ -181,22 +201,37 @@ class CodexAdapter(Adapter):
             return
         if params.get("threadId") and self.session_id and params["threadId"] != self.session_id:
             return
-        if method == "turn/started":
-            self._turn_id = params["turn"]["id"]
-            self._turn_started.set()
-            self._turn_done.clear()
-            self.set_state("Busy")
-        elif method == "turn/completed":
-            turn = params["turn"]
-            self._completed_turns.add(turn["id"])
-            if turn.get("error"):
-                self._error(turn["error"])
-            self._turn_id = ""
-            self._turn_started.clear()
-            self._turn_done.set()
-            self._emit("event", summary="Turn " + turn.get("status", "completed"), status=turn.get("status"), turn_id=turn["id"])
-            self.set_state("Connected")
-        elif method in ("item/started", "item/completed"):
+        if method in ("turn/started", "turn/completed"):
+            with self._lock:
+                if method == "turn/started":
+                    incoming = params["turn"]["id"]
+                    if self._accepted_operation is not None and incoming != self._accepted_operation[3]:
+                        self._accepted_operation = None
+                    self._turn_id = incoming
+                    self._turn_started.set()
+                    self._turn_done.clear()
+                    self.set_state("Busy")
+                elif method == "turn/completed":
+                    turn = params["turn"]
+                    turn_id = turn.get("id", "")
+                    if not turn_id or turn_id != self._turn_id:
+                        # A duplicate/late terminal must never release a newer turn.
+                        # The sanitized raw notification above remains in the audit.
+                        self._emit("event", summary="Ignored stale turn completion",
+                                   status="ignored", turn_id=turn_id,
+                                   active_turn_id=self._turn_id)
+                        return
+                    self._completed_turns.add(turn_id)
+                    if turn.get("error"):
+                        self._error(turn["error"])
+                    self._accepted_operation = None
+                    self._turn_id = ""
+                    self._turn_started.clear()
+                    self._turn_done.set()
+                    self._emit("event", summary="Turn " + turn.get("status", "completed"), status=turn.get("status"), turn_id=turn_id)
+                    self.set_state("Connected")
+            return
+        if method in ("item/started", "item/completed"):
             self._handle_item(params.get("item", {}), method == "item/completed")
         elif method == "item/agentMessage/delta":
             item_id = params.get("itemId", "")
@@ -432,7 +467,7 @@ class CodexAdapter(Adapter):
     def rename_session(self, name):
         return self._request("thread/name/set", {"threadId": self.session_id, "name": name})
 
-    def send_message(self, content, model=None, effort=None, attachments=None):
+    def send_message(self, content, model=None, effort=None, attachments=None, dispatch_guard=None):
         if self.state != "Connected":
             raise RuntimeError("Connect Codex and wait for the active turn before sending")
         if self.session_id and not self._session_ready:
@@ -460,14 +495,29 @@ class CodexAdapter(Adapter):
             params["model"] = model
         if effort:
             params["effort"] = effort
-        self._turn_done.clear()
-        self._turn_started.clear()
-        self.set_state("Busy")
+        with self._lock:
+            if self.state != "Connected":
+                raise RuntimeError("Codex operation changed during send preparation")
+            if dispatch_guard: dispatch_guard()
+            self._send_sequence += 1
+            sequence = self._send_sequence
+            binding = (self._generation, sequence, self.session_id, id(self._process))
+            self._accepted_operation = None
+            self._turn_id = ""
+            self._turn_done.clear()
+            self._turn_started.clear()
+            self.set_state("Busy")
         try:
-            result = self._request("turn/start", params)
+            options = {"dispatch_guard": dispatch_guard} if dispatch_guard is not None else {}
+            result = self._request("turn/start", params, **options)
             turn_id = result["turn"]["id"]
-            if turn_id not in self._completed_turns:
-                self._turn_id = turn_id
+            with self._lock:
+                current = (self._generation, self._send_sequence, self.session_id, id(self._process))
+                if current == binding and turn_id not in self._completed_turns:
+                    # An unsolicited replacement turn must not become this send's receipt.
+                    if not self._turn_id or self._turn_id == turn_id:
+                        self._turn_id = turn_id
+                        self._accepted_operation = (binding[0], binding[1], binding[2], turn_id, binding[3])
             return turn_id
         except TimeoutError as exc:
             # A timeout says nothing about whether the server accepted the prompt.
@@ -475,25 +525,67 @@ class CodexAdapter(Adapter):
             self._error(exc)
             raise
         except Exception as exc:
-            self._turn_done.set()
+            with self._lock:
+                current = (self._generation, self._send_sequence, self.session_id, id(self._process))
+                if current == binding and not self._turn_id:
+                    self._turn_done.set()
+                    self.set_state("Connected" if self._process and self._process.poll() is None else "Disconnected")
             self._error(exc)
-            self.set_state("Connected" if self._process and self._process.poll() is None else "Disconnected")
             raise
 
-    def stop(self):
-        # turn/start acknowledges before the backend necessarily starts the turn.
-        # Wait for its lifecycle event so an immediate click cannot race activation.
-        if self.state == "Busy" and not self._turn_started.is_set():
-            self._turn_started.wait(10)
-        if self.state == "Busy" and not self._turn_started.is_set() and not self._turn_done.is_set():
-            raise TimeoutError("Codex has not announced turn/started; cancellation is pending, retry Stop")
-        if not self._turn_id:
-            if self.state == "Busy":
-                raise RuntimeError("Turn has not been acknowledged yet; retry Stop after the turn starts")
+    def active_operation_id(self):
+        """Opaque RAM-only identity of this send's accepted native turn, if still active."""
+        with self._lock:
+            token = self._accepted_operation
+            if (token is None or self.state != "Busy" or token != self._current_operation_id()):
+                return None
+            return token
+
+    def _current_operation_id(self):
+        return (self._generation, self._send_sequence, self.session_id, self._turn_id, id(self._process))
+
+    def _stop_snapshot(self, expected, *, require_accepted):
+        with self._lock:
+            current = self.active_operation_id() if require_accepted else self._current_operation_id()
+            if expected is None or current != expected:
+                return False
+            wait = self.state == "Busy" and not self._turn_started.is_set()
+            started = self._turn_started
+            thread_id, turn_id = expected[2], expected[3]
+        if wait:
+            started.wait(10)
+        with self._lock:
+            current = self.active_operation_id() if require_accepted else self._current_operation_id()
+            if not require_accepted and not turn_id:
+                # Manual Stop can precede acknowledgement, but cannot follow a new local send.
+                if current[:3] != expected[:3] or current[4] != expected[4]:
+                    return False
+                turn_id = current[3]
+            elif current != expected:
+                return False
+            if self.state == "Busy" and not self._turn_started.is_set() and not self._turn_done.is_set():
+                raise TimeoutError("Codex has not announced turn/started; cancellation is pending, retry Stop")
+            if not turn_id:
+                if self.state == "Busy":
+                    raise RuntimeError("Turn has not been acknowledged yet; retry Stop after the turn starts")
+                return False
+        try:
+            options = {"expected_operation": expected} if require_accepted else {}
+            self._request("turn/interrupt", {"threadId": thread_id, "turnId": turn_id}, **options)
+        except _CancellationOwnershipChanged:
             return False
-        self._request("turn/interrupt", {"threadId": self.session_id, "turnId": self._turn_id})
         self._emit("event", summary="Cancellation requested through turn/interrupt", status="cancelling")
         return True
+
+    def stop_if_owned(self, expected):
+        """Never interrupt a replacement native turn after waiting for turn/started."""
+        return self._stop_snapshot(expected, require_accepted=True)
+
+    def stop(self):
+        # Explicit manual Stop targets a snapshot of the current native operation.
+        with self._lock:
+            expected = self._current_operation_id()
+        return self._stop_snapshot(expected, require_accepted=False)
 
     def set_project(self, path, metadata=None):
         if self.state == "Busy":

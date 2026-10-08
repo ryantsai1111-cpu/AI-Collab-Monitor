@@ -1,5 +1,7 @@
 """Human-triggered unofficial pinned CLI; no startup calls or polling."""
-import json, re, subprocess, sys, unicodedata
+import json, re, subprocess, sys, unicodedata, threading
+from contextlib import contextmanager
+from functools import wraps
 from datetime import datetime, timezone
 from pathlib import Path
 from .base import Adapter, Capabilities
@@ -15,13 +17,26 @@ def valid_dot_id(value):
     # Never rewrite/trim/decode it. Local bound/control checks protect argv/logs.
     return (isinstance(value,str) and 0<len(value)<=16384
             and not any(ord(char)<32 or ord(char)==127 for char in value))
+def native_message_text(body):
+    """Preserve native text; a nullable/absent text field is not a stringified payload."""
+    text = body.get('text') if isinstance(body, dict) else body
+    if text is None:
+        return '', 'no_text'
+    if not isinstance(text, str):
+        raise RuntimeError('Unsupported native text shape; nothing imported')
+    return text, 'text' if text else 'no_text'
+
 def checked_action(method):
+    @wraps(method)
     def wrapped(self,*args,**kwargs):
-        try:return method(self,*args,**kwargs)
-        except Exception as exc:
-            if self.state=='Busy':
-                self.last_error=str(sanitize(str(exc)));self.emit('error',content=self.last_error);self.set_state('Error')
-            raise
+        if not self._io_lock.acquire(blocking=False): raise RuntimeError('Another Dot operation is active')
+        try:
+            try:return method(self,*args,**kwargs)
+            except Exception as exc:
+                if self.state=='Busy':
+                    self.last_error=str(sanitize(str(exc)));self.emit('error',content=self.last_error);self.set_state('Error')
+                raise
+        finally: self._io_lock.release()
     return wrapped
 DISCLOSURE = ('Unofficial integration. This action launches the pinned chatgpt-dot-cli locally. '
     'It reads the existing Codex ChatGPT login and transmits its access token to '
@@ -52,6 +67,10 @@ class DotAdapter(Adapter):
                'Streaming, Stop, attachments and New chat: Unsupported.')
     def __init__(self, emit, executable='', runner=None, **settings):
         super().__init__(emit, executable, **settings)
+        self._io_lock=threading.Lock()
+        self._grant_lock=threading.RLock()
+        self._owner_scope=threading.local()
+        self._snapshot=[]
         self._runner=runner or cli_runner
         self._require_room_provenance=runner is None
         self.target=settings.get('dot_id','')
@@ -72,30 +91,53 @@ class DotAdapter(Adapter):
         if action not in ('list','connect','messages','send'): raise ValueError('Invalid Dot action')
         if self.state=='Busy': raise RuntimeError('Wait for this request; backend Stop Unsupported')
         self._ticket=(action,self.target)
-    def grant_run(self,budget):
-        """Run-scoped consent given once by the user for one automatic collaboration run.
+    @contextmanager
+    def operation_scope(self,owner=None):
+        previous=getattr(self._owner_scope,'owner',None)
+        if previous is not None and previous!=owner: raise PermissionError('Dot operation owner cannot change inside an operation')
+        self._owner_scope.owner=owner
+        try: yield
+        finally: self._owner_scope.owner=previous
 
-        Covers reads and sends to the selected Dot only, up to `budget` requests, until revoke_run()."""
+    def grant_run(self,budget,owner=None):
         if not self.target or self.state!='Connected': raise RuntimeError('Connect selected Dot first')
-        self._run_grant={'target':self.target,'remaining':max(1,min(int(budget),1000))}
-    def revoke_run(self):
-        self._run_grant=None
-    def _call(self,action,operation,hold_busy=False,**kwargs):
-        ticket,self._ticket=self._ticket,None
-        if ticket!=(action,self.target):
+        if owner is not None and (not isinstance(owner,str) or not owner or len(owner)>200):
+            raise ValueError('Invalid bounded run owner')
+        with self._grant_lock:
+            previous=getattr(self,'_run_grant',None)
+            if previous and previous.get('owner') is not None and previous.get('owner')!=owner:
+                raise PermissionError('Another run owns the Dot grant')
+            self._run_grant={'target':self.target,'room':self.native_room_id,'owner':owner,'remaining':max(1,min(int(budget),1000))}
+
+    def revoke_run(self,owner=None):
+        with self._grant_lock:
             grant=getattr(self,'_run_grant',None)
-            if not grant or action not in ('messages','send') or grant['target']!=self.target:
-                raise PermissionError('One-use local human consent required for this Dot action')
-            if grant['remaining']<=0:
-                self._run_grant=None
-                raise PermissionError('Automatic run request budget for this Dot is used up')
-            grant['remaining']-=1
+            if grant and grant.get('owner')==owner: self._run_grant=None
+
+    def get_snapshot(self):
+        return [dict(row) for row in self._snapshot]
+
+    def _call(self,action,operation,hold_busy=False,dispatch_guard=None,**kwargs):
+        owner=getattr(self._owner_scope,'owner',None)
+        with self._grant_lock:
+            ticket=self._ticket
+            use_ticket=owner is None and ticket==(action,self.target)
+            if use_ticket: self._ticket=None
+            else:
+                grant=getattr(self,'_run_grant',None)
+                if not grant or action not in ('messages','send') or grant['target']!=self.target or grant.get('room','')!=self.native_room_id or grant.get('owner')!=owner:
+                    raise PermissionError('One-use consent or the matching bounded run owner is required for this Dot action')
+                if grant['remaining']<=0:
+                    self._run_grant=None
+                    raise PermissionError('Automatic run request budget for this Dot is used up')
+                grant['remaining']-=1
         if operation!='list' and not self.target: raise ValueError('Select Dot first')
         previous=self.state;self.set_state('Busy')
         try:
             if operation!='list' and self._require_room_provenance:
                 if not self.native_room_id: raise RuntimeError('No verified existing conversation; connect first')
                 kwargs['expected_room']=self.native_room_id
+            if dispatch_guard: dispatch_guard(final=True)
             result=sanitize(self._runner(operation,dot_id=self.target if operation!='list' else '',**kwargs))
             if operation!='list' and self._require_room_provenance:
                 if not isinstance(result,dict) or result.get('dot_id')!=self.target or result.get('messaging_room_id')!=self.native_room_id:
@@ -142,7 +184,7 @@ class DotAdapter(Adapter):
         if name!='G8毛': raise ValueError('Only the approved G8毛 Dot is in scope')
         if dot_id!=self.target: self.settings.pop('expected_room_id',None)
         self.target,self.target_name=dot_id,str(sanitize(name))
-        self._ticket=None;self.session_id='';self.last_error='';self.before='';self._history=[]
+        self._ticket=None;self._run_grant=None;self._snapshot=[];self.session_id='';self.last_error='';self.before='';self._history=[]
         self.native_room_id='';self.last_read_at='';self._refresh_capabilities()
         self.set_state('Disconnected')
     @checked_action
@@ -187,26 +229,35 @@ class DotAdapter(Adapter):
         if self.state!='Connected': raise RuntimeError('Connect selected Dot first')
         result=self._call('messages','messages',hold_busy=True,before=self.before if older else '')
         messages=result.get('messages',[]);lines=list(reversed(result.get('lines',[])))
-        for i,item in enumerate(messages):
-            native_id=str(item.get('id',''))
-            if not native_id: continue
-            speaker=lines[i].split(':',1)[0] if i<len(lines) and isinstance(lines[i],str) else 'unknown'
-            role='assistant' if speaker=='dot' else 'user' if speaker=='you' else 'event'
-            body=item.get('content',{});text=body.get('text','') if isinstance(body,dict) else str(body)
-            self.emit('message_snapshot',native_id=native_id,role=role,content=text,
-                      native_timestamp=item.get('created_at',''),source='Manual paginated snapshot; not streaming')
-        if messages: self.before=str(messages[0].get('id',''))
+        if len(messages)!=len(lines): raise RuntimeError('Native speaker metadata does not match the message page; nothing imported')
+        normalized=[]
+        for item,line in zip(messages,lines):
+            native_id=item.get('id')
+            if not isinstance(native_id,str) or not native_id or len(native_id)>2048 or any(ord(c)<32 for c in native_id):
+                raise RuntimeError('Invalid native message identifier; nothing imported')
+            if not isinstance(line,str) or line.split(':',1)[0] not in ('dot','you'):
+                raise RuntimeError('Native message authors cannot be verified; nothing imported')
+            role='assistant' if line.split(':',1)[0]=='dot' else 'user'
+            body=item.get('content',{})
+            text,content_kind=native_message_text(body)
+            stamp=item.get('created_at','')
+            normalized.append(dict(native_id=native_id,role=role,content=text,content_kind=content_kind,native_timestamp=stamp if isinstance(stamp,str) else '',native_room_id=self.native_room_id))
+        for row in normalized:
+            self.emit('message_snapshot',**row,source='Verified ordered snapshot; not a native completion signal')
+        self._snapshot=[dict(row) for row in normalized]
+        if messages and (older or not self.before): self.before=messages[0]['id']
         self.last_read_at=datetime.now(timezone.utc).isoformat(timespec='seconds')
         self.emit('history_page',count=len(messages),before=self.before,content='Conversation page loaded; not streaming',loaded_at=self.last_read_at)
         self._history=list(messages)
         self.set_state('Connected')
         return len(messages)
     @checked_action
-    def send_message(self,content,model=None,effort=None,attachments=None):
+    def send_message(self,content,model=None,effort=None,attachments=None,dispatch_guard=None):
         if self.state!='Connected': raise RuntimeError('Connect selected Dot first')
         if model or effort or attachments: raise NotImplementedError('Dot model, effort and attachments Unsupported')
         if not str(content).strip(): raise ValueError('Message is empty')
-        result=self._call('send','send',hold_busy=True,text=content)
+        if dispatch_guard: dispatch_guard()
+        result=self._call('send','send',hold_busy=True,text=content,dispatch_guard=dispatch_guard)
         self.emit('send_ack',native_id=str(result.get('id','')),content='Backend accepted manual send. Press Refresh for replies; not streaming.')
         self.set_state('Connected')
         return result

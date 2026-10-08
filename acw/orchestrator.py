@@ -7,13 +7,17 @@ no threads: the owner calls `tick()` and supplies `dispatch` to run blocking cal
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 import re
+import secrets
 import time
+import threading
 
 VERDICT = re.compile(r'(?P<bold>\*\*)?VERDICT[ \t]*[:：][ \t]*(?P<value>[A-Z_]+)(?(bold)\*\*)')
 MAX_FORWARD_CHARS = 12000
 TIMEOUTS = {'claude': 900, 'codex': 1800, 'dot': 1200, 'local': 900}
 DOT_POLL_SECONDS = 10
+_NOT_DISPATCHED = object()
 
 PROMPTS = {
     'plan': ('【自動協作 · 規劃】\n任務：{task}\n\n請只做規劃，不要修改任何檔案。輸出：目標、實作步驟、驗收條件、風險。\n'
@@ -23,7 +27,7 @@ PROMPTS = {
     'review_plan': ('【自動協作 · 審查計畫並轉交】\n原始任務：{task}\n\n以下是 Claude 的計畫。請審查，需要時可自行到 GitHub 查看程式碼。\n'
                     '若可行，第一行寫 `VERDICT: PASS`，接著寫出給實作者 Codex 的完整交接單（自足，含驗收條件）。\n'
                     '若需修改，第一行寫 `VERDICT: REVISE`，接著列出具體意見。\n\n---\n{body}'),
-    'implement': ('【自動協作 · 實作】\n請依以下交接單實作。完成後 commit 並 push 到工作分支（不要 push main）。\n'
+    'implement': ('【自動協作 · 實作】\n請依以下交接單實作。commit、push 或發布需要原始任務明確授權；實作許可本身不包含發布。\n'
                   '回報：改了哪些檔、測試結果、repo URL／分支／commit SHA、未盡事項。\n'
                   '回覆的第一行必須是 `VERDICT: IMPLEMENTED`；無法完成則寫 `VERDICT: BLOCKED` 並說明原因。\n\n---\n{body}'),
     'review_work': ('【自動協作 · 審查實作並轉交】\n原始任務：{task}\n\n以下是 Codex 的實作回報。請依回報中的 repo／分支／commit 自行查看變更並審查。\n'
@@ -70,6 +74,54 @@ def parse_verdict(text):
     return _verdict_parts(text)[0]
 
 
+
+CORRELATION = re.compile(r'[0-9a-f]{32}:[1-9][0-9]*:[0-9a-f]{32}')
+MARKER = re.compile(r'ACW_(REPLY|END)[ \t]*:[ \t]*(.*)')
+
+
+def _reply_envelope(text, correlation_id):
+    """Parse a single, closed application envelope without altering forwarded bytes.
+
+    This does not authenticate an author or establish native backend completion.
+    The one line ending separating the body from ACW_END is framing, not body.
+    """
+    if not isinstance(correlation_id, str) or not CORRELATION.fullmatch(correlation_id):
+        return None, '', 'unmatched'
+    lines = str(text or '').splitlines(keepends=True)
+    nonempty = [i for i, line in enumerate(lines) if line.strip()]
+    if len(nonempty) < 2:
+        return None, '', 'incomplete'
+    verdict = parse_verdict(lines[nonempty[0]])
+    reply_index = nonempty[1]
+    reply_marker = MARKER.fullmatch(lines[reply_index].strip())
+    if not reply_marker or reply_marker.group(1) != 'REPLY' or reply_marker.group(2) != correlation_id:
+        return verdict, '', 'unmatched'
+    markers = [(i, MARKER.fullmatch(line.strip())) for i, line in enumerate(lines)]
+    markers = [(i, marker) for i, marker in markers if marker]
+    if len([marker for _, marker in markers if marker.group(1) == 'REPLY']) != 1:
+        return verdict, '', 'duplicate correlation markers'
+    ends = [(i, marker) for i, marker in markers if marker.group(1) == 'END']
+    if not ends:
+        return verdict, '', 'incomplete'
+    if len(ends) != 1:
+        return verdict, '', 'duplicate end markers'
+    end_index, end_marker = ends[0]
+    if end_marker.group(2) != correlation_id:
+        return verdict, '', 'mismatched end marker'
+    if end_index != nonempty[-1] or end_index <= reply_index:
+        return verdict, '', 'text after end marker'
+    if not verdict:
+        return None, '', 'invalid verdict'
+    body = ''.join(lines[reply_index + 1:end_index])
+    if body.endswith('\r\n'):
+        body = body[:-2]
+    elif body.endswith(('\n', '\r')):
+        body = body[:-1]
+    if not body.strip():
+        return verdict, '', 'empty forwarded body'
+    return verdict, body, None
+
+
 class Orchestrator:
     def __init__(self, core, task, dispatch, *, max_rounds=3, has_pending_approval=lambda: False,
                  clock=time.monotonic, timeouts=None, dot_poll_seconds=DOT_POLL_SECONDS, local_role=None):
@@ -77,8 +129,6 @@ class Orchestrator:
             raise ValueError('請輸入任務')
         if local_role not in LOCAL_ROLES:
             raise ValueError('Local LLM 的角色不正確')
-        # Local LLM joins on request: as the implementer instead of Codex, or as an advisory
-        # second opinion after the implementation. Its opinion never blocks the run.
         self.local_role = local_role
         self.steps = dict(STEPS)
         self.names = dict(STEP_NAMES)
@@ -98,37 +148,55 @@ class Orchestrator:
         self.timeouts = dict(TIMEOUTS, **(timeouts or {}))
         self.dot_poll_seconds = dot_poll_seconds
         self.state, self.reason, self.step, self.round = 'idle', '', '', 1
-        self.task_id = None
-        self._calling = False   # a dispatched call is in flight
-        self._waiting = None    # agent whose reply is awaited
+        self.run_id = secrets.token_hex(16)
+        self._cancel_event = threading.Event()
+        self.step_sequence = 0
+        self.task_id = self.project_id = None
+        self._calling, self._waiting = False, None
         self._seen, self._deadline, self._next_poll = set(), 0.0, 0.0
-        self._paused_at = None  # set while a tool approval is pending
+        self._paused_at = None
+        self._generation = 0
+        self._bindings = {}
+        self._contract = None
+        self._dot_snapshot = None
+        self._reply_problem = ''
+        self._preparing_agent = None
+        self._call_deadline = 0.0
+        self._deferred_dispatch = None
+        self._frozen_task_text = self.task
 
-    # --- lifecycle -------------------------------------------------------------------
     def start(self):
         if self.state != 'idle':
             raise RuntimeError('這次執行已經開始過')
-        task = self.core.current_task
-        if not self.core.current_project or not task:
+        task, project = self.core.current_task, self.core.current_project
+        if not project or not task:
             raise ValueError('請先選擇專案與任務')
-        mismatched = [agent for agent in self.agents if (self.core.agent_task(agent) or {}).get('id') != task['id']]
+        mismatched = [agent for agent in self.agents if (self.core.agent_task(agent) or {}).get('id') != task['id']
+                      or (self.core.agent_project(agent) or {}).get('id') != project['id']]
         if mismatched:
-            raise ValueError('自動協作前，請將參與角色切換到目前的協作任務：' + '、'.join(ROLE_NAMES[agent] for agent in mismatched))
+            raise ValueError('自動協作前，請將參與角色切換到目前的協作任務：' + '、'.join(ROLE_NAMES[a] for a in mismatched))
         offline = [agent for agent in self.agents if getattr(self.core.adapters.get(agent), 'state', '') != 'Connected']
         if offline:
-            raise RuntimeError('請先連線：' + '、'.join(ROLE_NAMES[agent] for agent in offline))
-        self.task_id = task['id']
+            raise RuntimeError('請先連線：' + '、'.join(ROLE_NAMES[a] for a in offline))
+        dot = self.core.adapters['dot']
+        if not getattr(dot, 'target', '') or not getattr(dot, 'native_room_id', ''):
+            raise RuntimeError('G8毛 缺少已驗證的 Dot／對話識別，請先連線')
+        self.task_id, self.project_id = task['id'], project['id']
+        self._bindings = {a: self._binding(a) for a in self.agents}
         self.state = 'running'
         self._note('started', f'自動協作開始 · 回合上限 {self.max_rounds}')
         self._prepare_sessions()
 
     def stop(self, reason='使用者停止'):
-        if self.state not in ('running',):
+        if self.state != 'running':
             return
-        waiting = self._waiting
+        waiting, contract = self._waiting, dict(self._contract or {})
+        bound = self._bindings.get(waiting, {}).get('adapter')
         self._finish('stopped', reason)
-        if waiting in ('claude', 'codex', 'local') and getattr(self.core.adapters.get(waiting), 'state', '') == 'Busy':
-            self.dispatch(lambda: self.core.stop(waiting), lambda _: None, lambda _: None)
+        if waiting in ('claude', 'codex', 'local') and bound is self.core.adapters.get(waiting) and getattr(bound, 'state', '') == 'Busy':
+            # Core atomically rejects delayed cancellation after a new send or replacement.
+            self.dispatch(lambda: self.core.stop_orchestration_message(waiting, contract),
+                          lambda _: None, lambda _: None)
 
     @property
     def active(self):
@@ -141,91 +209,337 @@ class Orchestrator:
         prefix = {'done': '自動協作完成', 'stopped': '自動協作已停止', 'paused': '自動協作已暫停'}.get(self.state, '自動協作')
         return prefix + (' · ' + self.reason if self.reason else '')
 
-    # --- internals -------------------------------------------------------------------
+    def _binding(self, agent):
+        adapter = self.core.adapters.get(agent)
+        task = self.core.agent_task(agent) or {}
+        project = self.core.agent_project(agent) or {}
+        return {'adapter': adapter, 'task_id': task.get('id'), 'project_id': project.get('id'),
+                'task_session': task.get(agent + '_session') or '',
+                'session_id': getattr(adapter, 'session_id', '') or '',
+                'dot_id': getattr(adapter, 'target', '') if agent == 'dot' else '',
+                'room_id': getattr(adapter, 'native_room_id', '') if agent == 'dot' else ''}
+
+    def _context_reason(self, allow_session_agent=None):
+        if self.task != self._frozen_task_text:
+            return '執行任務內容已被變更'
+        if self.core.current_task_id != self.task_id:
+            return '任務已被切換'
+        if self.core.current_project_id != self.project_id or (self.core.current_task or {}).get('project_id') != self.project_id:
+            return '專案已被切換'
+        for agent, frozen in self._bindings.items():
+            current = self._binding(agent)
+            for key, value in frozen.items():
+                if agent == allow_session_agent and key in ('task_session', 'session_id'):
+                    continue
+                changed = current[key] is not value if key == 'adapter' else current[key] != value
+                if changed:
+                    return f'{ROLE_NAMES[agent]} 的專案、任務、session 或對話綁定已變更'
+        return ''
+
+    def _check_context(self, allow_session_agent=None):
+        reason = self._context_reason(allow_session_agent)
+        if reason:
+            self._finish('paused', reason)
+            return False
+        return True
+
     def _note(self, kind, content):
         self.core._record('orchestration', 'workspace', task_id=self.task_id, status=kind, content=content,
-                          step=self.step, round=self.round)
+                          step=self.step, round=self.round, run_id=self.run_id, step_sequence=self.step_sequence)
 
     def _finish(self, state, reason):
+        self._cancel_event.set()  # Also blocks already-entered Core/adapter preparation.
+        self._generation += 1  # Queued operations and callbacks from this run are now inert.
         self.state, self.reason, self._waiting, self._calling = state, reason, None, False
+        self._contract, self._dot_snapshot = None, None
+        self._preparing_agent = None
+        self._call_deadline = 0.0
+        self._deferred_dispatch = None
+        dot = self._bindings.get('dot', {}).get('adapter')
+        revoke = getattr(dot, 'revoke_run', None)
+        if revoke:
+            try:
+                revoke(owner=self.run_id)
+            except Exception as exc:
+                self._note('grant_revoke_error', str(exc)[:200])
         self._note(state, self.status())
 
-    def _call(self, operation, done):
-        self._calling = True
-        def succeeded(result):
-            if self.state != 'running':
-                return
-            self._calling = False
-            done(result)
-        def failed(error):
-            if self.state != 'running':
-                return
-            if self.step in self.optional:
-                self._calling = False
-                return self._skip_optional('發生錯誤：' + str(error)[:200])
-            self._finish('paused', '發生錯誤：' + str(error)[:300])
-        self.dispatch(operation, succeeded, failed)
+    def _resume_clock(self, now):
+        if self._paused_at is not None:
+            held = now - self._paused_at
+            self._deadline += held
+            if self._call_deadline:
+                self._call_deadline += held
+            self._paused_at = None
 
-    def _prepare_sessions(self):
-        # Starting a run is the explicit action that maps each role to a conversation for this task.
-        task = self.core.current_task
-        pending = [agent for agent in self.agents if agent != 'dot' and not task.get(agent + '_session')]
-        dot = self.core.adapters['dot']
-        def step(_=None):
-            if pending:
-                agent = pending.pop(0)
-                self._call(lambda: self.core.create_session(agent), step)
-            elif getattr(dot, 'session_id', '') != getattr(dot, 'target', '') or self.core.current_task.get('dot_session') != dot.target:
-                self._call(lambda: self.core.resume_session('dot', dot.target), lambda _: self._send('plan', ''))
-            else:
-                self._send('plan', '')
-        step()
-
-    def _messages(self, agent):
-        return [m for m in self.core.messages(self.task_id, agent) if m.get('role') == 'assistant' and m.get('status', 'complete') == 'complete']
-
-    def _skip_optional(self, reason):
-        # An advisory step that cannot answer is recorded and passed over; it never stops the run.
-        self._waiting = None
-        self._note('skipped', f'{self.names[self.step]} 未提供意見（{reason}），流程繼續')
-        self._send('review_work', self._carry + f'\n\n## Local LLM 第二意見\n未提供（{reason}）。')
-
-    def _send(self, step, body):
-        agent = self.steps[step][0]
-        self.step = step
-        if len(body) > MAX_FORWARD_CHARS:
-            return self._finish('paused',
-                f'{self.names[step]} 的交接內容超過上限（{len(body)}/{MAX_FORWARD_CHARS} 字元）；'
-                '未截斷或傳送，請查看原始訊息並重新整理完整交接')
-        text = PROMPTS[step].format(task=self.task, body=body)
-        self._note('step', self.names[step])
-        def sent(_):
-            self._waiting = agent
-            self._deadline = self.clock() + self.timeouts[agent]
-            self._next_poll = self.clock() + self.dot_poll_seconds
-        def send(_=None):
-            self._seen = {m['id'] for m in self._messages(agent)}
-            self._call(lambda: self.core.send_message(agent, text), sent)
-        if agent == 'dot':
-            # Read once first so older G8毛 messages (and their verdicts) are never taken for this answer.
-            self._call(lambda: self.core.adapters['dot'].refresh_messages(False), send)
-        else:
-            send()
-
-    def tick(self):
-        """Advance at most one step. Safe to call often."""
-        if self.state != 'running' or self._calling:
-            return
-        if self.core.current_task_id != self.task_id:
-            return self._finish('paused', '任務已被切換')
+    def _budget_now(self):
         now = self.clock()
         if self.has_pending_approval():
             if self._paused_at is None:
                 self._paused_at = now
-            return  # a human decides; the clock does not run against the agents meanwhile
-        if self._paused_at is not None:
-            self._deadline += now - self._paused_at
-            self._paused_at = None
+            # New budgets created during a human hold begin when the hold ends.
+            return self._paused_at
+        self._resume_clock(now)
+        return now
+
+    def _expire_call(self):
+        self._generation += 1
+        self._calling = False
+        self._call_deadline = 0.0
+        self._preparing_agent = None
+        if self.step in self.optional:
+            return self._skip_optional('請求逾時；結果尚未確認，未重送')
+        return self._finish('paused', self.names.get(self.step, 'Session 準備') + ' 請求逾時；結果尚未確認，未重送')
+
+    def _call(self, operation, done, *, allow_session_agent=None, expected_session=None):
+        if self.state != 'running' or not self._check_context():
+            return
+        self._generation += 1
+        generation = self._generation
+        self._calling = True
+        self._preparing_agent = allow_session_agent
+        agent = allow_session_agent or self.steps.get(self.step, ('claude',))[0]
+        self._call_deadline = self._budget_now() + self.timeouts[agent]
+        if self._waiting is not None:
+            self._call_deadline = min(self._call_deadline, self._deadline)
+        settled = False
+        def guarded_operation():
+            if self.state != 'running' or generation != self._generation:
+                return None
+            if not self._check_context():
+                return None
+            if self._budget_now() >= self._call_deadline:
+                self._expire_call()
+                return None
+            return operation()
+        def succeeded(result):
+            nonlocal settled
+            if settled or self.state != 'running' or generation != self._generation:
+                return
+            settled = True
+            if self._budget_now() >= self._call_deadline:
+                return self._expire_call()
+            self._calling = False
+            self._call_deadline = 0.0
+            if not self._check_context(allow_session_agent):
+                return
+            if allow_session_agent:
+                current = self._binding(allow_session_agent)
+                returned = result.get('id', result.get('session_id', '')) if isinstance(result, dict) else result
+                expected = expected_session or returned
+                if not isinstance(expected, str) or not expected or current['task_session'] != expected or current['session_id'] != expected:
+                    return self._finish('paused', f'{ROLE_NAMES[allow_session_agent]} session 準備未完成')
+                self._bindings[allow_session_agent] = current
+            self._preparing_agent = None
+            done(result)
+        def failed(error):
+            nonlocal settled
+            if settled or self.state != 'running' or generation != self._generation:
+                return
+            settled = True
+            if self._budget_now() >= self._call_deadline:
+                return self._expire_call()
+            self._calling = False
+            self._call_deadline = 0.0
+            self._preparing_agent = None
+            if not self._check_context(allow_session_agent):
+                return
+            if self.step in self.optional:
+                return self._skip_optional('發生錯誤：' + str(error)[:200])
+            self._finish('paused', '發生錯誤：' + str(error)[:300])
+        try:
+            self.dispatch(guarded_operation, succeeded, failed)
+        except Exception as exc:
+            failed(exc)
+
+    def _prepare_sessions(self):
+        pending = list(self.agents)
+        def step(_=None):
+            if not self._check_context():
+                return
+            if not pending:
+                return self._send('plan', '')
+            agent = pending.pop(0)
+            binding = self._bindings[agent]
+            expected = binding['dot_id'] if agent == 'dot' else binding['task_session']
+            if not expected:
+                return self._call(lambda: self.core.create_session(agent), step, allow_session_agent=agent)
+            if binding['session_id'] != expected or binding['task_session'] != expected:
+                return self._call(lambda: self.core.resume_session(agent, expected), step, allow_session_agent=agent, expected_session=expected)
+            step()
+        step()
+
+    def _messages(self, agent):
+        session_id = self._bindings.get(agent, {}).get('session_id')
+        return [m for m in self.core.messages(self.task_id, agent) if m.get('role') == 'assistant'
+                and m.get('status', 'complete') == 'complete' and m.get('session_id', '') == session_id]
+
+    def _skip_optional(self, reason):
+        if self.state != 'running' or not self._check_context():
+            return
+        self._waiting = None
+        self._note('skipped', f'{self.names[self.step]} 未提供意見（{reason}），流程繼續')
+        self._send('review_work', self._carry + f'\n\n## Local LLM 第二意見\n未提供（{reason}）。')
+
+    def _assert_dispatch_allowed(self, contract):
+        """RAM-only late dispatch gate; it grants no authorization and performs no I/O."""
+        if self._cancel_event.is_set() or self.state != 'running' or self._contract is not contract:
+            raise RuntimeError('Run stopped or changed before native dispatch; request was not sent')
+        reason = self._context_reason()
+        if reason:
+            raise RuntimeError(reason + '；未傳送')
+        if contract['step_sequence'] > 1 and self.has_pending_approval():
+            raise RuntimeError('Pending human approval blocks native dispatch; request was not sent')
+        # A human hold is excluded from the operation's budget, including before its next tick.
+        now = self._paused_at if self._paused_at is not None else self.clock()
+        if self._call_deadline and now >= self._call_deadline:
+            raise RuntimeError('Run dispatch deadline expired; request was not sent')
+
+    def _send(self, step, body):
+        self.step = step
+        # Check before constructing a prompt, reading, sending, or accepting any reply.
+        if len(body) > MAX_FORWARD_CHARS:
+            return self._finish('paused',
+                f'{self.names[step]} 的交接內容超過上限（{len(body)}/{MAX_FORWARD_CHARS} 字元）；'
+                '未截斷或傳送，請查看原始訊息並重新整理完整交接')
+        if self.state != 'running' or not self._check_context():
+            return
+        if self.step_sequence and self.has_pending_approval():
+            self._generation += 1
+            self._waiting, self._contract, self._dot_snapshot = None, None, None
+            self._deferred_dispatch = lambda: self._send(step, body)
+            return
+        agent = self.steps[step][0]
+        self.step_sequence += 1
+        correlation_id = f'{self.run_id}:{self.step_sequence}:{secrets.token_hex(16)}'
+        text = PROMPTS[step].format(task=self._frozen_task_text, body=body)
+        text += ('\n\n【單一訊息回覆格式】第一個非空行使用上面的 VERDICT 判定；'
+                 f'第二個非空行必須原樣寫 ACW_REPLY: {correlation_id}。'
+                 '\n接著寫完整且非空的交接內容，最後一個非空行必須原樣寫 '
+                 f'ACW_END: {correlation_id}。不得分成多則訊息，不得在結尾標記後加文字。'
+                 '\n這些標記只界定應用程式交接內容完整性，不代表原生完成訊號或作者身分驗證。')
+        binding = self._bindings[agent]
+        contract = {'run_id': self.run_id, 'step_sequence': self.step_sequence, 'correlation_id': correlation_id,
+                    'step': step, 'task_id': self.task_id, 'project_id': self.project_id, 'agent': agent,
+                    'session_id': binding['session_id'], 'dot_id': binding['dot_id'], 'room_id': binding['room_id'],
+                    'prompt': text, '_cancel_event': self._cancel_event}
+        contract['_dispatch_guard'] = lambda: self._assert_dispatch_allowed(contract)
+        self._contract = contract
+        self._dot_snapshot, self._reply_problem = None, ''
+        self._seen = {m['id'] for m in self._messages(agent)} if agent != 'dot' else set()
+        self._note('step', self.names[step])
+        def sent(receipt):
+            if receipt is _NOT_DISPATCHED:
+                self._deferred_dispatch = submit
+                return
+            if not isinstance(receipt, dict) or not isinstance(receipt.get('local_message_id'), str) or not receipt['local_message_id']:
+                return self._finish('paused', '傳送接受狀態不確定：缺少本地訊息識別；未重送')
+            contract['local_request_id'] = receipt['local_message_id']
+            contract['native_request_id'] = receipt.get('native_message_id') or ''
+            if agent == 'dot' and (not isinstance(contract['native_request_id'], str) or not contract['native_request_id']):
+                return self._finish('paused', 'G8毛 傳送接受狀態不確定：缺少原生訊息收據；未重送')
+            self._waiting = agent
+            self._deadline = self._budget_now() + self.timeouts[agent]
+            self._next_poll = self.clock()
+        def operation():
+            if contract['step_sequence'] > 1 and self.has_pending_approval():
+                return _NOT_DISPATCHED  # No external send occurred; defer this exact request.
+            return self.core.send_orchestration_message(agent, text, contract)
+        def submit():
+            self._call(operation, sent)
+        submit()
+
+    @staticmethod
+    def _unique_rows(rows, key):
+        if not isinstance(rows, (list, tuple)):
+            return None
+        unique = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                return None
+            identity = row.get(key)
+            if not isinstance(identity, str) or not identity:
+                return None
+            if identity in unique and unique[identity] != row:
+                return None
+            unique.setdefault(identity, row)
+        return list(unique.values())
+
+    def _candidate(self, rows, key):
+        token = self._contract['correlation_id']
+        candidates = []
+        for row in rows:
+            lines = [line.strip() for line in str(row.get('content', '')).splitlines() if line.strip()]
+            # A partial envelope may grow in this same native message on the next read.
+            if len(lines) >= 2 and lines[1] == 'ACW_REPLY: ' + token:
+                candidates.append(row)
+        candidates = self._unique_rows(candidates, key)
+        if candidates is None or len(candidates) > 1:
+            self._finish('paused', '同一步驟收到多個相關回覆，無法唯一確認交接；請人工審查')
+            return None
+        return candidates[0] if candidates else None
+
+    def _process_dot_snapshot(self):
+        rows = self._dot_snapshot
+        if rows is None:
+            return
+        rows = self._unique_rows(rows, 'native_id')
+        if rows is None:
+            return self._finish('paused', 'G8毛 原生訊息頁缺少有效識別或同一識別含衝突內容；請人工審查')
+        contract = self._contract
+        if any(row.get('native_room_id') != contract['room_id'] for row in rows):
+            return self._finish('paused', 'G8毛 回覆的原生對話識別不符')
+        receipt_index = next((i for i, row in enumerate(rows) if row.get('native_id') == contract['native_request_id']), None)
+        if receipt_index is None:
+            self._reply_problem = '同一頁尚未顯示已接受的原生請求收據'
+            return
+        request = rows[receipt_index]
+        if request.get('role') != 'user' or request.get('content') != contract['prompt']:
+            return self._finish('paused', 'G8毛 原生請求收據的角色或提示內容不符')
+        if any(row.get('role') == 'user' for row in rows[receipt_index + 1:]):
+            return self._finish('paused', 'G8毛 請求後有人類訊息介入；請人工審查後重新開始')
+        assistants = [row for row in rows if row.get('role') == 'assistant']
+        candidate = self._candidate(assistants, 'native_id')
+        if self.state != 'running' or candidate is None:
+            return
+        if rows.index(candidate) <= receipt_index:
+            return self._finish('paused', 'G8毛 相關回覆早於已接受的請求收據；未轉交')
+        verdict, body, problem = _reply_envelope(candidate.get('content'), contract['correlation_id'])
+        if problem:
+            self._reply_problem = problem
+            if problem != 'incomplete':
+                self._finish('paused', 'G8毛 交接封套無效：' + problem)
+            return
+        if not self._check_context():
+            return
+        # Only a validated single native root message is copied into this task's history.
+        def accepted(stored):
+            if (not isinstance(stored, Mapping) or stored.get('task_id') != contract['task_id']
+                    or stored.get('role') != 'assistant' or stored.get('content') != candidate['content']):
+                return self._finish('paused', 'G8毛 未確認儲存精確的任務交接證據；未轉交')
+            self._advance(candidate['content'])
+        self._call(lambda: self.core.accept_orchestration_reply(contract, candidate), accepted)
+
+    def tick(self):
+        """Advance at most one step; late callbacks and switched bindings cannot route work."""
+        if self.state != 'running':
+            return
+        if not self._check_context(self._preparing_agent if self._calling else None):
+            return
+        now = self.clock()
+        if self.has_pending_approval():
+            if self._paused_at is None:
+                self._paused_at = now
+            return
+        self._resume_clock(now)
+        if self._calling:
+            if now >= self._call_deadline:
+                self._expire_call()
+            return
+        if self._deferred_dispatch is not None:
+            pending, self._deferred_dispatch = self._deferred_dispatch, None
+            pending()
+            return
         agent = self._waiting
         if agent is None:
             return
@@ -234,33 +548,55 @@ class Orchestrator:
             if self.step in self.optional:
                 return self._skip_optional(f'連線狀態：{state}')
             return self._finish('paused', f'{ROLE_NAMES[agent]} 連線狀態：{state}')
-        fresh = [m for m in self._messages(agent) if m['id'] not in self._seen]
-        reply = '\n\n'.join(str(m['content']) for m in fresh)
         if agent == 'dot':
-            # No completion signal exists for G8毛: its answer is complete once it carries a verdict.
-            if parse_verdict(reply):
-                return self._advance(reply)
+            previous_sequence = self.step_sequence
+            self._process_dot_snapshot()
+            if self.state != 'running' or self._calling or self.step_sequence != previous_sequence:
+                return
             if now >= self._deadline:
-                return self._finish('paused', 'G8毛 逾時未回覆')
+                detail = '：' + self._reply_problem if self._reply_problem else ''
+                return self._finish('paused', 'G8毛 逾時未回覆完整相關交接' + detail)
             if now >= self._next_poll:
                 self._next_poll = now + self.dot_poll_seconds
-                self._call(lambda: self.core.adapters['dot'].refresh_messages(False), lambda _: None)
+                contract = self._contract
+                self._call(lambda: self.core.read_dot_snapshot_for_run(contract),
+                           lambda rows: setattr(self, '_dot_snapshot', rows))
             return
-        if state != 'Busy' and fresh:
-            return self._advance(reply)
+        fresh = [m for m in self._messages(agent) if m['id'] not in self._seen]
+        if state != 'Busy':
+            candidate = self._candidate(fresh, 'id')
+            if self.state != 'running':
+                return
+            if candidate:
+                verdict, body, problem = _reply_envelope(candidate.get('content'), self._contract['correlation_id'])
+                if not problem:
+                    return self._advance(candidate['content'])
+                self._reply_problem = problem
+                if problem != 'incomplete':
+                    if self.step in self.optional:
+                        return self._skip_optional('交接封套無效：' + problem)
+                    return self._finish('paused', self.names[self.step] + ' 交接封套無效：' + problem)
+            elif fresh and any(parse_verdict(m.get('content')) and 'ACW_REPLY:' not in m.get('content', '') for m in fresh):
+                # Legacy replies remain visible but cannot drive automatic transitions.
+                self._reply_problem = '舊格式回覆缺少相關性／結尾標記，需人工審查'
         if now >= self._deadline:
             if self.step in self.optional:
-                return self._skip_optional('逾時')
-            self._finish('paused', f'{ROLE_NAMES[agent]} 逾時未完成')
+                return self._skip_optional('逾時或未提供完整相關交接')
+            detail = '：' + self._reply_problem if self._reply_problem else ''
+            self._finish('paused', f'{ROLE_NAMES[agent]} 逾時未完成相關交接' + detail)
 
     def _advance(self, reply):
-        self._waiting = None
-        verdict, body = _verdict_parts(reply)
+        if self.state != 'running' or not self._check_context():
+            return
+        verdict, body, problem = _reply_envelope(reply, self._contract['correlation_id'])
+        if problem:
+            return self._finish('paused', '交接封套無效：' + problem)
         routes = self.steps[self.step][1]
         if verdict not in routes:
             if self.step in self.optional:
                 return self._skip_optional('回覆沒有可用的判定')
             return self._finish('paused', f'{self.names[self.step]} 的回覆沒有可用的判定（收到：{verdict or "無"}）')
+        self._waiting = None
         target = routes[verdict]
         if target.startswith('='):
             return self._finish('done', target[1:])
@@ -268,7 +604,7 @@ class Orchestrator:
             return self._finish('paused', target[1:])
         if target in NEW_ROUND:
             if self.round >= self.max_rounds:
-                return self._finish('done', f'已達回合上限 {self.max_rounds}，最後判定：{verdict}')
+                return self._finish('paused', f'已達回合上限 {self.max_rounds}，尚未取得最終 APPROVED；最後判定：{verdict}')
             self.round += 1
         if target == 'local_review':
             self._carry = body

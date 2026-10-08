@@ -41,9 +41,3 @@ The remaining changed-suite failures from that earlier attempt were corrected an
 - The pre-existing automatic-verdict correlation gap in task-scoped shared-root polling remains unresolved; no unattended collaboration acceptance is implied
 
 All measurements use synthetic fixtures. No real messages, credentials, or auth files were loaded. Local deployment and native acceptance must be recorded separately after hash-guarded application.
-
-## Windows deployment status (2026-10-07)
-
-The candidate was applied locally with file checks and backups. The recorded Windows regression ran 401 tests: 395 passed, 4 skipped, and 2 errors from existing symlink fixtures lacking Windows privileges. This publication does not assert a full-suite pass.
-
-A controlled live launch displayed messages from the intended existing conversation, but ended with `NOT NULL constraint failed: messages.content`. The cause and fix remain pending. Native connection acceptance and live three-agent acceptance are not complete. Broader backend hardening and the newly requested removal of shared task defaults are not included in this snapshot.

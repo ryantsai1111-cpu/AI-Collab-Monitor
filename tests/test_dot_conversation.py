@@ -33,6 +33,31 @@ class RootConversationTests(unittest.TestCase):
         self.adapter.configure_target('selected','G8毛')
         self.core=WorkspaceCore(Path(self.temp.name)/'data',{'dot':self.adapter});self.addCleanup(self.core.close)
         self.guard=patch('subprocess.Popen',side_effect=AssertionError('Real transport forbidden'));self.guard.start();self.addCleanup(self.guard.stop)
+    def test_nullable_native_content_imports_without_fabricating_text(self):
+        forms=[{'text':None},None,{}, {'attachments':[{'type':'image'}]},'']
+        self.runner.items=[{'id':f'null-{i}','content':body} for i,body in enumerate(forms)]
+        self.assertEqual(self.connect(),len(forms))
+        rows=self.core.dot_conversation_messages()
+        self.assertEqual(len(rows),len(forms))
+        self.assertTrue(all(row['content']=='' for row in rows))
+        self.assertTrue(all(row['metadata']['content_kind']=='no_text' for row in rows))
+        self.adapter.authorize_manual_action('messages');self.core.read_dot_conversation()
+        self.assertEqual(len(self.core.dot_conversation_messages()),len(forms))
+        self.assertEqual(self.adapter.state,'Connected')
+    def test_unsupported_native_text_shape_rejects_before_partial_import(self):
+        self.runner.items=[{'id':'good','content':{'text':'valid'}},{'id':'bad','content':{'text':['not a string']}}]
+        with self.assertRaisesRegex(RuntimeError,'Unsupported native text shape'):
+            self.connect()
+        self.assertEqual(self.core.dot_conversation_messages(),[])
+    def test_null_after_31_text_messages_imports_complete_page(self):
+        self.runner.page(0,31);self.runner.items.append({'id':'last-null','content':{'text':None}})
+        self.assertEqual(self.connect(),32)
+        self.assertEqual(len(self.core.dot_conversation_messages()),32)
+        self.assertEqual(self.adapter.state,'Connected')
+    def test_native_nonempty_text_kept_exact(self):
+        value='  original\nVERDICT: PASS\n'
+        self.runner.items=[{'id':'literal','content':{'text':value}}]
+        self.connect();self.assertEqual(self.core.dot_conversation_messages()[0]['content'],value)
     def connect(self):
         self.adapter.authorize_manual_action('connect');return self.core.connect_dot_conversation()
     def task(self,name):
@@ -148,6 +173,14 @@ class RootConversationUITests(RootConversationTests):
     def setUpClass(cls):cls.app=QApplication.instance() or QApplication([])
     def window(self):
         w=MainWindow(self.core);self.addCleanup(w.close);return w
+    def test_null_native_message_has_truthful_display_only_placeholder(self):
+        self.runner.items=[{'id':'attachment-only','content':{'text':None}}]
+        self.connect();w=self.window();w.reload_context()
+        card=next(iter(w.panels['dot'].cards.values()))
+        self.assertIn('沒有文字內容',card.body.toPlainText())
+        self.assertIn('尚未支援',card.body.toPlainText())
+        self.assertEqual(card.message['content'],'')
+        self.assertEqual(self.core.dot_conversation_messages()[0]['content'],'')
     def test_dot_controls_and_fresh_root_display(self):
         w=self.window();p=w.panels['dot']
         for control in (p.session,p.session_search,p.new_button,p.resume_button,p.rename_button,p.model,p.effort,p.stop_button):
