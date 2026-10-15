@@ -160,6 +160,7 @@ class WorkspaceUiRefreshTests(unittest.TestCase):
         self.adapters = {agent: OfflineAdapter(agent) for agent in AGENTS}
         self.core = WorkspaceCore(self.root / "data", self.adapters)
         # No git process, real repo, HOME path, or installed data is used.
+        self.core.desktop_sessions = lambda agent: []
         self.core.git_snapshot = lambda *args, **kwargs: {
             "branch": "fixture-branch", "dirty": False, "ahead": 0, "behind": 0,
             "status": "", "diff": "", "log": "", "is_git": False, "error": ""}
@@ -331,10 +332,121 @@ class WorkspaceUiRefreshTests(unittest.TestCase):
         self.assertIn("協作 agent", role_text[2])
         self.assert_no_adapter_actions()
 
+    def test_agent_selectors_and_sidebar_follow_the_same_agent(self):
+        self.window.resize(1800, 1000)
+        self.window.layout_mode.setCurrentIndex(self.window.layout_mode.findData('Focus'))
+        self.settle()
+        self.assertTrue(self.window.agent_rail.isVisible())
+        self.assertFalse(self.window.role_tabs.isVisible())
+        self.window.agent_rail.open_role.emit('codex')
+        self.assertEqual('codex', self.window._preferred_agent)
+        self.assertEqual('codex', self.window.navigator.agent)
+        self.assertEqual(self.window.agents.index('codex'), self.window.session_tabs.currentIndex())
+        self.assertTrue(self.window.context_title.text().startswith('Codex'))
+        self.assertEqual('專案與對話…', self.window.panels['codex'].context_button.text())
+        self.assertIn(self.window.panels['codex'].state.text(), self.window.sidebar_agent_title.text())
+        self.window.layout_mode.setCurrentIndex(self.window.layout_mode.findData('Three panes'))
+        self.settle()
+        self.assertFalse(self.window.agent_rail.isVisible())
+        self.assertTrue(self.window.role_tabs.isVisible())
+        self.window.sidebar.hide()
+        self.window.resize(650, 900)
+        self.settle()
+        self.assertTrue(self.window.role_tabs.isVisible(), 'Narrow windows need a visible selector')
+        self.assertFalse(self.window.agent_rail.isVisible())
+        self.assert_no_adapter_actions()
+
+    def test_navigator_handles_unsupported_providers_and_additional_instances(self):
+        nav = self.window.navigator
+        self.window.focus_role('local')
+        self.assertIn('沒有本機歷史對話', nav.empty.text())
+        self.assertTrue(nav.empty.isVisible())
+        self.assertFalse(nav.tree.isVisible())
+        self.window.focus_role('claude')
+        self.assertTrue(nav.tree.isVisible())
+        self.assertFalse(nav.empty.isVisible())
+        extra = self.window.add_agent_instance('codex', 'Second Codex', project_id=self.project_b['id'])
+        self.assertEqual('codex', nav.agent)
+        self.assertEqual(extra, nav._agent)
+        self.assertTrue(nav.tree.isVisible())
+        nav.set_sessions('codex', [dict(id='fixture-native', agent='codex', cwd=self.project_b['repo_path'],
+            title='Second instance history', cwd_exists=True, archived=False, created=now(), last_activity=now())])
+        nav.tree.setCurrentItem(nav.tree.topLevelItem(0).child(0))
+        with patch.object(self.window, 'open_desktop_session') as opened:
+            nav.open_selected(False)
+        self.assertEqual(extra, opened.call_args.args[0]['agent'])
+        with patch.object(self.window, 'new_desktop_conversation') as created:
+            nav.new_conversation()
+        self.assertEqual(extra, created.call_args.args[1])
+
+    def test_navigator_discards_stale_provider_rows_during_async_load(self):
+        nav = self.window.navigator
+        nav.sessions['codex'] = None
+        pending = []
+        with patch.object(self.window, 'run', side_effect=lambda operation, callback, **kwargs: pending.append(callback)):
+            self.window.focus_role('codex')
+            self.assertEqual(0, nav.tree.topLevelItemCount())
+            self.window.focus_role('local')
+            pending[0]([])
+        self.assertFalse(nav.tree.isVisible())
+        self.assertEqual('', nav.status.text())
+        self.window.focus_role('claude')
+        self.assertTrue(nav.tree.isVisible())
+
+    def test_navigator_filters_exact_bound_directory_before_repository_grouping(self):
+        nav = self.window.navigator
+        def row(sid, project):
+            return dict(id=sid, agent='claude', cwd=project['repo_path'], title=sid,
+                        project_key='same-repository-origin', project='shared origin', cwd_exists=True,
+                        archived=False, created=now(), last_activity=now())
+        nav.set_sessions('claude', [row('alpha', self.project_a), row('beta', self.project_b)])
+        self.assertTrue(nav.nav_all_projects.isEnabled())
+        self.assertFalse(nav.nav_all_projects.isChecked())
+        self.assertEqual(1, nav.tree.topLevelItemCount())
+        self.assertEqual(1, nav.tree.topLevelItem(0).childCount())
+        self.assertEqual('alpha', nav.tree.topLevelItem(0).child(0).data(0, Qt.UserRole)['id'])
+        nav.nav_all_projects.setChecked(True)
+        self.assertEqual(2, nav.tree.topLevelItem(0).childCount())
+        rows = [row('alpha', self.project_a), row('beta', self.project_b)]
+        for item in rows:
+            item.pop('project_key')
+        nav.set_sessions('claude', rows)
+        self.assertEqual(2, nav.tree.topLevelItemCount())
+        nav.nav_all_projects.setChecked(False)
+        self.core.select_agent_project('claude', self.project_b['id'])
+        self.window.reload_context()
+        self.assertEqual('beta', nav.tree.topLevelItem(0).child(0).data(0, Qt.UserRole)['id'])
+
+    def test_visible_view_switch_returns_from_timeline_and_readonly_transcripts(self):
+        self.window.mode.setCurrentIndex(self.window.mode.findData('Timeline'))
+        QTest.mouseClick(self.window.workspace_views, Qt.LeftButton, pos=self.window.workspace_views.tabRect(0).center())
+        self.assertEqual('Workspace', self.window.mode.currentData())
+        self.window.mode.setCurrentIndex(self.window.mode.findData('Monitor'))
+        self.window.show_monitor_transcripts()
+        self.assertEqual(0, self.window.stack.currentIndex())
+        QTest.mouseClick(self.window.workspace_views, Qt.LeftButton, pos=self.window.workspace_views.tabRect(1).center())
+        self.assertIs(self.window.stack.currentWidget(), self.window.monitor_dashboard)
+        self.assertEqual('Monitor', self.window.mode.currentData())
+
+    def test_records_dialog_keeps_global_navigation_and_agent_binding_separate(self):
+        bindings = {agent: self.core.agent_project(agent) for agent in self.window.agents}
+        self.window.show_records()
+        self.settle()
+        self.assertTrue(self.window.records_dialog.isVisible())
+        self.assertTrue(self.window.project_combo.isVisible())
+        self.assertTrue(self.window.task_combo.isVisible())
+        self.assertTrue(self.window.records_dialog.isAncestorOf(self.window.project_combo))
+        self.assertTrue(self.window.records_dialog.isAncestorOf(self.window.task_combo))
+        self.window.project_combo.setCurrentIndex(self.window.project_combo.findData(self.project_b['id']))
+        self.assertEqual(self.project_b['id'], self.core.current_project_id)
+        self.assertEqual(bindings, {agent: self.core.agent_project(agent) for agent in self.window.agents})
+        self.window.records_dialog.close()
+        self.assertTrue(self.window.context_title.text().startswith('Claude'))
+
     def test_sidebar_contains_project_task_and_every_session_control(self):
         sidebar = self.window.sidebar
-        self.assertTrue(sidebar.isAncestorOf(self.window.project_combo))
-        self.assertTrue(sidebar.isAncestorOf(self.window.task_combo))
+        self.assertTrue(self.window.records_dialog.isAncestorOf(self.window.project_combo))
+        self.assertTrue(self.window.records_dialog.isAncestorOf(self.window.task_combo))
         for agent, panel in self.window.panels.items():
             self.assertTrue(sidebar.isAncestorOf(panel.session_controls), agent)
             for control in (panel.session, panel.session_search, panel.session_details,

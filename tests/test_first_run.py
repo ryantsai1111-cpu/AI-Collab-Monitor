@@ -27,6 +27,7 @@ class FirstRunGuidanceTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="acw-first-run-")
         self.adapters = {agent: OfflineAdapter(agent) for agent in AGENTS}
         self.core = WorkspaceCore(Path(self.temp.name) / "data", self.adapters)
+        self.core.desktop_sessions = lambda agent: []
         self.window = OfflineWindow(self.core)
         self.window.show()
         self.app.processEvents()

@@ -1,4 +1,5 @@
 """Render the real Qt workbench using synthetic, disconnected test data."""
+import argparse
 import os
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 from pathlib import Path
@@ -9,6 +10,10 @@ from acw.store import now
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--stage', choices=('task-a', 'task-b'))
+    parser.add_argument('--output', type=Path)
+    args = parser.parse_args()
     app = QApplication.instance() or QApplication([])
     app.setStyle('Fusion')
     for name in ('segoeui.ttf', 'segoeuib.ttf', 'seguisym.ttf', 'msjh.ttc', 'msjhbd.ttc', 'consola.ttf', 'consolab.ttf'):
@@ -42,7 +47,7 @@ def main():
         window.panels['claude'].input.setPlainText('先幫我整理待辦，確定範圍後再開始協作。')
         window.refresh_monitor()
         window.show()
-        output = Path('evidence/monitor')
+        output = args.output or Path('evidence/ui-redesign' if args.stage else 'evidence/monitor')
         output.mkdir(parents=True, exist_ok=True)
         for name, width, height, mode, sidebar in (
                 ('workbench-focus', 1500, 1000, 'Focus', True),
@@ -54,7 +59,17 @@ def main():
             for _ in range(10):
                 app.processEvents()
                 window.update_workspace_layout()
-            path = output / (name + '.png')
+            suffix = 'focus' if mode == 'Focus' and sidebar else 'panes' if mode == 'Three panes' else 'narrow'
+            path = output / ((args.stage + '-' + suffix if args.stage else name) + '.png')
+            window.grab().save(str(path))
+            print(path.resolve())
+        if args.stage == 'task-b':
+            window.sidebar.show()
+            window.resize(1500, 1000)
+            window.mode.setCurrentIndex(window.mode.findData('Monitor'))
+            for _ in range(10):
+                app.processEvents()
+            path = output / 'task-b-monitor.png'
             window.grab().save(str(path))
             print(path.resolve())
     finally:

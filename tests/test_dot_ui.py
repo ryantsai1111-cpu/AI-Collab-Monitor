@@ -21,7 +21,9 @@ class DotOfflineUITests(unittest.TestCase):
         self.core=WorkspaceCore(self.root/'data',{'dot':self.adapter});self.core.set_setting('legacy.root',str(self.root/'absent'))
         repo=self.root/'repo';repo.mkdir();project=self.core.create_project('OFFLINE DOT UI — FIXTURE ONLY',repo)
         self.core.select_project(project['id']);self.core.create_task('OFFLINE TEST — NO LIVE BACKEND')
-        self.window=MainWindow(self.core);self.window.resize(1500,1000);self.window.show();self.panel=self.window.panels['dot'];QTest.qWait(40)
+        self.core.desktop_sessions=lambda agent: []
+        self.core.git_snapshot=lambda *args, **kwargs: dict(branch='', dirty=False, ahead=0, behind=0, status='', diff='', log='', is_git=False, error='')
+        self.window=MainWindow(self.core);self.window.navigator.set_sessions('claude', []);self.window.resize(1500,1000);self.window.show();self.panel=self.window.panels['dot'];QTest.qWait(40)
     def wait(self):
         until=time.monotonic()+10
         while self.window.workers and time.monotonic()<until:
@@ -29,7 +31,13 @@ class DotOfflineUITests(unittest.TestCase):
             # Explicitly release the GIL so Python-backed Qt workers can progress.
             time.sleep(.001)
         self.assertFalse(self.window.workers);self.window.poll_events();QTest.qWait(20)
+        # Polling can enqueue a periodic read; drain it before closing the fixture.
+        while self.window.workers and time.monotonic()<until:
+            QTest.qWait(20)
+            time.sleep(.001)
+        self.assertFalse(self.window.workers)
     def tearDown(self):
+        self.window.timer.stop();self.window.sync_timer.stop()
         self.wait();self.window.grab().save(str(OUT/(self._testMethodName+'.png')))
         self.panel.set_state('Disconnected');self.window.close();self.window.deleteLater();QTest.qWait(20)
         if not self.core._closed:self.core.close()
@@ -119,11 +127,13 @@ class DotOfflineUITests(unittest.TestCase):
         metadata=next(x for x in self.core.events(agent='dot') if x['type']=='dot_target_metadata')['payload']
         self.assertEqual(metadata['dot_id'],native_id);self.assertEqual(metadata['dot_id_type'],'str')
         self.assertNotEqual(native_id,fixture['cli_list'][0].get('messaging_room_id'))
+        self.window.timer.stop();self.window.sync_timer.stop();self.wait()
         self.window.close();self.window.deleteLater();QTest.qWait(30)
         if not self.core._closed:self.core.close()
         self.adapter=DotAdapter(lambda *a,**k:None,runner=offline_cli,**saved)
-        self.core=WorkspaceCore(self.root/'data',{'dot':self.adapter});self.window=MainWindow(self.core)
-        self.window.resize(1500,1000);self.window.show();self.panel=self.window.panels['dot'];QTest.qWait(30)
+        self.core=WorkspaceCore(self.root/'data',{'dot':self.adapter});self.core.desktop_sessions=lambda agent: []
+        self.window=MainWindow(self.core)
+        self.window.navigator.set_sessions('claude', []);self.window.resize(1500,1000);self.window.show();self.panel=self.window.panels['dot'];QTest.qWait(30)
         self.assertEqual(self.adapter.target,native_id);self.assertTrue(self.panel.connect_button.isEnabled())
         self.assertEqual(self.adapter.state,'Disconnected');self.assertEqual(self.adapter.session_id,'')
         self.assertFalse(self.core.current_task.get('dot_session'));self.assertEqual(len(calls),1)

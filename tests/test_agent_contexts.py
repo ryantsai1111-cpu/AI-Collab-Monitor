@@ -187,7 +187,8 @@ class AgentContextTests(unittest.TestCase):
         self.assertEqual(self.tasks['codex']['id'], self.core.agent_task('codex')['id'])
         for agent in ('claude', 'dot', 'local'):
             self.assertEqual(self.tasks['claude']['id'], self.core.agent_task(agent)['id'])
-        self.assertIn('codex project', panel.context_button.text())
+        self.assertEqual('專案與對話…', panel.context_button.text())
+        self.assertIn('codex project', panel.context_button.toolTip())
         self.assertEqual([], window.reported_errors)
 
     def test_role_switch_preserves_other_drafts_and_restores_its_own_draft(self):

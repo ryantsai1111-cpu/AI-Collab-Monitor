@@ -204,19 +204,21 @@ class CoreAndUiTests(DesktopSessionFixture):
             window.timer.stop()
             window.close()
 
-    def test_sidebar_page_choice_persists_and_marks_the_open_conversation(self):
+    def test_sidebar_follows_agent_and_marks_the_open_conversation(self):
         window = OfflineWindow(self.core)
         try:
-            self.assertEqual(1, window.sidebar_pages.currentIndex())
+            self.assertEqual('claude', window.navigator.agent)
+            self.assertTrue(window.sidebar.isAncestorOf(window.navigator))
             window.show_desktop_sessions("claude")
-            self.assertEqual("nav", self.core.get_setting("ui.sidebar_page"))
+            self.assertEqual(window.agents.index('claude'), window.session_tabs.currentIndex())
             self.assertEqual([SESSION, OTHER], [s["id"] for s in window.navigator.sessions["claude"]])
             window.open_desktop_session(self.record, resume=False)
             current = window.navigator.tree.currentItem()
             self.assertEqual(SESSION, current.data(0, Qt.UserRole)["id"])
             self.assertTrue(current.font(0).bold())
             window.show_sessions("claude")
-            self.assertEqual(1, window.sidebar_pages.currentIndex())
+            self.assertEqual('claude', window.navigator.agent)
+            self.assertTrue(window.sidebar.isAncestorOf(window.navigator))
             self.assertEqual([], window.reported_errors)
         finally:
             window.timer.stop()

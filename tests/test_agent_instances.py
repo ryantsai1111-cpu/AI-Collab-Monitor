@@ -175,6 +175,7 @@ class AgentInstanceTests(unittest.TestCase):
             Orchestrator(self.core, 'task', lambda *_: None, lead=a, implementer=a)
 
     def test_add_panel_preserves_drafts_and_monitor_navigation(self):
+        self.core.desktop_sessions = lambda agent: []
         self.window = OfflineWindow(self.core)
         self.window.panels['claude'].input.setPlainText('Unsent original draft')
         a = self.window.add_agent_instance('claude', 'Claude reviewer', project_id=self.project['id'])
@@ -189,6 +190,7 @@ class AgentInstanceTests(unittest.TestCase):
         self.assertEqual('Workspace', self.window.mode.currentData())
 
     def test_local_settings_editors_are_independent(self):
+        self.core.desktop_sessions = lambda agent: []
         self.window = OfflineWindow(self.core)
         a = self.window.add_agent_instance('local', 'Local A')
         b = self.window.add_agent_instance('local', 'Local B')

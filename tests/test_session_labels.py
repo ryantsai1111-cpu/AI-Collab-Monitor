@@ -40,7 +40,9 @@ class HumanSessionLabels(unittest.TestCase):
                 self.core.store.insert('sessions', row); self.saved.append(row)
                 self.core.store.insert('messages',dict(id=f'm-{agent}-{i}',task_id=self.task['id'],agent=agent,
                     session_id=sid,role='user',content='檢查訂單搜尋，不修改程式',timestamp='2026-10-01T00:00:00Z'))
-        self.window=MainWindow(self.core);self.window.resize(1750,1100);self.window.show();QTest.qWait(40)
+        self.core.desktop_sessions=lambda agent: []
+        self.core.git_snapshot=lambda *args, **kwargs: dict(branch='', dirty=False, ahead=0, behind=0, status='', diff='', log='', is_git=False, error='')
+        self.window=MainWindow(self.core);self.window.navigator.set_sessions('claude', []);self.window.resize(1750,1100);self.window.show();QTest.qWait(40)
 
     def wait(self):
         until=time.monotonic()+5
@@ -49,8 +51,14 @@ class HumanSessionLabels(unittest.TestCase):
             # Explicitly release the GIL so Python-backed Qt workers can progress.
             time.sleep(.001)
         self.assertFalse(self.window.workers);self.window.poll_events();QTest.qWait(20)
+        # Polling can enqueue a periodic read; drain it before closing the fixture.
+        while self.window.workers and time.monotonic()<until:
+            QTest.qWait(20)
+            time.sleep(.001)
+        self.assertFalse(self.window.workers)
 
     def tearDown(self):
+        self.window.timer.stop();self.window.sync_timer.stop()
         self.wait(); self.window.grab().save(str(OUT/(self._testMethodName+'.png')))
         self.window.close();self.window.deleteLater();QTest.qWait(20)
         if not self.core._closed:self.core.close()
@@ -154,10 +162,13 @@ class HumanSessionLabels(unittest.TestCase):
                 'directory':self.projects[0]['repo_path'],'updatedAt':1791158400000,'source':'Official existing metadata'}
         row=self.core.import_session('claude',record)
         self.assertEqual(row['title'],record['firstPrompt']);self.assertEqual(row['cwd'],record['directory'])
+        self.window.timer.stop();self.window.sync_timer.stop();self.wait()
         self.window.close();self.window.deleteLater();QTest.qWait(20)
         if not self.core._closed:self.core.close()
         self.core=WorkspaceCore(self.root/'data',self.adapters)
-        self.window=MainWindow(self.core);self.window.resize(1750,1100);self.window.show();QTest.qWait(20)
+        self.core.desktop_sessions=lambda agent: []
+        self.core.git_snapshot=lambda *args, **kwargs: dict(branch='', dirty=False, ahead=0, behind=0, status='', diff='', log='', is_git=False, error='')
+        self.window=MainWindow(self.core);self.window.navigator.set_sessions('claude', []);self.window.resize(1750,1100);self.window.show();QTest.qWait(20)
         panel=self.window.panels['claude'];index=panel.session.findData('native-imported')
         self.assertGreater(index,0);self.assertIn('真正索引提供的標題',panel.session.itemText(index))
         self.assertEqual(panel.session.itemData(index),'native-imported')
