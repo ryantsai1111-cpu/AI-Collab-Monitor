@@ -32,3 +32,6 @@ config/local-llm.json
 
 # AI-Collab-Monitor runtime session state (leases, stop signals)
 AI-Collab-Monitor/.monitor/
+
+# AI-Collab-Monitor runtime logs are written by live agent runs; never commit them
+AI-Collab-Monitor/logs/*.log
