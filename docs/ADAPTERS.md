@@ -1,5 +1,17 @@
 # Adapter contract and verified boundaries
 
+Current overview updated 2026-10-09. Version numbers and live PASS reports below describe historical runs, not the currently installed CLI or a new acceptance result. Some old `evidence/` artifacts are not distributed with this checkout. Current offline results are in [tests/README](../tests/README.md).
+
+## Instance routing and Local LLM
+
+Each Agent instance owns an adapter; provider type is not its routing ID. Additional Claude/Codex/Local instances use separate settings, sessions, events and approvals. They start disconnected. See [AGENT-CONTEXTS](AGENT-CONTEXTS.md).
+
+Since 2026-10-11, `make_local_adapter` constructs `HermesAdapter`. The Local provider key and existing history remain; old Claude/Codex Local sessions cannot resume through Hermes. Legacy harness classes remain available for historical diagnostics/tests but are no longer selectable in the app. See [HERMES](HERMES.md).
+
+Explicit Connect and Settings probe run `hermes chat --help` only. Each send uses a UTF-8 query file, JSONL events, explicit cwd and bounded turns/time; resume uses the saved exact native ID behind a stable Workspace alias. Success requires both a successful result event and process exit 0. Tool approvals and credentials remain Hermes-owned; there is no Workspace approval bridge. Stops target only the invocation's owned process tree. No Hermes config is written.
+
+## Common interface
+
 All adapters expose `connect`, `disconnect`, `list_models`, `list_efforts`, `list_sessions`, `create_session`, `resume_session`, `send_message`, `stop`, `set_project`, `stream_events`, and `get_history`. The base contract is in `acw/adapters/base.py`. Core receives typed callbacks and owns persistence. Connected is emitted only after a successful backend protocol handshake.
 
 Capabilities include model selection, effort, sessions, files, tools, project, cancel, streaming, history and approvals. Menus consume backend discovery. No model catalog is hardcoded; lack of a supported catalog is rendered as Default backend model or Managed by ChatGPT / dot.
@@ -10,7 +22,7 @@ App-server JSON stderr diagnostics are parsed before recursive secret/hidden-rea
 
 ## Codex
 
-Uses the existing official Codex 0.160.0 `app-server` over stdio. Generated schemas are retained in `evidence/codex-schema`. The adapter initializes, lists models/efforts, starts/resumes/reads/lists threads, streams turn events, and cancels with `turn/interrupt`. It never uses process-tree killing, `thread/shellCommand`, unrestricted `process/*`, or dangerous bypass flags.
+Uses official Codex `app-server` over stdio (historical acceptance used 0.160.0). Historical generated schemas under `evidence/codex-schema` are absent from this checkout, which limits the schema-fixture test. The adapter initializes, lists models/efforts, starts/resumes/reads/lists threads, streams turn events, and cancels with `turn/interrupt`. It never uses process-tree killing, `thread/shellCommand`, unrestricted `process/*`, or dangerous bypass flags.
 
 `commandExecution.aggregatedOutput` is a **combined stdout/stderr stream**. The adapter preserves that distinction instead of inventing separate stderr. Exit codes, command status and diffs are independently rendered. Backend-specific approval requests require an explicit user response. See the live evidence for which methods passed on this machine.
 

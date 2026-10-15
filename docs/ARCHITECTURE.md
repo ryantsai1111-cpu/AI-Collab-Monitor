@@ -1,43 +1,58 @@
 # Architecture
 
-## Decision
+Current checkout overview, updated 2026-10-09. Python 3.12 + PySide6 6.11.2; the source entry is `run.py`. Earlier compiled-launcher reports are historical.
 
-PySide6 6.11.2 + Python 3.12.14 is the PRD-permitted desktop alternative. RYAN-PC has an existing Python runtime. Rust/cargo and a verified Tauri Windows build toolchain were absent during inventory. No system installation was performed. A future Tauri migration can reuse the adapter contract, SQLite schema, event semantics and acceptance suite; this delivery does not claim to be Tauri.
+## Components
 
+```text
+run.py
+  -> MainWindow: live Monitor workbench, independent AgentPanel + local AgentRail
+     -> MonitorDashboard: separate read-only collaboration overview
+     -> WorkspaceCore: instance routing, context, sessions, approvals, persistence
+        -> ClaudeAdapter: official CLI streaming/control protocol
+        -> CodexAdapter: official app-server JSON-RPC over stdio
+        -> HermesAdapter (local provider): bounded one-shot CLI, JSONL events
+        -> DotAdapter: pinned unofficial transport, scoped consent
+     -> AutoCollab: selected lead/implementer, correlation, budgets and holds
+     -> Store: SQLite WAL, sanitized raw JSONL and scoped artifacts
 ```
-PySide6 MainWindow (three panels, worker threads)
-  -> WorkspaceCore (task/session/project/handoff/permissions)
-     -> ClaudeAdapter -> official stream-json/control protocol
-     -> CodexAdapter  -> official app-server JSON-RPC stdio
-     -> DotAdapter    -> explicit blocked capability boundary
-  -> Store -> SQLite WAL + sanitized raw JSONL + scoped artifacts
-```
 
-The UI never builds a shell command to invoke an agent. Core calls adapters, adapters own their processes and protocol IDs. Blocking work stays off the Qt UI thread. Background events enter a queue, with bounded UI polling. Streaming assistant output and structured tool/command/file events remain distinct.
+Blocking UI work runs in workers. Typed adapter events enter a queue for bounded Qt polling. Adapters own protocol IDs and backend processes; tool completion and assistant completion remain separate.
 
-## Data and recovery
+## Providers and instances
 
-Each agent can select its own project/task and map its own native session. Role selections are persisted in existing settings rows, without a schema change. Shared workspace navigation provides the initial default; explicit role selections remain independent. See [Independent agent projects and sessions](AGENT-CONTEXTS.md) for UI behavior, routing, collaboration checks and provider limits.
+`acw/agents.py` distinguishes provider type from instance identity. The original four IDs remain compatible; additional Claude, Codex and Local instances receive stable IDs and independent adapters. Settings and project/task selections use instance-specific keys. Creation and application restart do not connect, read credentials or send prompts.
 
-SQLite tables: projects, tasks, sessions, messages, events, handoffs, artifacts, settings. A task maps its three native backend session IDs. Session names are Workspace-local labels where backend rename is unsupported. Backend-native session imports must be explicitly requested; existing work sessions are not silently resumed.
+Original task session columns remain supported; extra instance mappings use existing `tasks.metadata.agent_sessions`. This instance feature adds no schema migration. Earlier Local LLM support already has its own additive migration.
 
-Raw JSONL preserves safe backend fields. Hidden reasoning, credentials and potentially fragmented sensitive payloads are omitted/redacted; records identify this exception to byte-for-byte fidelity. Message source and handoff payload are separate immutable facts; annotations do not overwrite source content.
+Core rejects overlapping session control inside this process by backend family and concurrent resume reservations. Hermes uses a stable Workspace alias and stores its changing native session ID in existing session metadata. It cannot detect an external Desktop or Hermes CLI sending to the same session. Working directories are not automatically separate worktrees. See [AGENT-CONTEXTS](AGENT-CONTEXTS.md) and [HERMES](HERMES.md).
 
-SQLite WAL transactions survive abnormal close. On restart, stale busy/interrupted work is recovered to local history without sending a prompt. Reconnection is explicit. Offline local history remains usable.
+## Collaboration and approvals
 
-## Boundaries
+An explicit run selects lead and implementer instance IDs, which may share a provider. There is one active run, one lead/implementer pair, and optional existing Local/Dot review roles. Correlation envelopes, frozen bindings, round/step/time limits and uncertain-delivery handling prevent unrelated replies from advancing the run. Only the selected lead's validated approval completes it.
 
-Automatic orchestration is OFF. There is no approval decision engine, automatic handoff, deployment, commit, push or merge. Git reads use argument lists and disable optional locks. Legacy Monitor reads only the four explicitly named logs incrementally; no writes, resets or session control.
+Each participant retains its own project/task/session; dispatch contracts and response reads address that Agent's frozen container. The lead container stores run audit events. Record navigation and nonparticipating Agents remain usable. The workbench remains open after start, with the overview available separately; closing first stops orchestration before requesting backend cancellation.
 
-The app is installed per user. The desktop contains a shortcut. Existing Python is an explicit runtime dependency; the compiled Windows launcher is not a bundled standalone Python interpreter.
+Claude/Codex approval policy defaults to asking; user-selected modes and connection-local rules may approve eligible requests. Remaining approval requests pause collaboration. Hermes instead uses its native one-shot approval settings and exposes no Workspace permission bridge. The orchestrator never changes these policies. See [SECURITY](SECURITY.md), [HERMES](HERMES.md) and [DESIGN-auto-collab](DESIGN-auto-collab.md).
 
-## Official native Claude session helper
+## Storage and recovery
 
-The Python adapter invokes a small read-only Node bridge under `tools/claude-session-sdk`. It uses pinned official `@anthropic-ai/claude-agent-sdk@0.3.289` public session metadata/history functions, with an explicit current project `dir`, worktree expansion disabled, bounded pages and transcript size. Discovery and history are explicit user actions; importing metadata never resumes a backend or rewrites the current task mapping. Inference continues through the existing installed Claude Code CLI and its unchanged permission policy. Node is discovered from configuration/PATH or alongside the existing Python runtime; no global installation is required.
+SQLite stores projects, tasks, sessions, messages, events, handoffs, artifacts and settings. On MainWindow construction, legacy shared selections are snapshotted once into each Agent's settings without contacting adapters. Agent navigation thereafter remains independent of the separate Record page. New conversations create distinct task containers; opening a saved conversation restores its original container. No schema migration is added. View state and unsent drafts are in memory only.
 
-The source archive contains the helper, package manifest and lockfile, not installed third-party dependencies. The per-user installer stages existing dependencies without network installation. Native helper validation used only the task's isolated Claude project.
+Restart marks interrupted streaming and uncertain deliveries locally without replaying prompts or resuming collaboration. Connections and backend resume are explicit. Raw JSONL, diagnostics and exports filter credentials and hidden reasoning; raw records are not byte-for-byte backend transcripts.
 
+Default data is under `%LOCALAPPDATA%/AI-Collaboration-Workspace/data`; `--data-dir` supplies an isolated alternative. A Qt lock prevents two windows opening the same dataset.
 
-## Current approved Dot integration update
+## Native history and runtime tools
 
-The earlier official-bridge blocker remains historical context. An explicitly approved, pinned unofficial Dot adapter and manual UI are now implemented and offline-tested. See [Dot activation and boundaries](DOT-UNOFFICIAL.md). Only the human may trigger live credential-bearing list/connect/read/send. No live Dot PASS or Final acceptance is claimed. EXE work remains deferred.
+`acw/desktop_sessions.py` reads selected local Claude Code/Codex history for navigation and periodic synchronization. It does not implement general Claude Chat or complete Desktop synchronization. Workspace rename/archive metadata remains local.
+
+Claude can also use `tools/claude-session-sdk/session-helper.mjs`, pinned by its package manifest, for explicit project-scoped official discovery/history. Metadata preview is separate from Desktop transcript import and inference.
+
+Dot invokes `scripts/dot_cli_entry.py`, which verifies `tools/chatgpt-dot-cli-pinned/`. These are runtime dependencies, not cleanup candidates. `vendor/` supplies Qt; installed SDK `node_modules/` must also be retained.
+
+`AI-Collab-Monitor/` is the earlier standalone log viewer. Workspace only reads configured legacy logs; it does not execute viewer scripts. Historical launchers and acceptance scripts are described in [scripts/README](../scripts/README.md).
+
+## Remaining work
+
+The Monitor workbench reuses the same AgentPanel instances across focused and parallel layouts; it does not duplicate composers or adapters. AgentRail projects a local snapshot each second and only emits navigation/add-dialog actions. The separate overview and legacy transcript modes retain their read-only controls. General Claude Chat, full bidirectional Desktop synchronization, natural-language run initiation, multiple parallel implementers, automatic team creation, Agent removal and worktree management remain unimplemented. Offline results in [tests/README](../tests/README.md) do not establish live backend acceptance.

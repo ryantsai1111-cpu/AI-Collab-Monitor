@@ -1,15 +1,16 @@
 param(
     [Parameter(Mandatory=$true)][ValidatePattern('^[a-f0-9]{32}$')][string]$SessionId,
-    [Parameter(Mandatory=$true)][ValidateSet('claude','dot','codex','timeline')][string]$Actor
+    [Parameter(Mandatory=$true)][ValidateSet('claude','dot','codex','hermes','timeline')][string]$Actor
 )
 . (Join-Path $PSScriptRoot 'common.ps1')
 $titles = @{
     claude = 'CLAUDE - PRIMARY REVIEWER'
     dot = 'DOT - SECONDARY REVIEW / RELAY'
     codex = 'CODEX - IMPLEMENTER'
+    hermes = 'HERMES - IMPLEMENTER'
     timeline = 'COLLABORATION TIMELINE'
 }
-$colors = @{ claude = 'Cyan'; dot = 'Yellow'; codex = 'Green'; timeline = 'Magenta' }
+$colors = @{ claude = 'Cyan'; dot = 'Yellow'; codex = 'Green'; hermes = 'White'; timeline = 'Magenta' }
 $sessionPath = Assert-MonitorPath (Join-Path (Join-Path $script:MonitorState 'sessions') $SessionId)
 $logPath = Assert-MonitorPath (Join-Path (Join-Path $script:MonitorRoot 'logs') ($Actor + '.log'))
 $stopPath = Join-Path $sessionPath 'stop.signal'

@@ -1,7 +1,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $script:MonitorRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
-$script:MonitorActors = @('claude', 'dot', 'codex', 'timeline')
+$script:MonitorActors = @('claude', 'dot', 'codex', 'hermes', 'timeline')
 $script:MonitorState = Join-Path $script:MonitorRoot '.monitor'
 
 function Assert-MonitorPath([string]$Path) {

@@ -1,6 +1,6 @@
 # Security
 
-The user-authorized scope is a new desktop application and isolated test projects. Existing production sessions and the original Monitor are preserved. Workspace never reads, copies, logs or exports authentication files. The user completed official Claude login separately; the successful later live tests use that existing official CLI state. Workspace does not invoke login, extract credentials or store an API key. Private dot endpoints, unapproved third-party bridges, system installation and security-setting changes remain outside its operation.
+Updated 2026-10-11 for the current source checkout. Claude/Codex/Hermes authentication remains backend-owned; Workspace does not collect their authentication files or initiate login. The Local role now calls Hermes with its existing provider configuration; legacy endpoint/key settings are not used. The pinned unofficial Dot transport has a separate credential-bearing consent boundary; see [DOT-UNOFFICIAL](DOT-UNOFFICIAL.md). Historical live-test reports do not authorize new calls.
 
 ## Persistence boundary
 
@@ -26,7 +26,7 @@ Claude native discovery uses the public official SDK only after an explicit acti
 
 **View native history** is an explicit, read-only preview gated by actual helper capability; it does not persist transcript messages or remap a Task. Importing a session adds sanitized local metadata without resuming it or changing task ownership. Backend native-reader acceptance passed separately; the newly authored GUI controls still await a visible rerun.
 
-Agent permissions remain backend-owned. The Workspace has no auto-approve path. Approval dialogs display actual requested operation and require a user decision. Stop calls the backend cancellation protocol; global stop requires confirmation. No process-tree termination or sandbox bypass is used.
+Backend permissions remain backend-owned. Claude/Codex Workspace requests default to asking; `acw/approvals.py` also supports user-selected edits/all modes and connection-local allow rules. The classifier is not a general shell sandbox. Hermes one-shot does not expose an interactive approval bridge: its existing settings may approve tools automatically, so Workspace approval controls are unavailable for Hermes. The adapter never passes yolo/hook-acceptance flags or writes Hermes config. Hermes Stop terminates only the owned invocation's process tree; Claude/Codex retain protocol cancellation. The orchestrator does not grant pending requests or change policies. See [HERMES](HERMES.md).
 
 ## Local storage and retention
 
@@ -35,4 +35,4 @@ Data uses SQLite WAL and raw JSONL under the per-user application data directory
 
 ## Current approved Dot integration update
 
-The earlier official-bridge blocker remains historical context. An explicitly approved, pinned unofficial Dot adapter and manual UI are now implemented and offline-tested. See [Dot activation and boundaries](DOT-UNOFFICIAL.md). Only the human may trigger live credential-bearing list/connect/read/send. No live Dot PASS or Final acceptance is claimed. EXE work remains deferred.
+The earlier official-bridge blocker remains historical context. The pinned unofficial Dot adapter supports consented manual operations and bounded send/read grants for an explicitly started collaboration run. See [Dot activation and boundaries](DOT-UNOFFICIAL.md) and [collaboration rules](DESIGN-auto-collab.md). Starting the app grants neither. Current offline tests do not establish live Dot or EXE acceptance.

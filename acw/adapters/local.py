@@ -1,4 +1,4 @@
-"""Session-only local providers using the existing official CLI harnesses."""
+"""Local-role factory plus retained legacy harness classes for old diagnostics."""
 from __future__ import annotations
 
 import json
@@ -8,12 +8,20 @@ import platform
 import re
 import shutil
 from urllib.parse import urlsplit
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, HTTPRedirectHandler, build_opener
 
 from .claude import ClaudeAdapter
 from .codex import CodexAdapter
 
 
 CONFIGURATION_REQUIRED = '請先在設定填入本地端點與模型名稱'
+
+
+class _NoEndpointRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # Never forward a configured credential to a redirected destination.
+        return None
 
 
 class _LocalSettings:
@@ -23,6 +31,7 @@ class _LocalSettings:
     def __init__(self, emit, executable='', **settings):
         super().__init__(emit, executable, **settings)
         self._credential_values = []
+        self._endpoint_check = None
         self._configured_models()
         self.capabilities.detail = CONFIGURATION_REQUIRED if not self.configured else self._provider_detail()
 
@@ -128,13 +137,20 @@ class _LocalSettings:
         return super()._event(kind, **self._local_event_payload(kind, payload))
 
     def _error(self, error):
-        return super()._error(self._redact_local(str(error)))
+        return super()._error(self._local_error_text(error))
+
+    def _local_error_text(self, error):
+        safe = self._redact_local(str(error))
+        if 'No conversation found with session ID:' in safe and not safe.startswith('Local LLM 的 Claude 原生對話'):
+            return ('Local LLM 的 Claude 原生對話不存在，或不在目前 Project。'
+                    '請開啟正確的舊對話，或重新連線後按「新增」建立新對話；Workspace 歷史仍保留。\n' + safe)
+        return safe
 
     def _request(self, *args, **kwargs):
         try:
             return super()._request(*args, **kwargs)
         except Exception as exc:
-            safe = self._redact_local(str(exc))
+            safe = self._local_error_text(exc)
             if safe != str(exc):
                 raise RuntimeError(safe) from None
             raise
@@ -161,6 +177,65 @@ class _LocalSettings:
         self._credential_values = [credential] if credential else []
         return base_url.rstrip('/'), env_name, credential
 
+    def check_endpoint(self):
+        """Explicit, bounded metadata GET; no inference or native session action."""
+        self._endpoint_check = None
+        base_url, _, credential = self._validate()
+        url = base_url + ('/models' if base_url.endswith('/v1') else '/v1/models')
+        headers = {'Accept': 'application/json'}
+        if credential:
+            headers['Authorization'] = 'Bearer ' + credential
+        try:
+            timeout = max(1, min(float(self.settings.get('timeout', 8)), 8))
+        except (ValueError, TypeError):
+            timeout = 8
+        try:
+            with build_opener(_NoEndpointRedirect()).open(Request(url, headers=headers), timeout=timeout) as response:
+                body = response.read(65537)
+                if len(body) > 65536:
+                    raise ValueError('Local LLM 模型清單超過大小限制')
+                try:
+                    data = json.loads(body)
+                except (ValueError, UnicodeError):
+                    raise ValueError('Local LLM 模型端點未回傳 JSON，請確認 Base URL 與 port') from None
+                if not isinstance(data, dict) or not isinstance(data.get('data'), list):
+                    raise ValueError('Local LLM 模型端點格式不符，請確認 Base URL 與 port')
+                models = [item['id'] for item in data['data']
+                          if isinstance(item, dict) and isinstance(item.get('id'), str)]
+                if models and self.model_name not in models:
+                    raise ValueError('Local LLM 找不到設定的模型；請依端點列出的 model ID 更新模型名稱：'
+                                     + self._redact_local(', '.join(models))[:1000])
+                result = {'http_status': response.status, 'models': self._redact_local(models),
+                          'detail': '模型端點可連通；尚未驗證推論、工具或 harness API 相容性'}
+        except HTTPError as exc:
+            code = exc.code
+            host_rejected = False
+            if code == 403:
+                try:
+                    error = json.loads(exc.read(4096)).get('error')
+                    host_rejected = (isinstance(error, dict) and error.get('type') == 'forbidden'
+                                     and 'DNS rebinding protection' in str(error.get('message', '')))
+                except (ValueError, TypeError, AttributeError, OSError):
+                    pass
+            exc.close()
+            if code in (404, 405):
+                # Messages-only providers may have no model catalog.
+                result = {'http_status': code, 'models': [],
+                          'detail': '伺服器有回應，但未提供模型清單；尚未驗證模型與推論 API'}
+            else:
+                hint = ('STRATA 拒絕此 Host（DNS rebinding protection）；請在服務端 allowed_hosts 或 '
+                        'STRATA_ALLOWED_HOSTS 加入 endpoint 的 hostname' if host_rejected
+                        else '請檢查 API key 環境變數與伺服器認證' if code in (401, 403)
+                        else '請確認模型服務與反向代理正在運作，且 Base URL／port 正確' if code >= 500
+                        else '請確認 Base URL；端點重新導向不會自動跟隨' if 300 <= code < 400
+                        else '請確認 Base URL 與伺服器設定')
+                raise ConnectionError(f'Local LLM 端點回傳 HTTP {code}：{hint}。尚未啟動 harness。') from None
+        except (URLError, OSError):
+            raise ConnectionError('無法連通 Local LLM 端點：請確認模型服務、port 與 Tailscale／網路連線。'
+                                  '尚未啟動 harness。') from None
+        self._endpoint_check = result
+        return result
+
     def connect(self):
         if self.state in ('Connected', 'Busy'):
             return self.capabilities
@@ -170,8 +245,8 @@ class _LocalSettings:
             self.set_state('Offline')
             return self.capabilities
         try:
-            self._validate()
-        except ValueError as exc:
+            self.check_endpoint()
+        except (ValueError, ConnectionError) as exc:
             self._error(exc)
             self.set_state('Offline')
             raise
@@ -190,6 +265,7 @@ class _LocalSettings:
     def diagnostics(self):
         result = self._redact_local(super().diagnostics())
         result.update(harness=self.local_harness, models_source='Local model setting')
+        result['endpoint_check'] = self._endpoint_check
         return result
 
     def get_history(self, *args, **kwargs):
@@ -299,10 +375,5 @@ def _official_executable(harness):
 
 
 def make_local_adapter(emit, **settings):
-    settings = dict(settings)
-    harness = settings.get('harness', 'codex')
-    if harness not in ('codex', 'claude'):
-        raise ValueError('本地模型 Harness 必須是 Codex 或 Claude Code')
-    executable = settings.pop('executable', '') or settings.get(harness + '_executable') or _official_executable(harness)
-    cls = LocalCodexAdapter if harness == 'codex' else LocalClaudeAdapter
-    return cls(emit, executable=executable, **settings)
+    from .hermes import HermesAdapter
+    return HermesAdapter(emit, **settings)

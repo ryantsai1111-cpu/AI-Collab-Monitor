@@ -1,5 +1,7 @@
 # Local LLM 第四角色交付驗收
 
+> 歷史文件（2026-10-09 標註）：保留原始交付／驗收內容。啟動與現況以 [文件索引](README.md)、[使用指南](USER_GUIDE.md) 及 [目前測試紀錄](../tests/README.md) 為準；文內舊計數、路徑或操作授權不能直接套用本版。部分 evidence 未隨此 checkout 提供。
+
 驗證日期：2026-10-06（Asia/Taipei）。分支：`codex/local-llm-panel`；起點：`ui/desktop-workspace-100pct-20261006`。
 
 Task A、B、C 的必要離線驗收已通過；全部既有測試結果等於基準，沒有新增失敗。新測試共 24 個通過。未連線真實模型伺服器，未 push。實作、測試與證據是一個完整 Local LLM 功能提交；最終 commit 與 diff 統計附於交付訊息。

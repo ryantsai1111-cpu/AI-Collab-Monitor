@@ -1,8 +1,0 @@
-host: Ryan-PC
-user: ryant
-elevated: False
-last boot: 2026-10-04T23:12:28.5000000+08:00
-test start: 2026-10-04T23:59:05+08:00
---- seclogon BEFORE ---
-time: 2026-10-04T23:59:06.0394969+08:00
-seclogon State=Running StartMode=Manual ProcessId=28528

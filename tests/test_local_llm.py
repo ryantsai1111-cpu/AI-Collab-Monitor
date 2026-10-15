@@ -1,14 +1,17 @@
 """Mocked official child processes; no credentials, HOME writes or network."""
 import json
+import io
 import os
 from pathlib import Path
 import tempfile
 import tomllib
 import unittest
+from urllib.error import HTTPError, URLError
 from unittest.mock import MagicMock, patch
 
 from acw.adapters.claude import ClaudeAdapter
 from acw.adapters.codex import CodexAdapter
+from acw.adapters.hermes import HermesAdapter
 from acw.adapters.local import LocalCodexAdapter, LocalClaudeAdapter, make_local_adapter, _official_executable
 
 
@@ -20,11 +23,17 @@ class LocalAdapterTests(unittest.TestCase):
         self.process.poll.return_value = None
         self.process.stdin.closed = False
         self.process.stdin.close.side_effect = lambda: setattr(self.process.stdin, 'closed', True)
+        self.http_response = MagicMock()
+        self.http_response.status = 200
+        self.http_response.read.return_value = b'{"data":[{"id":"fixture-local"}]}'
+        self.http_client = MagicMock()
+        self.http_client.open.return_value.__enter__.return_value = self.http_response
         self.guards = [patch('subprocess.Popen', return_value=self.process),
                        patch('threading.Thread'), patch('subprocess.run', return_value=MagicMock(stdout='fixture-version')),
                        patch('socket.socket.connect', side_effect=AssertionError('Network forbidden')),
-                       patch('urllib.request.urlopen', side_effect=AssertionError('HTTP forbidden'))]
-        self.popen, self.thread, self.run, _, _ = [guard.start() for guard in self.guards]
+                       patch('urllib.request.urlopen', side_effect=AssertionError('HTTP forbidden')),
+                       patch('acw.adapters.local.build_opener', return_value=self.http_client)]
+        self.popen, self.thread, self.run, _, _, self.opener = [guard.start() for guard in self.guards]
         self.addCleanup(lambda: [guard.stop() for guard in reversed(self.guards)])
 
     def adapter(self, cls, **settings):
@@ -106,6 +115,88 @@ class LocalAdapterTests(unittest.TestCase):
                     self.assertEqual('請先在設定填入本地端點與模型名稱', adapter.last_error)
         self.popen.assert_not_called()
         self.run.assert_not_called()
+
+    def test_explicit_endpoint_probe_uses_metadata_get_without_launching(self):
+        adapter = self.adapter(LocalClaudeAdapter)
+        result = adapter.check_endpoint()
+        request = self.http_client.open.call_args.args[0]
+        self.assertEqual('GET', request.get_method())
+        self.assertEqual('http://localhost:1234/v1/models', request.full_url)
+        self.assertEqual(['fixture-local'], result['models'])
+        self.assertIn('尚未驗證', result['detail'])
+        self.assertEqual(result, adapter.diagnostics()['endpoint_check'])
+        self.assertEqual('Disconnected', adapter.state)
+        self.popen.assert_not_called()
+        self.run.assert_not_called()
+
+    def test_endpoint_http_and_network_failures_stop_before_harness_launch(self):
+        for error, message in ((HTTPError('http://fixture', 502, '', {}, None), 'HTTP 502'),
+                               (HTTPError('http://fixture', 401, '', {}, None), 'API key'),
+                               (URLError('private server detail'), '網路連線')):
+            with self.subTest(message=message):
+                self.http_client.open.side_effect = error
+                adapter = self.adapter(LocalClaudeAdapter)
+                with self.assertRaisesRegex(ConnectionError, message):
+                    adapter.connect()
+                self.assertEqual('Offline', adapter.state)
+                self.assertNotIn('private server detail', str(self.events))
+        self.popen.assert_not_called()
+        self.run.assert_not_called()
+
+    def test_models_optional_but_invalid_catalog_or_model_mismatch_is_clear(self):
+        adapter = self.adapter(LocalClaudeAdapter)
+        for status in (404, 405):
+            self.http_client.open.side_effect = HTTPError('http://fixture', status, '', {}, None)
+            self.assertEqual(status, adapter.check_endpoint()['http_status'])
+        self.http_client.open.side_effect = None
+        for body, message in ((b'<html>wrong port</html>', 'JSON'),
+                              (b'{}', '格式不符'),
+                              (b'x' * 65537, '大小限制'),
+                              (b'{"data":[{"id":"actual-model"}]}', 'actual-model')):
+            self.http_response.read.return_value = body
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                adapter.check_endpoint()
+
+    def test_strata_host_rejection_has_specific_hint_without_echoing_response(self):
+        body = json.dumps({'error': {'type': 'forbidden',
+                          'message': 'Host rejected (DNS rebinding protection) private-response-canary'}}).encode()
+        self.http_client.open.side_effect = HTTPError('http://fixture', 403, '', {}, io.BytesIO(body))
+        adapter = self.adapter(LocalClaudeAdapter)
+        with self.assertRaisesRegex(ConnectionError, 'STRATA_ALLOWED_HOSTS') as caught:
+            adapter.connect()
+        self.assertNotIn('private-response-canary', str(caught.exception))
+        self.assertNotIn('private-response-canary', json.dumps(self.events))
+        self.assertEqual('Offline', adapter.state)
+        self.popen.assert_not_called()
+
+    def test_other_forbidden_responses_keep_auth_hint(self):
+        for body in (b'not-json', b'[]', b'{"error":"forbidden"}', b'{"error":{"type":"authentication"}}'):
+            with self.subTest(body=body):
+                self.http_client.open.side_effect = HTTPError('http://fixture', 403, '', {}, io.BytesIO(body))
+                with self.assertRaisesRegex(ConnectionError, 'API key'):
+                    self.adapter(LocalClaudeAdapter).check_endpoint()
+
+    def test_probe_does_not_follow_redirects_or_echo_credentials(self):
+        with patch.dict(os.environ, {'LOCAL_FIXTURE_KEY': 'private-probe-canary'}):
+            adapter = self.adapter(LocalClaudeAdapter, api_key_env='LOCAL_FIXTURE_KEY')
+            adapter.check_endpoint()
+            handler = self.opener.call_args.args[0]
+            request = self.http_client.open.call_args.args[0]
+            self.assertEqual('Bearer private-probe-canary', request.get_header('Authorization'))
+            self.assertIsNone(handler.redirect_request(request, None, 302, '', {}, 'http://elsewhere'))
+            self.assertNotIn('private-probe-canary', json.dumps(adapter.diagnostics()))
+            self.http_client.open.side_effect = HTTPError('http://fixture', 302, 'private-probe-canary', {}, None)
+            with self.assertRaisesRegex(ConnectionError, '重新導向') as caught:
+                adapter.check_endpoint()
+            self.assertNotIn('private-probe-canary', str(caught.exception))
+
+    def test_missing_native_session_error_keeps_history_and_requests_explicit_new_chat(self):
+        adapter = self.adapter(LocalClaudeAdapter)
+        adapter._error('No conversation found with session ID: fixture-id')
+        self.assertIn('Workspace 歷史仍保留', adapter.last_error)
+        self.assertIn('按「新增」', adapter.last_error)
+        self.assertEqual('', adapter.session_id)
+        self.popen.assert_not_called()
 
     def test_invalid_schemes_and_malformed_urls_never_launch(self):
         for cls in (LocalCodexAdapter, LocalClaudeAdapter):
@@ -200,15 +291,18 @@ class LocalAdapterTests(unittest.TestCase):
                  patch('acw.adapters.local.platform.machine', return_value='AMD64'):
                 self.assertEqual(str(native), _official_executable('codex'))
 
-    def test_factory_defaults_and_explicit_harness_executable(self):
+    def test_factory_selects_hermes_and_ignores_legacy_harness_executables(self):
         adapter = make_local_adapter(self.emit, codex_executable='codex.exe', claude_executable='claude.exe')
-        self.assertIsInstance(adapter, LocalCodexAdapter)
-        self.assertEqual('codex.exe', adapter.executable)
+        self.assertIsInstance(adapter, HermesAdapter)
+        self.assertEqual('', adapter.executable)
         adapter = make_local_adapter(self.emit, harness='claude', claude_executable='claude.exe')
-        self.assertIsInstance(adapter, LocalClaudeAdapter)
-        self.assertEqual('claude.exe', adapter.executable)
-        with self.assertRaises(ValueError):
-            make_local_adapter(self.emit, harness='unknown')
+        self.assertIsInstance(adapter, HermesAdapter)
+        self.assertEqual('', adapter.executable)
+        adapter = make_local_adapter(self.emit, harness='hermes', executable='custom-hermes.exe')
+        self.assertIsInstance(adapter, HermesAdapter)
+        self.assertEqual('custom-hermes.exe', adapter.executable)
+        self.popen.assert_not_called()
+        self.run.assert_not_called()
 
     def test_official_adapters_preserve_argv_and_omit_env_keyword(self):
         codex = CodexAdapter(self.emit, executable='official.exe')

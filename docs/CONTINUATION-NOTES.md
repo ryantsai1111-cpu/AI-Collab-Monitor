@@ -1,5 +1,7 @@
 # Validated authorized follow-up
 
+> 歷史文件（2026-10-09 標註）：保留原始交付／驗收內容。啟動與現況以 [文件索引](README.md)、[使用指南](USER_GUIDE.md) 及 [目前測試紀錄](../tests/README.md) 為準；文內舊計數、路徑或操作授權不能直接套用本版。部分 evidence 未隨此 checkout 提供。
+
 593 scoped criteria PASS /0FAIL /56BLOCKED /4UNSUPPORTED /0PENDING. Final remains BLOCKED by native Dot transport, deferred EXE acceptance,  the individually listed gates. All184 originally independent criteria have scoped PASS. Counts are not653 native end-to-end tests.
 
 The old Claude Edit request was canceled and remains historical. The user subsequently explicitly approved reopening exactly one isolated run. Actual human Edit/Bash approvals, file mutation, visible Qt file/command cards and independent unittest passed7 checks. No automatic grant, permission-mode change, sandbox change or production repo operation occurred.

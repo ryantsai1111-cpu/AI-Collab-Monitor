@@ -1,9 +1,0 @@
-﻿target: C:\Users\ryant\AppData\Local\OpenAI\Codex\runtimes\cua_node\81ea4d5168ddd0a3\bin\node_repl.exe
-who: ryan-pc\ryant  elevated: False
-time: 2026-10-04T20:58:05.4189625+08:00
-open FILE_READ_ATTRIBUTES (0x80):  FAILED win32=5 ntstatus=0xC0000056
-open READ_CONTROL (0x20000):       FAILED win32=5 ntstatus=0xC0000056
-open zero access (0):              FAILED win32=5 ntstatus=0xC0000056
-control - parent dir entry listing:
-  node_repl.exe len=34047944 mod=2026-10-02T13:54:01
-legend: 0xC0000056=STATUS_DELETE_PENDING  0xC0000022=STATUS_ACCESS_DENIED  0xC0000034=OBJECT_NAME_NOT_FOUND

@@ -57,7 +57,7 @@ class Scripted(OfflineAdapter):
             self.native_rows.append(dict(native_id=uid('native-'), role='assistant', content=content,
                                          native_timestamp=now(), native_room_id=self.native_room_id))
             return
-        task = self.core.current_task
+        task = self.core.agent_task(self.agent)
         self.core.store.insert('messages', dict(id=uid('msg-'), task_id=task['id'], agent=self.agent,
             session_id=task.get(self.agent + '_session') or '', role='assistant', content=content,
             timestamp=now(), status='complete', metadata={}))
@@ -114,6 +114,7 @@ class OrchestratorTests(unittest.TestCase):
         if hasattr(self, "core"):
             self.core.close()  # a test may build more than one workspace in the same folder
             del self.core
+        options.setdefault('workflow', 'relay')
         script = dict(HAPPY, **(script or {}))
         self.adapters = {agent: Scripted(agent, script.get(agent, [])) for agent in AGENTS}
         self.core = WorkspaceCore(Path(self.temp.name) / "data", self.adapters)
@@ -271,7 +272,7 @@ class OrchestratorTests(unittest.TestCase):
         self.assertIn("回報 R", self.adapters["local"].sent[0])
         review = self.adapters["dot"].sent[1]
         self.assertIn("回報 R", review)
-        self.assertIn("Local LLM 第二意見（CONCERNS）", review)
+        self.assertIn("Hermes 第二意見（CONCERNS）", review)
         self.assertIn("少了測試", review)
         self.assertEqual(1, len(self.adapters["codex"].sent))
 
@@ -305,14 +306,14 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual([], self.adapters["codex"].sent)
         self.assertIn("交接單 G1", self.adapters["local"].sent[0])
         self.assertIn("本地回報 L", self.adapters["dot"].sent[1])
-        self.assertIn("Local LLM 實作", run.names["implement"])
+        self.assertIn("Hermes 實作", run.names["implement"])
 
     def test_local_llm_must_be_connected_when_it_takes_part(self):
         run = self.build(local_role="reviewer")
         self.adapters["local"].state = "Disconnected"
         with self.assertRaises(RuntimeError) as raised:
             run.start()
-        self.assertIn("Local LLM", str(raised.exception))
+        self.assertIn("Hermes", str(raised.exception))
         with self.assertRaises(ValueError):
             self.build(local_role="boss")
 
@@ -438,10 +439,12 @@ class WindowRunTests(unittest.TestCase):
         self.assertEqual([], [call for adapter in self.adapters.values() for call in adapter.calls if call[0] in ("send", "read")])
 
     def test_run_locks_context_grants_g8_for_the_run_only_and_reports_the_result(self):
-        self.window.run_auto_collab("把按鈕改成藍色", 3)
+        self.window.run_auto_collab("把按鈕改成藍色", 3, workflow="relay", consented=True)
         self.window.run_timer.stop()
         self.assertEqual(("grant", 400, self.window.orchestrator.run_id), self.grants[0])
-        self.assertFalse(self.window.task_combo.isEnabled())
+        self.assertTrue(self.window.task_combo.isEnabled())
+        self.assertFalse(self.window.panels['codex'].project.isEnabled())
+        self.assertFalse(self.window.panels['claude'].send_button.isEnabled())
         self.assertFalse(self.window.run_bar.isHidden())
         run = self.window.orchestrator
         ticks = iter(range(10 ** 6))
@@ -460,7 +463,7 @@ class WindowRunTests(unittest.TestCase):
 
     def test_start_is_refused_with_a_clear_message_when_a_role_is_offline(self):
         self.adapters["codex"].state = "Disconnected"
-        self.window.run_auto_collab("任務", 3)
+        self.window.run_auto_collab("任務", 3, workflow="relay", consented=True)
         self.assertIsNone(self.window.orchestrator)
         self.assertIn("Codex", self.window.reported_errors[-1])
         self.assertEqual("revoke", self.grants[-1][0])
@@ -469,7 +472,7 @@ class WindowRunTests(unittest.TestCase):
 
     def test_stop_button_stops_and_unlocks(self):
         self.adapters["claude"].replies = []
-        self.window.run_auto_collab("任務", 3)
+        self.window.run_auto_collab("任務", 3, workflow="relay", consented=True)
         self.window.run_timer.stop()
         self.assertTrue(self.window.orchestrator.active)
         self.window.stop_auto_collab()

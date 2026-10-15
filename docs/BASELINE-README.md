@@ -1,5 +1,7 @@
 # AI Collaboration Workspace
 
+> 歷史文件（2026-10-09 標註）：保留原始交付／驗收內容。啟動與現況以 [文件索引](README.md)、[使用指南](USER_GUIDE.md) 及 [目前測試紀錄](../tests/README.md) 為準；文內舊計數、路徑或操作授權不能直接套用本版。部分 evidence 未隨此 checkout 提供。
+
 Windows desktop workspace for independent Claude, dot, and Codex panels, local task history, and explicit handoffs.
 
 **Release status: acceptance candidate; Final is not certified.** An official embeddable dot message bridge has not been established. The dot panel is an honest blocked integration, not a simulated agent. See [Final Acceptance Report](evidence/FINAL-ACCEPTANCE-REPORT.md) for the measured outcome.

@@ -311,6 +311,15 @@ class CoreTests(unittest.TestCase):
         self.assertIn('hello',entries[0]['content'])
         self.assertEqual(before,logfile.read_bytes())
         self.assertEqual([],self.core.poll_legacy(legacy))
+    def test_legacy_reader_maps_hermes_log_to_local_panel(self):
+        legacy=self.root/'legacy';logs=legacy/'logs';logs.mkdir(parents=True)
+        (logs/'hermes.log').write_text('[TOOL] terminal {"command": "npm test"}\n',encoding='utf-8')
+        (logs/'timeline.log').write_text('2026-10-15T14:00:00+08:00 | z1 | HERMES | RUN_STARTED | worktree=x\n',encoding='utf-8')
+        entries=self.core.poll_legacy(legacy)
+        self.assertEqual({'local','timeline'},{entry['agent'] for entry in entries})
+        self.assertIn('[TOOL] terminal',next(e['content'] for e in entries if e['agent']=='local'))
+        recorded={row['agent'] for row in self.core.store.query("SELECT agent FROM events WHERE type='legacy'")}
+        self.assertEqual({'local','workspace'},recorded)
     def test_settings_secret_fields_are_redacted(self):
         self.core.set_setting('token','SYNTHETIC_SETTINGS_SECRET')
         self.assertNotIn('SYNTHETIC_SETTINGS_SECRET',str(self.core.get_setting('token')))

@@ -1,5 +1,4 @@
-"""Workspace themes: the default flat dark look modelled on the desktop apps, and the earlier
-brushed-metal look (setting `ui.theme` = "metal").
+"""Console theme for the live Monitor workbench, plus legacy theme definitions.
 
 Presentation only. Small images are drawn locally; nothing is downloaded and a missing or
 unwritable asset folder only drops the image.
@@ -15,13 +14,13 @@ from PySide6.QtGui import QColor, QImage, QPainter, QPalette, QPen, QPolygonF
 ASSETS = Path(__file__).resolve().parent / "assets"
 
 # Indicator colours for the black-glass status readout and transcript headings.
-STATE_COLORS = {"Connected": "#6fcf8e", "Busy": "#e3b341", "Connecting": "#e3b341",
-                "Error": "#ef6b63", "Blocked": "#ef6b63"}
-STATE_IDLE = "#a3a29b"
-HEADING_COLOR = "#e08a6d"
+STATE_COLORS = {"Connected": "#86efac", "Busy": "#67e8f9", "Connecting": "#67e8f9",
+                "Error": "#fda4af", "Blocked": "#fbbf24"}
+STATE_IDLE = "#94a3a0"
+HEADING_COLOR = "#bef264"
 EVENT_COLOR = "#c9c7c0"
 MUTED_COLOR = "#8f8e87"
-CODE_BLOCK_BG, CODE_INLINE_BG, CODE_INLINE_FG = "#1a1a19", "#3a3936", "#e8b98a"
+CODE_BLOCK_BG, CODE_INLINE_BG, CODE_INLINE_FG = "#0a110e", "#24371f", "#d9f99d"
 
 CHROME = "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #f6f8fa, stop:0.46 #d0d5db, stop:0.52 #b6bcc4, stop:1 #d6dbe0)"
 CHROME_HOVER = "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #ffffff, stop:0.46 #e0e5ea, stop:0.52 #c6ccd4, stop:1 #e6eaee)"
@@ -217,6 +216,109 @@ QToolTip { color: #ececea; background: #1a1a19; border: 1px solid #45443f; paddi
 """
 
 
+
+HACKER_STYLE = """
+QWidget { color: #dce8e1; font-family: 'Segoe UI', 'Microsoft JhengHei UI'; font-size: 13px; }
+QMainWindow, QDialog { background: #080d0c; }
+QLabel { background: transparent; }
+QLabel#console_mark, QLabel#console_section { color: #a3e635; font-family: 'Consolas', 'Microsoft JhengHei UI'; font-weight: 600; font-size: 12px; }
+QLabel#brand { color: #adbbb4; font-size: 13px; }
+QLabel#empty_conversation { color: #8ca28d; font-size: 15px; padding: 28px 10px; }
+QLabel#subtitle, QLabel#muted, QLabel[kind="muted"] { color: #95aaa0; }
+QLabel#agentTitle { color: #e9f2ec; font-size: 19px; font-weight: 600; }
+QLabel#status { font-family: 'Consolas', 'Microsoft JhengHei UI'; font-size: 12px; }
+QFrame#panel { background: #0d1512; border: 1px solid #2b4036; border-radius: 5px; }
+QFrame#sidebar { background: #101a15; border: 1px solid #263b30; border-radius: 5px; }
+QFrame#work_details { background: #101a15; border: 1px solid #30483a; border-radius: 5px; }
+QFrame#composer { background: #142019; border: 1px solid #46634e; border-radius: 5px; }
+QFrame#composer QPlainTextEdit { background: transparent; border: none; padding: 3px; font-size: 14px; }
+QFrame#composer QComboBox { background: transparent; border: none; padding: 4px 22px 4px 6px; }
+QFrame#message { background: transparent; border: none; }
+QFrame#message_user { background: #1b2a1c; border: 1px solid #334b33; border-radius: 5px; margin-left: 24px; }
+QLabel#message_meta { color: #9caf9d; font-size: 11px; font-family: 'Consolas', 'Microsoft JhengHei UI'; }
+QFrame#event { border: none; background: transparent; }
+QFrame#event_approval { background: #261f0e; border: 1px solid #aa802d; border-radius: 5px; }
+QFrame#activity { background: transparent; border: none; border-left: 2px solid #395346; }
+QFrame#run_bar { background: #132319; border: 1px solid #6b9439; border-radius: 4px; }
+QLabel#run_status { color: #d9f99d; font-weight: 600; }
+QPushButton, QToolButton { color: #dce8e1; background: #142019; border: 1px solid #3c5848; border-radius: 4px; padding: 6px 11px; min-height: 20px; }
+QPushButton:hover, QToolButton:hover { color: #e8fccd; background: #253722; border-color: #8dbd48; }
+QPushButton:pressed, QPushButton:checked, QToolButton:pressed, QToolButton:checked { color: #e8fccd; background: #2b4226; border-color: #a3e635; }
+QPushButton:focus, QToolButton:focus { border-color: #a3e635; }
+QPushButton:disabled, QToolButton:disabled { color: #708779; background: #111b16; border-color: #293b30; }
+QPushButton#primary, QPushButton#add_agent { color: #101a0b; background: #a3e635; border-color: #a3e635; font-weight: 600; }
+QPushButton#primary:hover, QPushButton#add_agent:hover { background: #c2f56c; }
+QPushButton#primary:disabled { color: #8fa486; background: #283b23; border-color: #3d5534; }
+QPushButton#stop { color: #fda4af; border-color: #68434a; }
+QToolButton::menu-indicator { image: none; }
+QToolButton#ghost { color: #96ada1; background: transparent; border: none; padding: 2px 7px; min-height: 0; }
+QToolButton#ghost:hover { color: #d9f99d; background: #223025; }
+QLineEdit, QComboBox, QPlainTextEdit, QTextBrowser, QSpinBox { color: #dce8e1; background: #0b120f; border: 1px solid #35503e; border-radius: 4px; padding: 6px; selection-background-color: #3f5926; selection-color: #f0f7e8; }
+QLineEdit:focus, QComboBox:focus, QPlainTextEdit:focus, QSpinBox:focus { border-color: #a3e635; }
+QLineEdit:disabled, QComboBox:disabled, QPlainTextEdit:disabled, QSpinBox:disabled { color: #829587; background: #101a14; border-color: #293b30; }
+QComboBox { padding: 5px 24px 5px 8px; }
+QComboBox::drop-down { subcontrol-origin: border; subcontrol-position: top right; width: 20px; background: transparent; border: none; }
+QComboBox::down-arrow { image: url("@ARROW_DOWN_LIGHT@"); width: 10px; height: 6px; }
+QComboBox QAbstractItemView { color: #e1eddf; background: #142019; selection-background-color: #324c29; selection-color: #effadf; outline: 0; }
+QSpinBox { padding-right: 22px; }
+QSpinBox::up-button, QSpinBox::down-button { subcontrol-origin: border; width: 20px; background: transparent; border: none; }
+QSpinBox::up-button { subcontrol-position: top right; }
+QSpinBox::down-button { subcontrol-position: bottom right; }
+QSpinBox::up-arrow { image: url("@ARROW_UP_LIGHT@"); width: 10px; height: 6px; }
+QSpinBox::down-arrow { image: url("@ARROW_DOWN_LIGHT@"); width: 10px; height: 6px; }
+QCheckBox { background: transparent; spacing: 7px; }
+QCheckBox::indicator { width: 15px; height: 15px; border: 1px solid #688360; background: #101a14; border-radius: 3px; }
+QCheckBox::indicator:checked { background: #a3e635; border-color: #d9f99d; }
+QScrollArea { border: none; background: transparent; }
+QScrollArea > QWidget > QWidget { background: transparent; }
+QScrollBar:vertical { width: 8px; background: transparent; }
+QScrollBar::handle:vertical { background: #486153; border-radius: 3px; min-height: 28px; }
+QScrollBar:horizontal { height: 8px; background: transparent; }
+QScrollBar::handle:horizontal { background: #486153; border-radius: 3px; min-width: 28px; }
+QScrollBar::handle:hover { background: #88a373; }
+QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
+QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
+QTabWidget::pane { border: none; }
+QTabBar { background: transparent; }
+QTabBar::tab { color: #91a99b; background: #101a14; border: 1px solid #293e30; border-radius: 3px; padding: 7px 11px; margin-right: 3px; }
+QTabBar::tab:hover { color: #d9f99d; border-color: #729747; }
+QTabBar::tab:selected { color: #d9f99d; background: #22371f; border-color: #82b445; font-weight: 600; }
+QTabBar#sidebar_pages::tab, QTabBar#nav_source::tab { padding: 6px 9px; }
+QTreeWidget, QTableWidget { color: #dce8e1; background: #0d1512; border: 1px solid #2b4036; border-radius: 4px; alternate-background-color: #142019; selection-background-color: #2c4425; gridline-color: #2b4036; }
+QTreeWidget::item { padding: 6px; }
+QTreeWidget#nav_tree { background: transparent; border: none; outline: 0; }
+QTreeWidget#nav_tree::item:selected { color: #d9f99d; background: #263c21; }
+QHeaderView::section { color: #a8bbaa; background: #142019; padding: 7px; border: none; border-bottom: 1px solid #35503e; }
+QTableCornerButton::section { background: #142019; border: none; }
+QSplitter::handle { background: transparent; width: 8px; }
+QMenu { color: #dce8e1; background: #142019; border: 1px solid #507047; padding: 5px; }
+QMenu::item { padding: 7px 18px; border-radius: 3px; }
+QMenu::item:selected { color: #d9f99d; background: #2b4226; }
+QMenu::item:disabled { color: #758879; }
+QMenu::separator { height: 1px; background: #35503e; margin: 4px 8px; }
+QToolTip { color: #e1eddf; background: #142019; border: 1px solid #66824f; padding: 5px; }
+QWidget#agent_rail_body { background: #101a15; border: 1px solid #2b4036; border-radius: 5px; }
+QFrame#teammate { background: #132017; border: 1px solid #324738; border-radius: 4px; }
+QFrame#teammate[selected="true"] { background: #20301a; border-left: 3px solid #a3e635; }
+QTabBar QToolButton { padding: 0; min-width: 22px; max-width: 22px; min-height: 20px; }
+QPushButton#teammate_open { text-align: left; background: transparent; color: #e4eddf; border: none; padding: 0; font-weight: 600; }
+QPushButton#teammate_open:focus { border: 1px solid #a3e635; }
+QPushButton#teammate_open:hover { color: #bef264; }
+"""
+
+
+def console_palette() -> QPalette:
+    palette = metal_palette()
+    for role, value in ((QPalette.Window, '#080d0c'), (QPalette.WindowText, '#dce8e1'),
+                        (QPalette.Base, '#0d1512'), (QPalette.AlternateBase, '#142019'),
+                        (QPalette.Text, '#dce8e1'), (QPalette.PlaceholderText, '#8fa395'),
+                        (QPalette.Button, '#142019'), (QPalette.ButtonText, '#dce8e1'),
+                        (QPalette.Highlight, '#3f5926'), (QPalette.HighlightedText, '#f0f7e8'),
+                        (QPalette.ToolTipBase, '#142019'), (QPalette.ToolTipText, '#dce8e1'),
+                        (QPalette.Link, '#a3e635')):
+        palette.setColor(role, QColor(value))
+    return palette
+
 def metal_palette() -> QPalette:
     """Fallback colours for anything the stylesheet does not reach."""
     palette = QPalette()
@@ -263,12 +365,12 @@ def _arrow(path: Path, up: bool, color: str = "#12161a") -> None:
     image.save(str(path), "PNG")
 
 
-def build_style(theme: str = "desktop") -> str:
+def build_style(theme: str = "hacker") -> str:
     assets = {"BRUSHED": ("brushed.png", _brushed), "ARROW_DOWN": ("arrow_down.png", lambda p: _arrow(p, False)),
               "ARROW_UP": ("arrow_up.png", lambda p: _arrow(p, True)),
               "ARROW_DOWN_LIGHT": ("arrow_down_light.png", lambda p: _arrow(p, False, "#a3a29b")),
               "ARROW_UP_LIGHT": ("arrow_up_light.png", lambda p: _arrow(p, True, "#a3a29b"))}
-    style = METAL_STYLE if theme == "metal" else DESKTOP_STYLE
+    style = METAL_STYLE if theme == "metal" else DESKTOP_STYLE if theme == "desktop" else HACKER_STYLE
     for key, (name, draw) in assets.items():
         path = ASSETS / name
         try:

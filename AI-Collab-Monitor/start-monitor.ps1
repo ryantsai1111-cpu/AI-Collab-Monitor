@@ -18,7 +18,8 @@ try {
     New-MonitorDirectory $sessionPath
     $titleMap = @{
         claude = 'CLAUDE - PRIMARY REVIEWER'; dot = 'DOT - SECONDARY REVIEW / RELAY'
-        codex = 'CODEX - IMPLEMENTER'; timeline = 'COLLABORATION TIMELINE'
+        codex = 'CODEX - IMPLEMENTER'; hermes = 'HERMES - IMPLEMENTER'
+        timeline = 'COLLABORATION TIMELINE'
     }
     function Get-PaneCommand([string]$Actor) {
         $parts = @('--title', ('AI-Collab-Monitor | ' + $titleMap[$Actor]), '--suppressApplicationTitle', '-d', $script:MonitorRoot,
@@ -29,11 +30,12 @@ try {
     # Verified against Ryan-PC wt 1.24.12741.0 local help; always uses ONE fresh window.
     $commandLine = '-w new --maximized new-tab ' + (Get-PaneCommand 'claude') +
         ' ; split-pane -H --size 0.30 ' + (Get-PaneCommand 'timeline') +
-        ' ; move-focus up ; split-pane -V --size 0.6667 ' + (Get-PaneCommand 'dot') +
-        ' ; split-pane -V --size 0.5 ' + (Get-PaneCommand 'codex') + ' ; move-focus first'
+        ' ; move-focus up ; split-pane -V --size 0.75 ' + (Get-PaneCommand 'dot') +
+        ' ; split-pane -V --size 0.6667 ' + (Get-PaneCommand 'codex') +
+        ' ; split-pane -V --size 0.5 ' + (Get-PaneCommand 'hermes') + ' ; move-focus first'
     Write-MonitorJson (Join-Path $sessionPath 'session.json') ([ordered]@{
         Version='0.1'; SessionId=$sessionId; CreatedUtc=[DateTime]::UtcNow.ToString('o'); Root=$script:MonitorRoot
-        Layout='Top: Claude | Dot | Codex. Bottom: Timeline (30%).'; WindowsTerminal=$wtCommand.Source
+        Layout='Top: Claude | Dot | Codex | Hermes. Bottom: Timeline (30%).'; WindowsTerminal=$wtCommand.Source
         CommandLine=$commandLine
     })
     $gate.Dispose()
@@ -44,18 +46,18 @@ try {
     do {
         if (Test-Path -LiteralPath (Join-Path $sessionPath 'stop.signal')) { throw 'Startup was cancelled by stop-monitor.ps1.' }
         $ready = @($script:MonitorActors | Where-Object { Test-Path -LiteralPath (Join-Path $sessionPath ($_ + '.started.json')) })
-        if ($ready.Count -eq 4) { break }
+        if ($ready.Count -eq $script:MonitorActors.Count) { break }
         Start-Sleep -Milliseconds 200
     } while ([DateTime]::UtcNow -lt $deadline)
-    if ($ready.Count -ne 4) { throw "Only $($ready.Count)/4 panes started. Stop requested. Inspect this monitor window and local wt --help; do not retry blindly." }
+    if ($ready.Count -ne $script:MonitorActors.Count) { throw "Only $($ready.Count)/$($script:MonitorActors.Count) panes started. Stop requested. Inspect this monitor window and local wt --help; do not retry blindly." }
     $gate = Enter-MonitorGate
     if (Test-Path -LiteralPath (Join-Path $sessionPath 'stop.signal')) { throw 'Startup was cancelled.' }
     foreach ($actor in $script:MonitorActors) {
         if (-not (Test-MonitorLeaseBusy $sessionPath $actor)) { throw "Pane exited during startup: $actor" }
     }
     Write-Output "AI-Collab-Monitor v0.1 started: $sessionId"
-    Write-Output 'Single window: CLAUDE | DOT | CODEX above full-width TIMELINE.'
-    Write-Output 'All four reader leases are active. UI visibility must be checked separately.'
+    Write-Output 'Single window: CLAUDE | DOT | CODEX | HERMES above full-width TIMELINE.'
+    Write-Output "All $($script:MonitorActors.Count) reader leases are active. UI visibility must be checked separately."
 } catch {
     if ($gate) { $gate.Dispose(); $gate = $null }
     if ($sessionPath -and (Test-Path -LiteralPath $sessionPath)) {

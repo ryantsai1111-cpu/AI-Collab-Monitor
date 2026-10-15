@@ -13,6 +13,16 @@ def envelope(token, verdict='PASS', body='complete handoff'):
 
 
 class CoreFixture:
+    agent_ids = ('claude', 'dot', 'codex', 'local')
+
+    @staticmethod
+    def provider(agent):
+        return agent
+
+    @staticmethod
+    def agent_name(agent):
+        return {'claude': 'Claude', 'codex': 'Codex', 'dot': 'G8毛', 'local': 'Local LLM'}[agent]
+
     def __init__(self):
         self.current_task_id, self.current_project_id = 'task-1', 'project-1'
         self.current_task = {'id': self.current_task_id, 'project_id': self.current_project_id,
@@ -105,7 +115,7 @@ class CorrelationTests(unittest.TestCase):
         self.run.start()
 
     def new_run(self):
-        return Orchestrator(self.core, 'approved implementation', self.dispatch,
+        return Orchestrator(self.core, 'approved implementation', self.dispatch, workflow='relay',
             clock=lambda: self.clock[0], timeouts={a: 20 for a in self.core.history}, dot_poll_seconds=1,
             has_pending_approval=lambda: self.pending_approval)
 
@@ -395,7 +405,7 @@ class CorrelationTests(unittest.TestCase):
         for field in ('task', 'agent-task', 'adapter', 'session', 'task-session', 'dot', 'room'):
             with self.subTest(field=field):
                 core = CoreFixture()
-                run = Orchestrator(core, 'task', self.dispatch, clock=lambda: self.clock[0])
+                run = Orchestrator(core, 'task', self.dispatch, workflow='relay', clock=lambda: self.clock[0])
                 run.start()
                 if field == 'task': core.current_task_id = 'changed'
                 elif field == 'agent-task': core.selection['codex'] = dict(core.current_task, id='changed')
@@ -670,7 +680,7 @@ class CorrelationTests(unittest.TestCase):
         self.assertEqual(original_sends, len(self.core.sent))
         self.assertEqual(original_reads, self.core.read_count)
         core = CoreFixture()
-        run = Orchestrator(core, 'task', self.dispatch)
+        run = Orchestrator(core, 'task', self.dispatch, workflow='relay')
         run.start()
         body = 'x' * (MAX_FORWARD_CHARS - 5) + 'end  '
         run._send('implement', body)
