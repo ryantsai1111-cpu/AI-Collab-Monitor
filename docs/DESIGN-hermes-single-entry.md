@@ -31,23 +31,27 @@
 
 效果：skill 跑的每一步，Hermes 面板會即時看到遮罩後的摘要；timeline 事件照舊進 workspace。限制：這是唯讀投影，不建立 session，不進 `messages`，協作站無法接續或取消它。
 
-### §3.2 階段 B：非 GUI 入口，run.sh 改走 adapter
+### §3.2 階段 B：協作站當派工端，run.sh 用請求檔交給它
 
-新增 `python -m acw.cli hermes-run --worktree <path> --briefs <dir> --label <label> [--data-dir ...]`：
+**為什麼不是獨立 CLI 開同一個資料庫**：`run.py` 用 `QLockFile(data_dir/workspace.lock)` 做單一實例；`WorkspaceCore` 本身不鎖，所以第二個行程開同一個 sqlite 技術上可行，但 GUI 的 `WorkspaceCore` 把 `agents.instances`、`selection.<agent>` 等設定快取在記憶體，另一個行程改資料庫會讓 GUI 的狀態與資料庫脫節。所以 GUI 開著時，**只能由 GUI 那個 core 來派工**。
 
-1. 開 `WorkspaceCore(data_dir)`（core、store、adapter 都不依賴 Qt，已確認）。
-2. 找或建一個 provider 為 `local` 的 Hermes instance，`set_project(worktree)`；每一步**新建** session（對應 skill「每次都是新對話」的設計），不 `--resume`。
-3. 做 skill 現有的三個守門（`PROGRESS.md` 存在、工作樹乾淨或 `HERMES_ALLOW_DIRTY`、無其他 hermes），鎖交給 adapter。
-4. 用 `core.send_message` 送固定啟動句，`run_budget`／`max_turns` 由 CLI 參數覆寫 adapter 預設（3000／150）。
-5. 阻塞等 `message_end`，把 `result` 的 exit code、`hermes_exit`、git 尾段印到 stdout，格式與現在的 `<label>.log` 尾段相同，Claude 端不用改讀法。
-6. 同時仍寫桌面監看器（`hermes.log`、`timeline.log`），沿用 `hermes_stream_filter.py` 的遮罩與事件規則；或改成 core 的 emitter 直接寫，二擇一，避免雙寫。
+做法：
 
-`run.sh` 變成薄包裝：守門後呼叫 CLI。`C:/tools/hermes/runs/<label>.log` 保留為完整原始紀錄。
+1. `run.sh` 啟動前檢查 `data_dir/workspace.lock`（Qt 格式：pid、程式名、主機名各一行）。pid 活著 → GUI 在跑，走請求檔；否則照現在直接起 hermes.exe（行為不變）。
+2. 請求檔：`data_dir/requests/<label>.json`，內容 `{worktree, briefs, label, prompt, run_budget, max_turns, created}`。run.sh 寫完後等 `data_dir/requests/<label>.result.json` 出現，再把 result 的 exit code、`hermes_exit`、git 尾段印成和現在一樣的格式。
+3. core 新增 `poll_requests()`：由 UI 既有的 100ms tick（`ui.py` 的 `poll_events`）每秒呼叫一次。對每個新請求：
+   - 以 `repo_path == worktree` 找 project，沒有就 `create_project`；`select_agent_project('local', ...)`。
+   - 守門同 run.sh（`PROGRESS.md`、乾淨工作樹或 `HERMES_ALLOW_DIRTY`）。鎖由 `HermesAdapter` 的 `HermesLock` 負責。
+   - `prepare_conversation('local', fresh=True)`（每一步新 session，對應 skill「沒有記憶」的設計），再 `send_message('local', prompt)`，`run_budget`／`max_turns` 用請求裡的值覆寫這一次。
+   - 收到該 session 的 `message_end` 後寫 result 檔；失敗或取消也寫（status 不同），run.sh 才不會等到死。
+4. 桌面監看器的 `hermes.log`／`timeline.log`：由 core 的 emitter 在 `message_delta`／`tool_start`／`message_end` 時寫，沿用 `hermes_stream_filter.py` 的遮罩規則（把 `mask()` 抽成可 import 的模組）；直接路徑仍由 run.sh 寫。兩條路徑**不會同時**寫同一個 run。
+
+**前提（2026-10-15 查到的現況）**：預設資料目錄的 `projects` 表是空的，`agent.local` 設定仍是舊的 Local LLM harness（`harness: claude`、`base_url`），也就是協作站還沒被設定成用 Hermes。階段 B 做好之後，要先在 GUI 把 Hermes 面板設定好並連線一次，請求檔路徑才會生效；在那之前 run.sh 會因為 GUI 的 local agent 不是 Connected 而拿到失敗的 result，並回退到直接路徑。
 
 **已知取捨**
 
-- GUI 開著時，CLI 寫進同一個 sqlite（WAL）沒有問題，但 GUI 的 in-memory 事件佇列不會即時收到 CLI 的事件；GUI 要在刷新 context 或重開 transcripts 時才看到。即時畫面仍由桌面監看器與階段 A 的 legacy 投影負責。
-- CLI 不經 orchestrator，所以 orchestrator 的 900 秒 step timeout 與 VERDICT 信封不適用；Claude 的審查流程不變。
+- 請求檔路徑下，協作站可以在 UI 取消這個 run（`stop_if_owned`）；直接路徑不能。
+- 不經 orchestrator，所以 900 秒 step timeout 與 VERDICT 信封不適用；Claude 的審查流程不變。
 - `HermesAdapter` 不支援工具核准，單次模式的核准策略仍由 Hermes 自己的設定決定（Ryan 已設 `approvals.single_query_mode approve`）。
 
 ## §4 順序與相依
