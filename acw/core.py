@@ -1360,8 +1360,10 @@ class WorkspaceCore:
             state['tails'][agent]=text
             clean=sanitize(complete)
             state['contents'][agent]=(state['contents'].get(agent,'')+clean)[-1024*1024:]
-            event=self._record('legacy',agent if agent in AGENTS else 'workspace',task_id=None,content=clean,source=entry['source'])
-            results.append(dict(entry,content=state['contents'][agent],raw_ref=event['raw_ref']))
+            # The Monitor's hermes.log belongs to the built-in local (Hermes) panel.
+            target='local' if agent=='hermes' else agent
+            event=self._record('legacy',target if target in AGENTS else 'workspace',task_id=None,content=clean,source=entry['source'])
+            results.append(dict(entry,agent=target,content=state['contents'][agent],raw_ref=event['raw_ref']))
         return results
 
     def logs_path(self,agent=None):

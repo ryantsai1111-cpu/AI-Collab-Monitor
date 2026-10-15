@@ -126,12 +126,15 @@ def parse_test_result(command, output, exit_code=None, duration=None):
     return result
 
 class LegacyReader:
-    """Read explicitly selected four log files only; never write/reset old Monitor."""
+    """Read explicitly selected five log files only; never write/reset old Monitor.
+
+    hermes.log is written by the hermes-delegation skill's run.sh (masked summary of a headless run).
+    """
     def __init__(self, root, chunk_size=65536):
         self.root=Path(root); self.chunk_size=chunk_size; self.offsets={};self.decoders={}
     def poll(self):
         entries=[]
-        for agent in ('claude','dot','codex','timeline'):
+        for agent in ('claude','dot','codex','hermes','timeline'):
             path=self.root/'logs'/(agent+'.log')
             if not path.is_file() or path.is_symlink(): continue
             size=path.stat().st_size
