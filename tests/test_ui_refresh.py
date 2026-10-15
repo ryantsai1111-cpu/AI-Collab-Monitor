@@ -332,6 +332,35 @@ class WorkspaceUiRefreshTests(unittest.TestCase):
         self.assertIn("協作 agent", role_text[2])
         self.assert_no_adapter_actions()
 
+    def test_default_desktop_theme_and_saved_hacker_theme(self):
+        self.assertIsNone(self.core.get_setting('ui.theme'))
+        self.assertIn('#d97757', self.window.styleSheet())
+        self.assertNotIn('#a3e635', self.window.styleSheet())
+        self.core.set_setting('ui.theme', 'hacker')
+        other = OfflineWindow(self.core)
+        try:
+            self.assertIn('#a3e635', other.styleSheet())
+            self.assertEqual('hacker', other.theme_name)
+        finally:
+            other.close()
+            other.deleteLater()
+        self.window.apply_theme('desktop')
+
+    def test_settings_theme_switch_is_immediate_and_persisted_without_backend_actions(self):
+        def inspect(dialog):
+            choice = dialog.findChild(QComboBox, 'ui_theme')
+            choice.setCurrentIndex(choice.findData('hacker'))
+            self.assertIn('#a3e635', self.window.styleSheet())
+            self.assertEqual('hacker', self.core.get_setting('ui.theme'))
+            self.assertIn('#a3e635', self.window.monitor_dashboard.styleSheet())
+            choice.setCurrentIndex(choice.findData('desktop'))
+            self.assertNotIn('#a3e635', self.window.monitor_dashboard.styleSheet())
+            self.assertEqual('desktop', self.core.get_setting('ui.theme'))
+            return QDialog.Rejected
+        with patch('acw.ui.QDialog.exec', inspect):
+            self.window.settings()
+        self.assert_no_adapter_actions()
+
     def test_agent_selectors_and_sidebar_follow_the_same_agent(self):
         self.window.resize(1800, 1000)
         self.window.layout_mode.setCurrentIndex(self.window.layout_mode.findData('Focus'))

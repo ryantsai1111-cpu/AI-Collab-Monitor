@@ -18,7 +18,7 @@ from . import approvals
 from .orchestrator import Orchestrator
 from .monitor import AgentRail, MonitorDashboard, collect_snapshot
 from .theme import (CODE_BLOCK_BG, CODE_INLINE_BG, CODE_INLINE_FG, EVENT_COLOR, HEADING_COLOR, MUTED_COLOR,
-                    STATE_COLORS, STATE_IDLE, build_style, console_palette)
+                    STATE_COLORS, STATE_IDLE, SPACE, build_style, console_palette, desktop_palette, metal_palette)
 
 from PySide6.QtCore import Qt, Signal, QObject, QRunnable, QThreadPool, QTimer, QUrl, QByteArray
 from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont, QKeySequence, QPixmap, QTextCharFormat,
@@ -518,6 +518,7 @@ class AgentPanel(QFrame):
         self.state.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         header.addWidget(self.state)
         self.connect_button = button("Connect", self.connect_agent, f"connect_{agent}")
+        self.connect_button.setProperty("primary", True)
         self.connect_button.setAccessibleName(f"Connect {self.window.role_names[agent]}")
         header.addWidget(self.connect_button)
         self.more_button = QToolButton()
@@ -1094,7 +1095,7 @@ class AgentPanel(QFrame):
                             if self.agent == 'dot' else None) or STATE_LABELS.get(state, "狀態待確認（" + state + "）"))
         if self.agent == 'dot': self.state.setToolTip('這是 Workspace 訊息通道狀態，不代表 dot 所有工作的執行狀態')
         color = STATE_COLORS.get(state, STATE_IDLE)
-        self.state.setStyleSheet(f"color: {color};")
+        self.state.setStyleSheet(f"color: {MUTED_COLOR if self.window.theme_name == 'desktop' else color};")
         if state in ("Disconnected", "Offline"):
             self.approval_rules.clear()
             if self._dot_follow is not None:
@@ -1981,7 +1982,7 @@ class SessionNavigator(QWidget):
         self.loading = set()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
+        layout.setSpacing(SPACE['sm'])
         self._agent = window._preferred_agent
         self.empty = label("此 agent 沒有本機歷史對話", True)
         layout.addWidget(self.empty)
@@ -2016,7 +2017,7 @@ class SessionNavigator(QWidget):
         self.status.setObjectName("nav_status")
         layout.addWidget(self.status)
         actions = QHBoxLayout()
-        actions.setSpacing(6)
+        actions.setSpacing((SPACE['xs'] + SPACE['sm']) // 2)
         self.open_button = button("接續對話", lambda: self.open_selected(True), "primary")
         self.open_button.setToolTip("切換到該專案、載入紀錄並接續同一個對話（也可按兩下）")
         actions.addWidget(self.open_button, 1)
@@ -2156,7 +2157,7 @@ class SessionNavigator(QWidget):
                     font = child.font(0)
                     font.setBold(True)
                     child.setFont(0, font)
-                    child.setForeground(0, QColor(HEADING_COLOR))
+                    child.setForeground(0, QColor('#ececea' if self.window.theme_name == 'desktop' else HEADING_COLOR))
                 parent.addChild(child)
                 if session["id"] == (selected or current):
                     focus = child
@@ -2315,13 +2316,13 @@ class MainWindow(QMainWindow):
         self.setObjectName("ai_collaboration_workspace")
         self.resize(1530, 920)
         self.setMinimumSize(640, 420)
-        QApplication.instance().setPalette(console_palette())
-        self.setStyleSheet(build_style("hacker"))
+        self.theme_name = core.get_setting('ui.theme', 'desktop')
+        self.apply_theme(self.theme_name)
         root = QWidget()
         root.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
         layout = QVBoxLayout(root)
-        layout.setContentsMargins(12, 10, 12, 8)
-        layout.setSpacing(10)
+        layout.setContentsMargins(SPACE['md'], (SPACE['sm'] + SPACE['md']) // 2, SPACE['md'], SPACE['sm'])
+        layout.setSpacing((SPACE['sm'] + SPACE['md']) // 2)
         heading = QHBoxLayout()
         self.sidebar_toggle = button("☰", self.toggle_sidebar, "sidebar_toggle")
         self.sidebar_toggle.setAccessibleName("切換專案與對話側欄")
@@ -2385,7 +2386,7 @@ class MainWindow(QMainWindow):
         self.run_bar = QFrame()
         self.run_bar.setObjectName("run_bar")
         run_row = QHBoxLayout(self.run_bar)
-        run_row.setContentsMargins(12, 6, 8, 6)
+        run_row.setContentsMargins(SPACE['md'], (SPACE['xs'] + SPACE['sm']) // 2, SPACE['sm'], (SPACE['xs'] + SPACE['sm']) // 2)
         self.run_status = label("")
         self.run_status.setObjectName("run_status")
         self.run_status.setWordWrap(False)
@@ -2406,8 +2407,8 @@ class MainWindow(QMainWindow):
         self.sidebar.setMinimumWidth(230)
         self.sidebar.setMaximumWidth(310)
         side = QVBoxLayout(self.sidebar)
-        side.setContentsMargins(12, 12, 12, 12)
-        side.setSpacing(8)
+        side.setContentsMargins(SPACE['md'], SPACE['md'], SPACE['md'], SPACE['md'])
+        side.setSpacing(SPACE['sm'])
         self.sidebar_agent_title = label(self.role_names[self._preferred_agent])
         self.sidebar_agent_title.setObjectName('console_section')
         side.addWidget(self.sidebar_agent_title)
@@ -2422,7 +2423,7 @@ class MainWindow(QMainWindow):
         self.records_dialog.finished.connect(lambda _: (self.update_context_title(), self.refresh_work_details()))
         records = QVBoxLayout(records_page)
         records.setContentsMargins(0, 0, 0, 0)
-        records.setSpacing(8)
+        records.setSpacing(SPACE['sm'])
         records.addWidget(label('本機紀錄管理', True))
         records.addWidget(label('此處管理舊任務與紀錄，不會切換任何 Agent 的 Project 或 Session。', True))
         records.addWidget(label("紀錄的專案與任務", True))
@@ -2494,7 +2495,7 @@ class MainWindow(QMainWindow):
         content = QWidget()
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(0, 0, 0, 0)
-        content_layout.setSpacing(8)
+        content_layout.setSpacing(SPACE['sm'])
         roles = QHBoxLayout()
         self.role_tabs = QTabBar()
         self.role_tabs.setObjectName("role_tabs")
@@ -2536,7 +2537,7 @@ class MainWindow(QMainWindow):
         self.chat_workspace = QWidget()
         chat_layout = QHBoxLayout(self.chat_workspace)
         chat_layout.setContentsMargins(0, 0, 0, 0)
-        chat_layout.setSpacing(10)
+        chat_layout.setSpacing((SPACE['sm'] + SPACE['md']) // 2)
         chat_layout.addWidget(self.splitter, 1)
         self.agent_rail = AgentRail()
         self.agent_rail.box.insertWidget(self.agent_rail.box.indexOf(self.agent_rail.add_button) + 1, self.unfocus_button)
@@ -2556,6 +2557,8 @@ class MainWindow(QMainWindow):
         self.monitor_dashboard.open_role.connect(self.open_monitor_role)
         self.monitor_dashboard.open_transcripts.connect(self.show_monitor_transcripts)
         self.stack.addWidget(self.monitor_dashboard)
+        self.monitor_dashboard.apply_theme(self.theme_name)
+        self.agent_rail.setProperty('theme', self.theme_name)
         self._monitor_clock = 0.0
         content_layout.addWidget(self.stack, 1)
         self.details_panel = QFrame()
@@ -2563,14 +2566,14 @@ class MainWindow(QMainWindow):
         self.details_panel.setMinimumHeight(140)
         self.details_panel.setMaximumHeight(300)
         detail_layout = QVBoxLayout(self.details_panel)
-        detail_layout.setContentsMargins(12, 8, 12, 8)
+        detail_layout.setContentsMargins(SPACE['md'], SPACE['sm'], SPACE['md'], SPACE['sm'])
         self.details_tabs = QTabWidget()
         self.details_tabs.setObjectName("details_tabs")
         self.detail_trees = {}
         for title in ("Tools", "Commands", "Changes", "Tests", "Timeline", "Handoffs"):
             page = QWidget()
             page_layout = QVBoxLayout(page)
-            page_layout.setContentsMargins(0, 6, 0, 0)
+            page_layout.setContentsMargins(0, (SPACE['xs'] + SPACE['sm']) // 2, 0, 0)
             tree = QTreeWidget()
             tree.setObjectName("details_" + title.lower())
             tree.setHeaderLabels(["來源", "事件／狀態", "摘要"])
@@ -2661,6 +2664,20 @@ class MainWindow(QMainWindow):
         self.sync_timer.start(3000)
         QTimer.singleShot(0, self, self.update_workspace_layout)
         self.refresh_monitor()
+
+    def apply_theme(self, name):
+        self.theme_name = name if name in ('desktop', 'hacker', 'metal') else 'desktop'
+        self.setProperty('theme', self.theme_name)
+        palettes = {'desktop': desktop_palette, 'hacker': console_palette, 'metal': metal_palette}
+        QApplication.instance().setPalette(palettes[self.theme_name]())
+        self.setStyleSheet(build_style(self.theme_name))
+        if hasattr(self, 'monitor_dashboard'):
+            self.monitor_dashboard.apply_theme(self.theme_name)
+            for panel in self.panels.values():
+                color = MUTED_COLOR if self.theme_name == 'desktop' else STATE_COLORS.get(panel.connection_state, STATE_IDLE)
+                panel.state.setStyleSheet(f'color: {color};')
+            self.navigator.fill()
+            self.refresh_monitor()
 
     def add_agent_dialog(self):
         dialog = QDialog(self)
@@ -2888,7 +2905,7 @@ class MainWindow(QMainWindow):
             self.details_dialog = QDialog(self)
             self.details_dialog.setWindowTitle("工作詳情 · 本機紀錄")
             dialog_layout = QVBoxLayout(self.details_dialog)
-            dialog_layout.setContentsMargins(12, 12, 12, 12)
+            dialog_layout.setContentsMargins(SPACE['md'], SPACE['md'], SPACE['md'], SPACE['md'])
             self.details_dialog.finished.connect(self.return_details_tabs)
         self.details_panel.hide()
         self.details_panel.layout().removeWidget(self.details_tabs)
@@ -3750,6 +3767,7 @@ class MainWindow(QMainWindow):
 
     def refresh_monitor(self):
         self._monitor_clock = time.monotonic()
+        self.agent_rail.setProperty('theme', self.theme_name)
         snapshot = collect_snapshot(self.core, self.panels, self.orchestrator)
         self.monitor_dashboard.refresh(snapshot)
         self.agent_rail.refresh(snapshot, self._preferred_agent)
@@ -4379,6 +4397,18 @@ class MainWindow(QMainWindow):
         tabs.addTab(paths, "路徑")
         appearance = QWidget()
         appearance_layout = QVBoxLayout(appearance)
+        appearance_layout.addWidget(label('主題', True))
+        theme_choice = QComboBox()
+        theme_choice.setObjectName('ui_theme')
+        for name in ('desktop', 'hacker', 'metal'):
+            theme_choice.addItem(name, name)
+        theme_choice.setCurrentIndex(max(0, theme_choice.findData(self.theme_name)))
+        def change_theme():
+            name = theme_choice.currentData()
+            self.core.set_setting('ui.theme', name)
+            self.apply_theme(name)
+        theme_choice.currentIndexChanged.connect(change_theme)
+        appearance_layout.addWidget(theme_choice)
         topmost = QCheckBox("保持在最上層")
         topmost.setChecked(self.core.get_setting("ui.always_on_top", False))
         appearance_layout.addWidget(topmost)

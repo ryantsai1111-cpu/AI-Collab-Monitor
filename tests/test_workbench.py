@@ -25,7 +25,8 @@ class WorkbenchTests(unittest.TestCase):
 
     def test_workbench_theme_and_focus_rail_are_visible_without_backend_calls(self):
         self.assertIn('CONTROL ROOM', self.window.console_mark.text())
-        self.assertIn('#080d0c', self.window.styleSheet())
+        self.assertIn('#d97757', self.window.styleSheet())
+        self.assertNotIn('#a3e635', self.window.styleSheet())
         self.assertTrue(self.window.agent_rail.isVisible())
         self.assertEqual('Workspace', self.window.mode.currentData())
         self.assertEqual('Focus', self.window.layout_mode.currentData())

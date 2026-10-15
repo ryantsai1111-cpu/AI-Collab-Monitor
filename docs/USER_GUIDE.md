@@ -1,6 +1,6 @@
 # AI Collaboration Workspace — 使用指南
 
-更新日期：2026-10-09。對應目前 Python／PySide6 介面；驗證範圍見 [測試紀錄](../tests/README.md)。舊 EXE、三份 ZIP 與歷史驗收文件不代表目前啟動方式。
+更新日期：2026-10-15。對應目前 Python／PySide6 介面；驗證範圍見 [測試紀錄](../tests/README.md)。舊 EXE、三份 ZIP 與歷史驗收文件不代表目前啟動方式。
 
 ## 啟動與資料
 
@@ -22,14 +22,14 @@ python run.py --data-dir C:\path\to\isolated-data
 
 ## Project、Session 與獨立 Agent
 
-1. 用主畫面上方分頁或右側成員卡片選擇 Agent，展開左側欄並切到「Agent」。側欄只顯示目前 Agent 的 Project／Session；Project 旁邊「＋」可建立專案。
+1. 專注模式按右側成員卡片、並排模式按上方分頁選擇 Agent；窄視窗收起右欄時也使用上方分頁。左側欄自動跟隨目前 Agent，顯示角色、狀態與綁定的 Project／Session；Project 旁邊「＋」可建立專案。
 2. 在 Agent 面板按「連線」。Claude／Codex 已有綁定 session 時會接續它；Hermes 先檢查 CLI 協定，按「開啟」或 Send 才恢復已保存的 Hermes 對話。沒有 session 時可按「新對話」，或直接輸入首次訊息。忙碌中的 Agent 必須完成或停止工作後才能切換。
-3. 對話分頁右側按「＋ Agent」，選 Claude、Codex 或 Hermes、名稱與專案。同一 provider 可建立多個視窗，新增本身不連線或送出任務。
+3. 右側 Agent 欄底部按「＋ 新增 Agent」，或從右上「⋯ → 新增 Agent…」，選 Claude、Codex 或 Hermes、名稱與專案。同一 provider 可建立多個視窗，新增本身不連線或送出任務。
 4. Session 下拉清單只列出此 Agent／Project 已保存的對話。選取本身不會開啟；按「開啟對話」才接續原 session 與歷史。「新對話」建立獨立歷史，不覆蓋原對話。
 
-日常側欄只保留 Project、Session 搜尋／選取與「新對話／開啟對話」。Session 旁「⋯」提供重新命名、詳細／ID、探索原生對話與專案資訊（工作目錄、Git 狀態）；Hermes Agent 另有「Hermes 設定…」，直接開啟該 instance 的設定分頁。側欄不再重複顯示 Agent 分頁、綁定標題與 Git 資訊。檢視模式改從右上「⋯ → 檢視」切換。
+側欄上半「目前綁定」保留 Project、Session 搜尋／選取與「新對話／開啟對話」，下半「可接續的對話」顯示目前 Agent 的本機歷史。Session 旁「⋯」提供重新命名、詳細／ID、探索原生對話與專案資訊（工作目錄、Git 狀態）；Hermes Agent 另有「Hermes 設定…」，直接開啟該 instance 的設定分頁。側欄不再重複顯示 Agent 分頁或工作目錄／Git 詳情。檢視模式改從右上「⋯ → 檢視」切換。
 
-聊天不需要先建立或選擇任務。內部沿用 task 表保存歷史關聯，不改 DB schema。「紀錄」頁保留舊任務、筆記與狀態；這些選取只供紀錄管理，不會切換 Agent。主視窗第一次載入時固定舊共用選取，往後各自獨立。工作區保存 Agent 定義、設定、綁定與視窗布局，不強制共用 Project。
+聊天不需要先建立或選擇任務。內部沿用 task 表保存歷史關聯，不改 DB schema。右上「⋯ → 工作紀錄…」對話框保留舊任務、筆記與狀態；這些選取只供紀錄管理，不會切換 Agent。主視窗第一次載入時固定舊共用選取，往後各自獨立。工作區保存 Agent 定義、設定、綁定與視窗布局，不強制共用 Project。
 
 切換檢視或其他 Agent 不會重新派工。文字、附件與畫面狀態按情境保存在本次記憶體；關閉前請處理尚未送出的草稿。綁定規則見 [AGENT-CONTEXTS](AGENT-CONTEXTS.md)。
 
@@ -52,7 +52,7 @@ Claude／Codex 連線到已有綁定 session 時會接續它，不讀取其他�
 
 ## 原生對話與同步
 
-側欄「對話」列出本機 Claude Desktop **Code** 與 Codex 保存的對話，一般 Claude Chat 尚未整合。可只載入紀錄、接續對話，或在所選專案開新對話。重新命名與封存僅作用於 Workspace，不寫回 Desktop。
+側欄「可接續的對話」只列目前 Agent 的 provider 對應的本機 Claude Desktop **Code** 或 Codex 歷史，一般 Claude Chat 尚未整合。預設依綁定 Project 的目錄篩選；勾「顯示全部專案」可瀏覽其他資料夾。尚未綁定 Project 時顯示全部並停用該核取方塊。Hermes／G8毛 會顯示沒有本機歷史對話的說明。可只載入紀錄、接續對話，或在所選專案開新對話。重新命名與封存僅作用於 Workspace，不寫回 Desktop。
 
 各 Agent 綁定自己的 session，以定時更新同步內容，不跟隨 Desktop 焦點。目前不是完整雙向即時同步。新增 instance 可透過自己的 session 控制與「探索原生對話」使用後端支援的功能。
 
@@ -76,11 +76,11 @@ Claude／Codex 的「⋯ → 核准方式」預設每次詢問，也可明確選
 
 ## Monitor 與工作紀錄
 
-主畫面「Monitor 工作台」可直接操作各 Agent 對話，使用近黑底、磷光綠重點的控制台主題。預設專注模式有主要對話與右側 Agent 狀態欄；點右側成員只切換操作對象，不會改 project／session 或啟動工作。窄視窗自動收起狀態欄，改由上方 Agent 分頁切換。
+主畫面「Monitor 工作台」可直接操作各 Agent 對話，預設為暖灰底的 desktop 主題；「設定 → 外觀 → 主題」可立即切換 desktop／hacker／metal 並保存選擇，關閉設定對話框也保留即時主題選擇。預設專注模式有主要對話與右側 Agent 狀態欄；點右側成員只切換操作對象，不會改 project／session 或啟動工作。窄視窗自動收起狀態欄，改由上方 Agent 分頁切換。
 
-標題列「協作總覽」或「檢視 → 協作總覽（唯讀）」顯示規則、派工／驗收、待核准項目與交接事件。它仍是唯讀頁，按「返回工作台」或 Agent 卡片回到可操作對話。右側欄及總覽每秒更新本機狀態，不會因此讀取 backend 原生歷史。
+標題列「工作台 │ 協作總覽」切換的「協作總覽」，或「⋯ → 檢視 → 協作總覽（唯讀）」顯示規則、派工／驗收、待核准項目與交接事件。它仍是唯讀頁，按頂列「工作台」或 Agent 卡片回到可操作對話。右側欄及總覽每秒更新本機狀態，不會因此讀取 backend 原生歷史。
 
-對話布局可切換自動、專注或並排並保存選擇，原本的聊天元件、草稿、附件與 session 不會因切換而重建。工作詳情、筆記、匯出與 Git 檢視依目前 Agent 的對話／專案；在「紀錄」頁則使用所選紀錄。歷史頁雙擊任務只查看本機紀錄，不會恢復 Agent。Tests 顯示已觀察到的結果，不會因開啟畫面就執行測試。Git diff 檢視不包含 commit、push 或 merge 操作。
+頂列「版面」可切換自動、專注或並排並保存選擇，原本的聊天元件、草稿、附件與 session 不會因切換而重建。工作詳情、筆記、匯出與 Git 檢視依目前 Agent 的對話／專案；「工作紀錄…」對話框開啟時則使用所選紀錄，關閉後回到目前 Agent 的脈絡。歷史頁雙擊任務只查看本機紀錄，不會恢復 Agent。Tests 顯示已觀察到的結果，不會因開啟畫面就執行測試。Git diff 檢視不包含 commit、push 或 merge 操作。
 
 匯入 artifact／截圖、匯出 task 與診斷有各自檢查。圖片像素不自動遮罩，匯出圖片需檢視確認。診斷不收集 backend credential 檔案；Raw 是安全過濾後的公開事件，不包含隱藏 reasoning。
 
