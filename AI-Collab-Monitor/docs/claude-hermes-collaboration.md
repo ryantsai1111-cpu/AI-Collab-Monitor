@@ -179,6 +179,7 @@ tail -c 2500 "$log"
 - 狀態事件：`<監看器>\logs\timeline.log`，格式 `<ISO8601 含時區> | <label> | HERMES | <EVENT> | <訊息>`。`RUN_STARTED`、`RUN_ENDED`（`exit=`、`result_exit=`、`dirty=<n> files`）由 `run.sh` 寫；`DECISION_NEEDED`（輸出含 `[DECISION NEEDED]`）、`REPETITION_DETECTED`（含 `Repetition Detected`，stdout 或 stderr 都算）由過濾器寫。
 - 互斥鎖：`C:/tools/hermes/runs/hermes.lock`（`HERMES_LOG_DIR` 可改位置），一行 JSON `{pid, label, worktree, hermes_exe, started}`，pid 是 run.sh 這個 bash 行程（它活著的時間就是整個 run 的時間）；鎖在啟動 hermes 前以 noclobber 原子建立。鎖存在且 pid 活著 → `REFUSED: hermes run <label> (pid N) still running`、exit 3；pid 已死 → 印 `stale lock removed` 後繼續。run.sh 正常結束或被 Ctrl-C／TERM 會刪鎖（只刪自己的）；被硬殺（taskkill）時鎖會殘留，下次啟動發現 pid 已死會自動清掉。
 - 離線測試：`bash ~/.claude/skills/hermes-delegation/scripts/tests/run-offline.sh`，用替身 `fake-hermes.sh`，不會啟動真的 hermes.exe。
+- Claude 的審查決策：`progress.mjs approve／hold／point` 會把 `APPROVE`／`HOLD`／`REWORK` 寫進 `logs\claude.log` 與 timeline，CLAUDE pane 因此不再是空的。
 
 ## §10 補充：Claude 串接 Codex（2026-10-12 實測）
 

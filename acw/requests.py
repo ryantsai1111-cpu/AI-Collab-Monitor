@@ -177,7 +177,12 @@ class MonitorProjection:
             reply = self.clean(event.get('content') or '')
             if len(reply) > RESULT_MAX:
                 reply = reply[:RESULT_MAX] + '...'
-            self.say('[RESULT exit=%s] %s' % (status, reply))
+            # The reply was already streamed line by line above; print only its first line here.
+            lines = [line for line in reply.splitlines() if line.strip()]
+            summary = _clip(lines[0], 200) if lines else ''
+            if len(lines) > 1:
+                summary += ' (+%d more lines, streamed above)' % (len(lines) - 1)
+            self.say('[RESULT exit=%s] %s' % (status, summary))
             for line in reply.splitlines():
                 self.scan(line)
         elif kind == 'error':

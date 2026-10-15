@@ -124,6 +124,7 @@ Claude 用 `hermes-delegation` skill 無頭執行 Hermes 時，`~/.claude/skills
 - `logs\timeline.log`：`<時間> | <label> | HERMES | <EVENT> | <訊息>`，事件為 `RUN_STARTED`、`DECISION_NEEDED`（Hermes 輸出 `[DECISION NEEDED]`）、`REPETITION_DETECTED`、`RUN_ENDED`（含 `exit=`、`result_exit=`、`dirty=<n> files`）。
 - 同一時間只允許一個 Hermes 執行：`C:/tools/hermes/runs/hermes.lock` 記錄 run.sh 這個 bash 行程的 pid（原子建立）；重複啟動會被 `REFUSED`。run.sh 正常結束或被 Ctrl-C／TERM 會刪鎖；被硬殺（taskkill）時鎖會殘留，下次啟動發現 pid 已死會自動清掉。
 - 寫入是附加、UTF-8 無 BOM、CRLF 結尾；`reset-monitor.ps1` 前要先確認沒有 Hermes 正在執行。
+- `logs\claude.log` 與 timeline 的 `CLAUDE` 事件由同一個 skill 的 `progress.mjs` 寫入：Claude 核准（`APPROVE`）、核准但先停住（`HOLD`）或退回重做（`REWORK`）一步時，各加一段決策紀錄。Claude 的其他對話內容不會進來。
 
 ## Agent log 範本
 

@@ -72,3 +72,5 @@
 - 不讓 Claude Code 本身變成協作站裡的一個 adapter；Claude 的 session 由 Claude Desktop 管。
 - 不把 skill 的 `PROGRESS.md`／任務卡搬進 sqlite；它們留在 repo 裡是刻意的，Hermes 讀 repo 就夠。
 - 不替 Hermes 加逐次核准橋接。
+- 不把 Codex 接進請求檔：`deliver-to-codex` skill 沒有無頭執行腳本，Codex 是由 Ryan 在 Codex 桌面版的對話裡驅動，沒有可以攔截的啟動點（2026-10-15 確認）。要接的話得先有一條 Claude 直接啟動 `codex exec` 的路徑，目前沒有這個需求。
+- Claude 本身不進協作站當 agent；它的審查決策由 `hermes-delegation/scripts/progress.mjs` 寫進監看器的 `claude.log` 與 timeline（`APPROVE`／`HOLD`／`REWORK`），協作站經 LegacyReader 看得到。
