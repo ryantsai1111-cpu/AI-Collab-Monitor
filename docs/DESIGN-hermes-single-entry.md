@@ -37,7 +37,7 @@
 
 做法：
 
-1. `run.sh` 啟動前檢查 `data_dir/workspace.lock`（Qt 格式：pid、程式名、主機名各一行）。pid 活著**且** dispatcher 心跳新鮮（`data_dir/requests/.dispatcher.json` 每次 `poll()` 改寫，mtime 距現在不到 15 秒）→ GUI 在跑而且會回應，走請求檔；pid 活著但心跳不存在或太舊（GUI 還是舊版程式、當掉、執行緒卡住）→ 當成 GUI 沒開；否則照現在直接起 hermes.exe（行為不變）。等結果時 run.sh 每 10 秒再看心跳，超過 30 秒沒更新就撤回請求並以 `dispatcher-lost` 結束（不回退，因為 dispatcher 可能已經啟動 Hermes）。
+1. `run.sh` 啟動前只看 dispatcher 心跳（`data_dir/requests/.dispatcher.json`，每次 `poll()` 改寫，內容含 GUI 的 pid）：mtime 距現在不到 15 秒**且**心跳裡的 pid 活著 → GUI 在跑而且會回應，走請求檔；心跳不存在、太舊或 pid 已死（GUI 還是舊版程式、當掉、執行緒卡住）→ 當成 GUI 沒開。不看 `workspace.lock`：QLockFile 在 GUI 重啟後仍留著前一個 pid，而那個 pid 可能被別的程式重用（2026-10-15 實際看到被 Grok Bot.exe 佔用）；否則照現在直接起 hermes.exe（行為不變）。等結果時 run.sh 每 10 秒再看心跳，超過 30 秒沒更新就撤回請求並以 `dispatcher-lost` 結束（不回退，因為 dispatcher 可能已經啟動 Hermes）。
 2. 請求檔：`data_dir/requests/<label>.json`，內容 `{worktree, briefs, label, prompt, run_budget, max_turns, created}`。run.sh 寫完後等 `data_dir/requests/<label>.result.json` 出現，再把 result 的 exit code、`hermes_exit`、git 尾段印成和現在一樣的格式。
 3. core 新增 `poll_requests()`：由 UI 既有的 100ms tick（`ui.py` 的 `poll_events`）每秒呼叫一次。對每個新請求：
    - 以 `repo_path == worktree` 找 project，沒有就 `create_project`；`select_agent_project('local', ...)`。
