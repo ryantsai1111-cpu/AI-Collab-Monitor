@@ -26,6 +26,7 @@ def offline_window(root):
     core.select_project(project['id'], sync=False)
     core.create_task('Local LLM panel acceptance')
     core.drain_events()
+    core.desktop_sessions = lambda agent: []
     return core, adapters, OfflineWindow(core)
 
 

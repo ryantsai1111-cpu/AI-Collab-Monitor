@@ -6,6 +6,7 @@ never spawns a shell, reads credentials, or creates an agent session on startup.
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from datetime import datetime
@@ -17,7 +18,7 @@ from . import approvals
 from .orchestrator import Orchestrator
 from .monitor import AgentRail, MonitorDashboard, collect_snapshot
 from .theme import (CODE_BLOCK_BG, CODE_INLINE_BG, CODE_INLINE_FG, EVENT_COLOR, HEADING_COLOR, MUTED_COLOR,
-                    STATE_COLORS, STATE_IDLE, build_style, console_palette)
+                    STATE_COLORS, STATE_IDLE, SPACE, build_style, console_palette, desktop_palette, metal_palette)
 
 from PySide6.QtCore import Qt, Signal, QObject, QRunnable, QThreadPool, QTimer, QUrl, QByteArray
 from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont, QKeySequence, QPixmap, QTextCharFormat,
@@ -517,6 +518,7 @@ class AgentPanel(QFrame):
         self.state.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         header.addWidget(self.state)
         self.connect_button = button("Connect", self.connect_agent, f"connect_{agent}")
+        self.connect_button.setProperty("primary", True)
         self.connect_button.setAccessibleName(f"Connect {self.window.role_names[agent]}")
         header.addWidget(self.connect_button)
         self.more_button = QToolButton()
@@ -1093,7 +1095,7 @@ class AgentPanel(QFrame):
                             if self.agent == 'dot' else None) or STATE_LABELS.get(state, "狀態待確認（" + state + "）"))
         if self.agent == 'dot': self.state.setToolTip('這是 Workspace 訊息通道狀態，不代表 dot 所有工作的執行狀態')
         color = STATE_COLORS.get(state, STATE_IDLE)
-        self.state.setStyleSheet(f"color: {color};")
+        self.state.setStyleSheet(f"color: {MUTED_COLOR if self.window.theme_name == 'desktop' else color};")
         if state in ("Disconnected", "Offline"):
             self.approval_rules.clear()
             if self._dot_follow is not None:
@@ -1263,7 +1265,7 @@ class AgentPanel(QFrame):
         self.task.setCurrentIndex(max(0, self.task.findData(task.get('id'))))
         for combo in (self.project, self.task): combo.blockSignals(False)
         title = (project.get('name') or '選擇 Project') + ' › ' + (task.get('title') or '新對話')
-        self.context_button.setText('交接關聯：'+compact(title, 36) if self.agent=='dot' else compact(title,48))
+        self.context_button.setText('專案與對話…')
         self.context_button.setToolTip(title + ('\n僅供 Workspace 交接使用；不會切換或建立 dot 對話' if self.agent=='dot' else '\n只切換此角色的專案、任務與對話'))
 
     def project_selected(self, *_):
@@ -1977,17 +1979,17 @@ class SessionNavigator(QWidget):
         self.window = window
         self.sessions = {agent: None for _, agent in self.SOURCES}
         self.collapsed = set()
+        self.loading = set()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
-        self.source = QTabBar()
-        self.source.setObjectName("nav_source")
-        self.source.setDrawBase(False)
-        self.source.setExpanding(True)
-        for title, _ in self.SOURCES:
-            self.source.addTab(title)
-        self.source.currentChanged.connect(lambda _: self.ensure_loaded())
-        layout.addWidget(self.source)
+        layout.setSpacing(SPACE['sm'])
+        self._agent = window._preferred_agent
+        self.empty = label("此 agent 沒有本機歷史對話", True)
+        layout.addWidget(self.empty)
+        self.nav_all_projects = QCheckBox("顯示全部專案")
+        self.nav_all_projects.setObjectName("nav_all_projects")
+        self.nav_all_projects.toggled.connect(self.fill)
+        layout.addWidget(self.nav_all_projects)
         self.search = QLineEdit()
         self.search.setObjectName("nav_search")
         self.search.setPlaceholderText("搜尋對話或專案…")
@@ -2015,7 +2017,7 @@ class SessionNavigator(QWidget):
         self.status.setObjectName("nav_status")
         layout.addWidget(self.status)
         actions = QHBoxLayout()
-        actions.setSpacing(6)
+        actions.setSpacing((SPACE['xs'] + SPACE['sm']) // 2)
         self.open_button = button("接續對話", lambda: self.open_selected(True), "primary")
         self.open_button.setToolTip("切換到該專案、載入紀錄並接續同一個對話（也可按兩下）")
         actions.addWidget(self.open_button, 1)
@@ -2041,9 +2043,33 @@ class SessionNavigator(QWidget):
 
     @property
     def agent(self):
-        return self.SOURCES[max(0, self.source.currentIndex())][1]
+        return self.window.core.provider(self._agent)
+
+    def set_agent(self, agent):
+        if agent != self._agent:
+            self.tree.clear()
+        self._agent = agent
+        supported = self.agent in self.sessions
+        self.empty.setVisible(not supported)
+        for widget in (self.search, self.tree, self.nav_all_projects, self.open_button, self.more):
+            widget.setVisible(supported)
+        if supported:
+            if self.isVisible() and not self.window._loading:
+                self.ensure_loaded()
+            else:
+                self.fill()
+        else:
+            self.tree.clear()
+            self.status.setText("")
+            self.selection_changed()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.set_agent(self._agent)
 
     def ensure_loaded(self):
+        if self.agent not in self.sessions:
+            return
         if self.sessions[self.agent] is None:
             self.load()
         else:
@@ -2051,12 +2077,18 @@ class SessionNavigator(QWidget):
 
     def load(self):
         agent = self.agent
+        if agent not in self.sessions or agent in self.loading:
+            return
+        self.loading.add(agent)
         self.status.setText("正在讀取對話清單…")
         def failed(error):
-            self.status.setText("無法讀取對話清單：" + error)
+            self.loading.discard(agent)
+            if self.agent == agent:
+                self.status.setText("無法讀取對話清單：" + error)
         self.window.run(lambda: self.window.core.desktop_sessions(agent), lambda rows: self.set_sessions(agent, rows), on_error=failed)
 
     def set_sessions(self, agent, rows):
+        self.loading.discard(agent)
         self.sessions[agent] = list(rows or [])
         if agent == self.agent:
             self.fill()
@@ -2087,10 +2119,18 @@ class SessionNavigator(QWidget):
         from .desktop_sessions import group_by_project
         agent, query = self.agent, self.search.text().casefold().strip()
         selected = (self.selected() or {}).get("id")
-        current = (self.window.core.agent_task(agent) or {}).get(agent + "_session")
+        if agent not in self.sessions:
+            return
+        current = (self.window.core.agent_task(self._agent) or {}).get(self._agent + "_session")
+        directory = (self.window.core.agent_project(self._agent) or {}).get('repo_path')
+        self.nav_all_projects.setEnabled(bool(directory))
+        normalize = lambda path: os.path.normcase(os.path.normpath(str(Path(path).resolve())))
+        rows = self.sessions[agent] or []
+        if directory and not self.nav_all_projects.isChecked():
+            rows = [row for row in rows if normalize(row['cwd']) == normalize(directory)]
         self.tree.clear()
         shown, focus = 0, None
-        for group in group_by_project(self.sessions[agent] or []):
+        for group in group_by_project(rows):
             rows = [s for s in group["sessions"] if (self.archived_action.isChecked() or not (s["archived"] or s.get("system")))
                     and (not query or query in (s["title"] + " " + group["name"] + " " + s["cwd"]).casefold())]
             if not rows:
@@ -2117,7 +2157,7 @@ class SessionNavigator(QWidget):
                     font = child.font(0)
                     font.setBold(True)
                     child.setFont(0, font)
-                    child.setForeground(0, QColor(HEADING_COLOR))
+                    child.setForeground(0, QColor('#ececea' if self.window.theme_name == 'desktop' else HEADING_COLOR))
                 parent.addChild(child)
                 if session["id"] == (selected or current):
                     focus = child
@@ -2151,7 +2191,7 @@ class SessionNavigator(QWidget):
     def selection_changed(self):
         record = self.selected() or {}
         session = record.get("kind") == "session"
-        usable = bool(record.get("cwd_exists")) and self.window.mode.currentData() != "Monitor"
+        usable = self.agent in self.sessions and bool(record.get("cwd_exists")) and self.window.mode.currentData() != "Monitor"
         self.open_button.setEnabled(usable and session)
         self.load_action.setEnabled(usable and session)
         self.new_action.setEnabled(usable)
@@ -2162,12 +2202,12 @@ class SessionNavigator(QWidget):
     def open_selected(self, resume):
         record = self.selected() or {}
         if record.get("kind") == "session" and self.open_button.isEnabled():
-            self.window.open_desktop_session(record, resume)
+            self.window.open_desktop_session(dict(record, agent=self._agent), resume)
 
     def new_conversation(self):
         record = self.selected() or {}
         if self.new_action.isEnabled():
-            self.window.new_desktop_conversation(record["cwd"], record.get("agent", self.agent))
+            self.window.new_desktop_conversation(record["cwd"], self._agent)
 
     def _override(self, record, **changes):
         agent = record.get("agent", self.agent)
@@ -2276,13 +2316,13 @@ class MainWindow(QMainWindow):
         self.setObjectName("ai_collaboration_workspace")
         self.resize(1530, 920)
         self.setMinimumSize(640, 420)
-        QApplication.instance().setPalette(console_palette())
-        self.setStyleSheet(build_style("hacker"))
+        self.theme_name = core.get_setting('ui.theme', 'desktop')
+        self.apply_theme(self.theme_name)
         root = QWidget()
         root.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
         layout = QVBoxLayout(root)
-        layout.setContentsMargins(12, 10, 12, 8)
-        layout.setSpacing(10)
+        layout.setContentsMargins(SPACE['md'], (SPACE['sm'] + SPACE['md']) // 2, SPACE['md'], SPACE['sm'])
+        layout.setSpacing((SPACE['sm'] + SPACE['md']) // 2)
         heading = QHBoxLayout()
         self.sidebar_toggle = button("☰", self.toggle_sidebar, "sidebar_toggle")
         self.sidebar_toggle.setAccessibleName("切換專案與對話側欄")
@@ -2306,15 +2346,25 @@ class MainWindow(QMainWindow):
             self.layout_mode.addItem(title, value)
         saved_layout = core.get_setting('ui.layout_mode', 'Focus')
         self.layout_mode.setCurrentIndex(max(0, self.layout_mode.findData(saved_layout)))
-        self.layout_mode.setAccessibleName("對話布局")
+        self.layout_mode.setAccessibleName("版面")
         self.layout_mode.setToolTip("專注：主要對話＋Agent 側欄；並排：多個完整對話；窄視窗保留可讀字級")
         self.layout_mode.currentIndexChanged.connect(self.update_workspace_layout)
+        heading.addWidget(label("版面", True))
         heading.addWidget(self.layout_mode)
         self.auto_button = button("自動協作…", self.start_auto_collab, "auto_collab")
         self.auto_button.setToolTip("選擇任意兩個 Agent 派工與驗收，同一 provider 也可以")
+        self.workspace_views = QTabBar()
+        self.workspace_views.setObjectName('workspace_views')
+        self.workspace_views.setAccessibleName('工作台與協作總覽')
+        self.workspace_views.setDrawBase(False)
+        self.workspace_views.addTab('工作台')
+        self.workspace_views.addTab('協作總覽')
+        self.workspace_views.currentChanged.connect(self.select_workspace_view)
+        self.workspace_views.tabBarClicked.connect(self.select_workspace_view)
         self.monitor_button = button("協作總覽", self.toggle_monitor, "monitor_toggle")
+        self.monitor_button.hide()
         self.monitor_button.setToolTip("協作總覽：進度、規則與待核准項目")
-        heading.addWidget(self.monitor_button)
+        heading.addWidget(self.workspace_views)
         self.details_toggle = button("Work details", self.toggle_details, "details_toggle")
         self.details_toggle.setCheckable(True)
         self.details_toggle.setToolTip("工具、命令、變更、測試、時間線與交接 · Ctrl+Shift+D")
@@ -2324,7 +2374,7 @@ class MainWindow(QMainWindow):
         workspace_menu.setAccessibleName("工作區操作")
         workspace_menu.setPopupMode(QToolButton.InstantPopup)
         menu = QMenu(workspace_menu)
-        for text, callback in (("任務筆記…", self.notes), ("比較回覆…", self.compare),
+        for text, callback in (("工作紀錄…", self.show_records), ("任務筆記…", self.notes), ("比較回覆…", self.compare),
                                ("差異／測試／附件…", self.inspect_artifacts), ("匯出…", self.export),
                                ("設定…", self.settings),
                                ("診斷…", self.diagnostics), ("停止全部 Agent…", self.stop_task)):
@@ -2336,7 +2386,7 @@ class MainWindow(QMainWindow):
         self.run_bar = QFrame()
         self.run_bar.setObjectName("run_bar")
         run_row = QHBoxLayout(self.run_bar)
-        run_row.setContentsMargins(12, 6, 8, 6)
+        run_row.setContentsMargins(SPACE['md'], (SPACE['xs'] + SPACE['sm']) // 2, SPACE['sm'], (SPACE['xs'] + SPACE['sm']) // 2)
         self.run_status = label("")
         self.run_status.setObjectName("run_status")
         self.run_status.setWordWrap(False)
@@ -2357,31 +2407,23 @@ class MainWindow(QMainWindow):
         self.sidebar.setMinimumWidth(230)
         self.sidebar.setMaximumWidth(310)
         side = QVBoxLayout(self.sidebar)
-        side.setContentsMargins(12, 12, 12, 12)
-        side.setSpacing(8)
-        self.sidebar_pages = QTabBar()
-        self.sidebar_pages.setObjectName("sidebar_pages")
-        self.sidebar_pages.setDrawBase(False)
-        self.sidebar_pages.setExpanding(True)
-        self.sidebar_pages.setAccessibleName("側欄頁面")
-        self.sidebar_pages.addTab("對話")
-        self.sidebar_pages.addTab("Agent")
-        self.sidebar_pages.addTab("紀錄")
-        side.addWidget(self.sidebar_pages)
-        self.sidebar_stack = QStackedWidget()
-        self.navigator = SessionNavigator(self)
-        self.sidebar_stack.addWidget(self.navigator)
-        work_page = QWidget()
-        work = QVBoxLayout(work_page)
-        work.setContentsMargins(0, 0, 0, 0)
-        work.setSpacing(8)
-        self.sidebar_stack.addWidget(work_page)
-        side.addWidget(self.sidebar_stack, 1)
+        side.setContentsMargins(SPACE['md'], SPACE['md'], SPACE['md'], SPACE['md'])
+        side.setSpacing(SPACE['sm'])
+        self.sidebar_agent_title = label(self.role_names[self._preferred_agent])
+        self.sidebar_agent_title.setObjectName('console_section')
+        side.addWidget(self.sidebar_agent_title)
+        side.addWidget(label('目前綁定', True))
+        self.records_dialog = QDialog(self)
+        self.records_dialog.setWindowTitle('工作紀錄')
+        self.records_dialog.resize(420, 520)
+        records_layout = QVBoxLayout(self.records_dialog)
         records_page = QWidget()
+        self.records_page = records_page
+        records_layout.addWidget(records_page)
+        self.records_dialog.finished.connect(lambda _: (self.update_context_title(), self.refresh_work_details()))
         records = QVBoxLayout(records_page)
         records.setContentsMargins(0, 0, 0, 0)
-        records.setSpacing(8)
-        self.sidebar_stack.addWidget(records_page)
+        records.setSpacing(SPACE['sm'])
         records.addWidget(label('本機紀錄管理', True))
         records.addWidget(label('此處管理舊任務與紀錄，不會切換任何 Agent 的 Project 或 Session。', True))
         records.addWidget(label("紀錄的專案與任務", True))
@@ -2429,7 +2471,7 @@ class MainWindow(QMainWindow):
         self.mode.setObjectName("view_mode")
         self.mode.setAccessibleName("工作區檢視")
         self.mode.currentIndexChanged.connect(lambda _: self.change_mode(self.mode.currentData()))
-        work.addWidget(self.mode)
+        side.addWidget(self.mode)
         self.mode.hide()
         views_menu = menu.addMenu('檢視')
         self.view_actions = {}
@@ -2439,21 +2481,21 @@ class MainWindow(QMainWindow):
             self.view_actions[self.mode.itemData(index)] = action
         views_menu.aboutToShow.connect(lambda: [action.setChecked(value == self.mode.currentData())
                                                for value, action in self.view_actions.items()])
-        self.sidebar_agent_title = label(self.role_names[self._preferred_agent])
-        self.sidebar_agent_title.setObjectName('console_section')
-        work.addWidget(self.sidebar_agent_title)
         self.session_tabs = QTabWidget()
         self.session_tabs.setObjectName("sidebar_sessions")
         self.session_tabs.setDocumentMode(True)
         self.session_tabs.tabBar().hide()
         self.session_tabs.setAccessibleName("各角色對話")
-        work.addWidget(self.session_tabs, 1)
+        side.addWidget(self.session_tabs, 1)
+        side.addWidget(label('可接續的對話', True))
+        self.navigator = SessionNavigator(self)
+        side.addWidget(self.navigator, 2)
         side.addWidget(button("Settings…", self.settings, "settings"))
         self.workspace_splitter.addWidget(self.sidebar)
         content = QWidget()
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(0, 0, 0, 0)
-        content_layout.setSpacing(8)
+        content_layout.setSpacing(SPACE['sm'])
         roles = QHBoxLayout()
         self.role_tabs = QTabBar()
         self.role_tabs.setObjectName("role_tabs")
@@ -2467,10 +2509,8 @@ class MainWindow(QMainWindow):
             self.role_tabs.addTab(self.role_names[agent] + " · " + ROLE_LABELS[self.core.provider(agent)])
         self.role_tabs.currentChanged.connect(self.select_role)
         roles.addWidget(self.role_tabs, 1)
-        roles.addWidget(button('+ Agent', self.add_agent_dialog, 'add_agent'))
         self.unfocus_button = button("並排檢視", lambda: self.focus_agent(None), "unfocus")
         self.unfocus_button.hide()
-        roles.addWidget(self.unfocus_button)
         content_layout.addLayout(roles)
         workspace_actions = QHBoxLayout()
         self.workspace_hint = label("MONITOR / LIVE WORKSPACE")
@@ -2497,9 +2537,11 @@ class MainWindow(QMainWindow):
         self.chat_workspace = QWidget()
         chat_layout = QHBoxLayout(self.chat_workspace)
         chat_layout.setContentsMargins(0, 0, 0, 0)
-        chat_layout.setSpacing(10)
+        chat_layout.setSpacing((SPACE['sm'] + SPACE['md']) // 2)
         chat_layout.addWidget(self.splitter, 1)
         self.agent_rail = AgentRail()
+        self.agent_rail.box.insertWidget(self.agent_rail.box.indexOf(self.agent_rail.add_button) + 1, self.unfocus_button)
+        menu.addAction('新增 Agent…', self.add_agent_dialog)
         self.agent_rail.open_role.connect(self.open_monitor_role)
         self.agent_rail.add_agent.connect(self.add_agent_dialog)
         chat_layout.addWidget(self.agent_rail)
@@ -2515,6 +2557,8 @@ class MainWindow(QMainWindow):
         self.monitor_dashboard.open_role.connect(self.open_monitor_role)
         self.monitor_dashboard.open_transcripts.connect(self.show_monitor_transcripts)
         self.stack.addWidget(self.monitor_dashboard)
+        self.monitor_dashboard.apply_theme(self.theme_name)
+        self.agent_rail.setProperty('theme', self.theme_name)
         self._monitor_clock = 0.0
         content_layout.addWidget(self.stack, 1)
         self.details_panel = QFrame()
@@ -2522,14 +2566,14 @@ class MainWindow(QMainWindow):
         self.details_panel.setMinimumHeight(140)
         self.details_panel.setMaximumHeight(300)
         detail_layout = QVBoxLayout(self.details_panel)
-        detail_layout.setContentsMargins(12, 8, 12, 8)
+        detail_layout.setContentsMargins(SPACE['md'], SPACE['sm'], SPACE['md'], SPACE['sm'])
         self.details_tabs = QTabWidget()
         self.details_tabs.setObjectName("details_tabs")
         self.detail_trees = {}
         for title in ("Tools", "Commands", "Changes", "Tests", "Timeline", "Handoffs"):
             page = QWidget()
             page_layout = QVBoxLayout(page)
-            page_layout.setContentsMargins(0, 6, 0, 0)
+            page_layout.setContentsMargins(0, (SPACE['xs'] + SPACE['sm']) // 2, 0, 0)
             tree = QTreeWidget()
             tree.setObjectName("details_" + title.lower())
             tree.setHeaderLabels(["來源", "事件／狀態", "摘要"])
@@ -2604,12 +2648,6 @@ class MainWindow(QMainWindow):
             action.triggered.connect(lambda checked=False, agent=agent: self.focus_agent(agent))
             self.addAction(action)
         self.reload_context()
-        self.sidebar_pages.currentChanged.connect(self.sidebar_page_changed)
-        # Local conversations are read only once this page is shown, never during construction.
-        self.sidebar_pages.setCurrentIndex({'nav': 0, 'work': 1, 'records': 2}.get(core.get_setting('ui.sidebar_page', 'work'), 1))
-        self.sidebar_stack.setCurrentIndex(self.sidebar_pages.currentIndex())
-        if self.sidebar_pages.currentIndex() == 0:
-            QTimer.singleShot(0, self.navigator, self.navigator.ensure_loaded)
         geometry = core.get_setting("ui.geometry", "")
         if geometry:
             self.restoreGeometry(QByteArray.fromBase64(str(geometry).encode()))
@@ -2626,6 +2664,20 @@ class MainWindow(QMainWindow):
         self.sync_timer.start(3000)
         QTimer.singleShot(0, self, self.update_workspace_layout)
         self.refresh_monitor()
+
+    def apply_theme(self, name):
+        self.theme_name = name if name in ('desktop', 'hacker', 'metal') else 'desktop'
+        self.setProperty('theme', self.theme_name)
+        palettes = {'desktop': desktop_palette, 'hacker': console_palette, 'metal': metal_palette}
+        QApplication.instance().setPalette(palettes[self.theme_name]())
+        self.setStyleSheet(build_style(self.theme_name))
+        if hasattr(self, 'monitor_dashboard'):
+            self.monitor_dashboard.apply_theme(self.theme_name)
+            for panel in self.panels.values():
+                color = MUTED_COLOR if self.theme_name == 'desktop' else STATE_COLORS.get(panel.connection_state, STATE_IDLE)
+                panel.state.setStyleSheet(f'color: {color};')
+            self.navigator.fill()
+            self.refresh_monitor()
 
     def add_agent_dialog(self):
         dialog = QDialog(self)
@@ -2700,21 +2752,23 @@ class MainWindow(QMainWindow):
         return (agent, identifier(self.core.agent_project(agent) or {}), identifier(task), task.get(agent + '_session') or '')
 
     def view_task(self):
-        if hasattr(self, 'sidebar_pages') and self.sidebar_pages.currentIndex() == 2:
+        if hasattr(self, 'records_dialog') and self.records_dialog.isVisible():
             return self.core.current_task
         return self.core.agent_task(self._preferred_agent)
 
     def view_project(self):
-        if hasattr(self, 'sidebar_pages') and self.sidebar_pages.currentIndex() == 2:
+        if hasattr(self, 'records_dialog') and self.records_dialog.isVisible():
             return self.core.current_project
         return self.core.agent_project(self._preferred_agent)
 
     def update_context_title(self):
         if not hasattr(self, 'context_title'): return
         if hasattr(self, 'sidebar_agent_title'):
-            self.sidebar_agent_title.setText(self.role_names[self._preferred_agent])
+            agent = self._preferred_agent
+            state = self.panels[agent].state.text() if hasattr(self, 'panels') else ''
+            self.sidebar_agent_title.setText(self.role_names[agent] + ' · ' + ROLE_LABELS[self.core.provider(agent)] + '\n' + state)
         project, task = self.view_project() or {}, self.view_task() or {}
-        prefix = '本機紀錄' if hasattr(self, 'sidebar_pages') and self.sidebar_pages.currentIndex() == 2 else self.role_names[self._preferred_agent]
+        prefix = '本機紀錄' if hasattr(self, 'records_dialog') and self.records_dialog.isVisible() else self.role_names[self._preferred_agent]
         sid = (task.get(self._preferred_agent + '_session') or '') if prefix != '本機紀錄' else ''
         saved = self.core.store.get('sessions', {'agent': self._preferred_agent, 'id': sid}) if sid else None
         title = (saved or {}).get('title') or task.get('title') or '新對話'
@@ -2743,19 +2797,16 @@ class MainWindow(QMainWindow):
             self.sidebar_toggle.setFocus()
         QTimer.singleShot(0, self, self.update_workspace_layout)
 
-    def sidebar_page_changed(self, index):
-        self.sidebar_stack.setCurrentIndex(index)
-        self.core.set_setting("ui.sidebar_page", ('nav', 'work', 'records')[index])
+    def show_records(self):
+        self.records_dialog.show()
+        self.records_dialog.raise_()
         self.update_context_title()
         self.refresh_work_details()
-        if index == 0:
-            self.navigator.ensure_loaded()
 
     def show_sessions(self, agent):
         self.sidebar.show()
         self.sidebar_toggle.setChecked(True)
-        self.sidebar_pages.setCurrentIndex(1)
-        self.session_tabs.setCurrentIndex(self.agents.index(agent))
+        self.focus_role(agent)
         self.panels[agent].session.setFocus()
         QTimer.singleShot(0, self, self.update_workspace_layout)
 
@@ -2768,9 +2819,14 @@ class MainWindow(QMainWindow):
             return
         self._preferred_agent = self.agents[index]
         if not self._loading: self.core.set_setting('ui.active_agent', self._preferred_agent)
-        if not self._loading and self.sidebar_pages.currentIndex() == 2:
-            self.sidebar_pages.setCurrentIndex(1)
+        self.role_tabs.blockSignals(True)
+        self.role_tabs.setCurrentIndex(index)
+        self.role_tabs.blockSignals(False)
+        self.session_tabs.blockSignals(True)
         self.session_tabs.setCurrentIndex(index)
+        self.session_tabs.blockSignals(False)
+        if hasattr(self, 'navigator'):
+            self.navigator.set_agent(self._preferred_agent)
         self.update_context_title()
         self.refresh_work_details()
         if self.focused_agent is not None:
@@ -2781,6 +2837,7 @@ class MainWindow(QMainWindow):
     def update_role_tabs(self):
         if not hasattr(self, "panels"):
             return
+        self.update_context_title()
         for index, agent in enumerate(self.agents):
             panel = self.panels[agent]
             pending = len(panel.pending_approval_events)
@@ -2803,7 +2860,9 @@ class MainWindow(QMainWindow):
             if focused and not was_focused and all(not panel.isHidden() for panel in self.panels.values()):
                 self._grid_sizes = self.splitter.sizes()
             self.focused_agent = self._preferred_agent if focused else None
-            self.agent_rail.setVisible(focused and available >= 760 and self.mode.currentData() == 'Workspace')
+            rail_visible = focused and available >= 760 and self.mode.currentData() == 'Workspace'
+            self.agent_rail.setVisible(rail_visible)
+            self.role_tabs.setVisible(not rail_visible and self.mode.currentData() == 'Workspace')
             self.console_mark.setText('ACW' if self.width() < 1050 else 'ACW / CONTROL ROOM')
             self.workspace_hint.setText('MONITOR / 專注對話' if focused else 'MONITOR / 並排對話')
             for agent, panel in self.panels.items():
@@ -2846,7 +2905,7 @@ class MainWindow(QMainWindow):
             self.details_dialog = QDialog(self)
             self.details_dialog.setWindowTitle("工作詳情 · 本機紀錄")
             dialog_layout = QVBoxLayout(self.details_dialog)
-            dialog_layout.setContentsMargins(12, 12, 12, 12)
+            dialog_layout.setContentsMargins(SPACE['md'], SPACE['md'], SPACE['md'], SPACE['md'])
             self.details_dialog.finished.connect(self.return_details_tabs)
         self.details_panel.hide()
         self.details_panel.layout().removeWidget(self.details_tabs)
@@ -3064,10 +3123,7 @@ class MainWindow(QMainWindow):
                 panel.restore_view_state(view)
                 self._loaded_agent_keys[agent] = agent_key
             self._loaded_context_key = key
-            if hasattr(self, "navigator") and self.navigator.sessions[self.navigator.agent] is not None:
-                self.navigator.fill()
-            self.role_tabs.setCurrentIndex(self.agents.index(self._preferred_agent))
-            self.session_tabs.setCurrentIndex(self.agents.index(self._preferred_agent))
+            self.select_role(self.agents.index(self._preferred_agent))
             self.update_context_title()
             self.details_tabs.setCurrentIndex(saved_view.get("details_tab", 0))
             self.refresh_work_details()
@@ -3203,8 +3259,7 @@ class MainWindow(QMainWindow):
     def show_desktop_sessions(self, agent="claude"):
         self.sidebar.show()
         self.sidebar_toggle.setChecked(True)
-        self.navigator.source.setCurrentIndex([value for _, value in SessionNavigator.SOURCES].index(agent))
-        self.sidebar_pages.setCurrentIndex(0)
+        self.focus_role(agent)
         self.navigator.ensure_loaded()
         self.navigator.search.setFocus()
         QTimer.singleShot(0, self, self.update_workspace_layout)
@@ -3313,9 +3368,7 @@ class MainWindow(QMainWindow):
         self.run(lambda: self.core.open_desktop_project(directory, title, agent=agent), opened, agent, on_error=lambda _: self._opening_done(agent))
 
     def focus_role(self, agent):
-        self._preferred_agent = agent
-        self.role_tabs.setCurrentIndex(self.agents.index(agent))
-        self.session_tabs.setCurrentIndex(self.agents.index(agent))
+        self.select_role(self.agents.index(agent))
 
     def start_auto_collab(self):
         if self.orchestrator and self.orchestrator.active:
@@ -3659,10 +3712,15 @@ class MainWindow(QMainWindow):
         if agent is None or (agent == self.focused_agent and self.layout_mode.currentData() == "Focus"):
             self.layout_mode.setCurrentIndex(self.layout_mode.findData("Auto"))
         else:
-            self._preferred_agent = agent
-            self.role_tabs.setCurrentIndex(self.agents.index(agent))
+            self.focus_role(agent)
             self.layout_mode.setCurrentIndex(self.layout_mode.findData("Focus"))
         self.update_workspace_layout()
+
+    def select_workspace_view(self, index):
+        if index == 1 and self.mode.currentData() == 'Monitor' and self.stack.currentIndex() == 0:
+            self.toggle_monitor()
+        else:
+            self.mode.setCurrentIndex(self.mode.findData('Monitor' if index else 'Workspace'))
 
     def change_mode(self, mode):
         for panel in self.panels.values():
@@ -3671,7 +3729,10 @@ class MainWindow(QMainWindow):
                 if mid.startswith("legacy-"):
                     card.setVisible(mode == "Monitor")
         self.stack.setCurrentIndex(1 if mode == "Timeline" else 2 if mode == "History" else 3 if mode == 'Monitor' else 0)
-        self.monitor_button.setText('返回工作台' if mode == 'Monitor' else '協作總覽')
+        self.workspace_views.blockSignals(True)
+        self.workspace_views.setCurrentIndex(1 if mode == 'Monitor' else 0)
+        self.workspace_views.blockSignals(False)
+        self.navigator.selection_changed()
         if mode == "Timeline":
             self.refresh_timeline()
         elif mode == "History":
@@ -3698,15 +3759,15 @@ class MainWindow(QMainWindow):
 
     def open_monitor_role(self, agent):
         self.mode.setCurrentIndex(self.mode.findData('Workspace'))
-        self.sidebar_pages.setCurrentIndex(1)
-        self._preferred_agent = agent
-        self.role_tabs.setCurrentIndex(self.agents.index(agent))
+        self.records_dialog.hide()
+        self.focus_role(agent)
         self.layout_mode.setCurrentIndex(self.layout_mode.findData('Focus'))
         self.update_workspace_layout()
         self.refresh_monitor()
 
     def refresh_monitor(self):
         self._monitor_clock = time.monotonic()
+        self.agent_rail.setProperty('theme', self.theme_name)
         snapshot = collect_snapshot(self.core, self.panels, self.orchestrator)
         self.monitor_dashboard.refresh(snapshot)
         self.agent_rail.refresh(snapshot, self._preferred_agent)
@@ -3961,7 +4022,7 @@ class MainWindow(QMainWindow):
     def open_history_item(self, item):
         kind, row = item.data(0, Qt.UserRole)
         if kind == "task" and self.confirm_context_change():
-            self.run(lambda: self.core.select_task(identifier(row)), lambda _: (self.sidebar_pages.setCurrentIndex(2), self.reload_context(), self.mode.setCurrentIndex(self.mode.findData("Workspace"))))
+            self.run(lambda: self.core.select_task(identifier(row)), lambda _: (self.show_records(), self.reload_context(), self.mode.setCurrentIndex(self.mode.findData("Workspace"))))
         elif kind == "result":
             self.show_detail("Search result", row)
 
@@ -4336,6 +4397,18 @@ class MainWindow(QMainWindow):
         tabs.addTab(paths, "路徑")
         appearance = QWidget()
         appearance_layout = QVBoxLayout(appearance)
+        appearance_layout.addWidget(label('主題', True))
+        theme_choice = QComboBox()
+        theme_choice.setObjectName('ui_theme')
+        for name in ('desktop', 'hacker', 'metal'):
+            theme_choice.addItem(name, name)
+        theme_choice.setCurrentIndex(max(0, theme_choice.findData(self.theme_name)))
+        def change_theme():
+            name = theme_choice.currentData()
+            self.core.set_setting('ui.theme', name)
+            self.apply_theme(name)
+        theme_choice.currentIndexChanged.connect(change_theme)
+        appearance_layout.addWidget(theme_choice)
         topmost = QCheckBox("保持在最上層")
         topmost.setChecked(self.core.get_setting("ui.always_on_top", False))
         appearance_layout.addWidget(topmost)

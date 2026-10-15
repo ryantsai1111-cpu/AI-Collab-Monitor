@@ -48,6 +48,7 @@ class DotFollowTests(unittest.TestCase):
         self.dot._refresh_capabilities()
         self.core.store.update("tasks", {"id": task["id"]}, {"dot_session": TARGET})
         self.core._contexts.clear()
+        self.core.desktop_sessions = lambda agent: []
         self.window = OfflineWindow(self.core)
         self.window.refresh_agent("dot")
         self.panel = self.window.panels["dot"]

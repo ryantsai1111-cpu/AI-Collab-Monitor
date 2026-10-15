@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel, QPushBu
                                QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
 from .presentation import compact, time_label
+from .theme import MUTED_COLOR, RADIUS, SPACE
 
 ROLES = {'claude': ('Claude', '依本次任務分工'), 'codex': ('Codex', '依本次任務分工'),
          'dot': ('G8毛', '可選複核'), 'local': ('Hermes', '可選協作')}
@@ -60,8 +61,8 @@ class RoleCard(QFrame):
         self.setObjectName('monitor_role_' + agent)
         self.setProperty('card', True)
         box = QVBoxLayout(self)
-        box.setContentsMargins(16, 14, 16, 14)
-        box.setSpacing(8)
+        box.setContentsMargins(SPACE['lg'], (SPACE['md'] + SPACE['lg']) // 2, SPACE['lg'], (SPACE['md'] + SPACE['lg']) // 2)
+        box.setSpacing(SPACE['sm'])
         top = QHBoxLayout()
         self.title = text(name or ROLES.get(agent, (agent,))[0], 'role')
         self.status = text('', 'muted')
@@ -89,7 +90,8 @@ class RoleCard(QFrame):
                  COLORS['running'] if current or row['state'] == 'Busy' else
                  COLORS['ready'] if row['state'] == 'Connected' else COLORS['muted'])
         self.status.setText(f"{row['approvals']} 待核准" if row['approvals'] else STATES.get(row['state'], row['state']))
-        self.status.setStyleSheet('color: ' + color)
+        desktop = self.window().property('theme') == 'desktop'
+        self.status.setStyleSheet('color: ' + (MUTED_COLOR if desktop else color))
         participation = ('本輪參與' if run['state'] == 'running' else '最近協作角色') if in_scope else '獨立角色'
         duty = ROLES.get(row.get('provider', row['agent']), ('', '依本次任務分工'))[1]
         if in_scope:
@@ -100,7 +102,7 @@ class RoleCard(QFrame):
         self.session.setText(row['session'])
         self.session.setToolTip('Session ID：' + (row['session_id'] or '無'))
         self.action.setText('檢視待核准項目 →' if row['approvals'] else '開啟對話 →')
-        self.setStyleSheet(f'QFrame#monitor_role_{row["agent"]} {{ border-top: 2px solid {color}; }}')
+        self.setStyleSheet('' if desktop else f'QFrame#monitor_role_{row["agent"]} {{ border-top: 2px solid {color}; }}')
 
 
 class MonitorDashboard(QScrollArea):
@@ -119,8 +121,8 @@ class MonitorDashboard(QScrollArea):
         self.body.setObjectName('monitor_body')
         self.setWidget(self.body)
         self.box = QVBoxLayout(self.body)
-        self.box.setContentsMargins(24, 20, 24, 24)
-        self.box.setSpacing(16)
+        self.box.setContentsMargins(SPACE['xl'], SPACE['lg'] + SPACE['xs'], SPACE['xl'], SPACE['xl'])
+        self.box.setSpacing(SPACE['lg'])
         eyebrow = text('>_ ACW / OPERATIONS CONSOLE', 'eyebrow')
         eyebrow.setProperty('terminal', True)
         self.box.addWidget(eyebrow)
@@ -135,8 +137,8 @@ class MonitorDashboard(QScrollArea):
         self.hero.setObjectName('monitor_run')
         self.hero.setProperty('card', True)
         hero = QVBoxLayout(self.hero)
-        hero.setContentsMargins(20, 18, 20, 18)
-        hero.setSpacing(10)
+        hero.setContentsMargins(SPACE['lg'] + SPACE['xs'], SPACE['lg'] + SPACE['xs'] // 2, SPACE['lg'] + SPACE['xs'], SPACE['lg'] + SPACE['xs'] // 2)
+        hero.setSpacing((SPACE['sm'] + SPACE['md']) // 2)
         self.phase = text('尚未啟動協作', 'phase')
         self.task = text()
         self.metrics = text('', 'accent')
@@ -149,7 +151,7 @@ class MonitorDashboard(QScrollArea):
         self.box.addWidget(self.attention)
         self.box.addWidget(text('01 / AGENTS    角色與工作範圍', 'section'))
         self.grid = QGridLayout()
-        self.grid.setSpacing(12)
+        self.grid.setSpacing(SPACE['md'])
         self.cards = {agent: RoleCard(agent, self.open_role, name) for agent, name in self.names.items()}
         self.columns = 0
         self.box.addLayout(self.grid)
@@ -163,7 +165,7 @@ class MonitorDashboard(QScrollArea):
         self.timeline.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.box.addWidget(self.timeline)
         self.box.addStretch()
-        self.setStyleSheet('''
+        self.console_style = '''
             QScrollArea#monitor_dashboard, QWidget#monitor_body { background: #080d0c; }
             QFrame[card="true"] { background: #101816; border: 1px solid #30423b; border-radius: 3px; }
             QFrame#monitor_run { border-left: 3px solid #a3e635; }
@@ -184,8 +186,26 @@ class MonitorDashboard(QScrollArea):
             QPushButton:pressed { color: #080d0c; background: #a3e635; }
             QScrollBar:vertical { width: 10px; background: #080d0c; }
             QScrollBar::handle:vertical { background: #486153; border: none; border-radius: 2px; min-height: 28px; }
-        ''')
+        '''
+        self.apply_theme('hacker')
         self.reflow()
+
+    def apply_theme(self, name):
+        self.setProperty('theme', name)
+        style = self.console_style
+        if name == 'desktop':
+            style = """QScrollArea#monitor_dashboard, QWidget#monitor_body { background: #262624; }
+                QFrame[card="true"] { background: #30302e; border: 1px solid #3a3a3a; border-radius: @RADIUS@px; }
+                QLabel { color: #d6d5d0; background: transparent; border: none; font-size: 13px; }
+                QLabel[kind="heading"] { color: #ececea; font-size: 24px; font-weight: 600; }
+                QLabel[kind="phase"] { color: #ececea; font-size: 20px; font-weight: 600; }
+                QLabel[kind="role"] { color: #ececea; font-size: 16px; font-weight: 600; }
+                QLabel[kind="section"], QLabel[kind="eyebrow"], QLabel[kind="muted"] { color: @MUTED@; }
+                QLabel[kind="section"] { font-weight: 600; padding-top: 8px; }
+                QLabel[kind="eyebrow"] { font-size: 11px; }
+                QLabel[kind="attention"], QLabel#monitor_log { color: @MUTED@; background: #262624; border: 1px solid #3a3a3a; border-radius: @RADIUS@px; padding: 12px; }
+            """
+        self.setStyleSheet(style.replace('@RADIUS@', str(RADIUS)).replace('@MUTED@', MUTED_COLOR))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -261,15 +281,15 @@ class AgentRail(QScrollArea):
         body = QWidget()
         body.setObjectName('agent_rail_body')
         self.box = QVBoxLayout(body)
-        self.box.setContentsMargins(12, 16, 12, 12)
-        self.box.setSpacing(12)
+        self.box.setContentsMargins(SPACE['md'], SPACE['lg'], SPACE['md'], SPACE['md'])
+        self.box.setSpacing(SPACE['md'])
         self.heading = text('AGENTS / 00', 'eyebrow')
         self.heading.setObjectName('console_section')
         self.summary = text('各 Agent 可獨立工作', 'muted')
         self.box.addWidget(self.heading)
         self.box.addWidget(self.summary)
         self.rows = QVBoxLayout()
-        self.rows.setSpacing(8)
+        self.rows.setSpacing(SPACE['sm'])
         self.box.addLayout(self.rows)
         self.box.addStretch()
         self.add_button = QPushButton('＋ 新增 Agent')
@@ -295,8 +315,9 @@ class AgentRail(QScrollArea):
                 card = QFrame()
                 card.setObjectName('teammate')
                 box = QVBoxLayout(card)
-                box.setContentsMargins(10, 10, 10, 10)
-                box.setSpacing(6)
+                margin = (SPACE['sm'] + SPACE['md']) // 2
+                box.setContentsMargins(margin, margin, margin, margin)
+                box.setSpacing((SPACE['xs'] + SPACE['sm']) // 2)
                 action = QPushButton()
                 action.setObjectName('teammate_open')
                 action.clicked.connect(lambda checked=False, agent=agent: self.open_role.emit(agent))
@@ -317,7 +338,7 @@ class AgentRail(QScrollArea):
                      COLORS['running'] if row['state'] == 'Busy' else
                      COLORS['ready'] if row['state'] == 'Connected' else COLORS['muted'])
             status.setText('● ' + state)
-            status.setStyleSheet('color: ' + color)
+            status.setStyleSheet('color: ' + (MUTED_COLOR if self.property('theme') == 'desktop' else color))
             context.setText(row['project'])
             context.setToolTip(row['project'] + '\n' + row['task'])
             session.setText(row['session'])
