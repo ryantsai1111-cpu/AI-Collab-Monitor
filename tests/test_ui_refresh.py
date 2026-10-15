@@ -20,7 +20,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from PySide6.QtCore import QCoreApplication, QEvent, Qt
-from PySide6.QtGui import QInputMethodEvent, QTextCursor
+from PySide6.QtGui import QInputMethodEvent, QPalette, QTextCursor
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QComboBox, QDialog, QLabel, QMenu, QMessageBox, QPushButton, QToolButton
 
@@ -361,6 +361,63 @@ class WorkspaceUiRefreshTests(unittest.TestCase):
             self.window.settings()
         self.assert_no_adapter_actions()
 
+    def test_desktop_sidebar_name_and_metadata_have_distinct_hierarchy(self):
+        self.window.focus_role('codex')
+        self.settle()
+        title, meta = self.window.sidebar_agent_title, self.window.sidebar_agent_meta
+        self.assertEqual('Codex', title.text())
+        self.assertEqual('sidebar_agent_title', title.objectName())
+        self.assertEqual(15, title.font().pixelSize())
+        self.assertEqual('#ececea', title.palette().color(QPalette.WindowText).name())
+        self.assertEqual('#8f8e87', meta.palette().color(QPalette.WindowText).name())
+        self.assertIn(self.window.panels['codex'].state.text(), meta.text())
+
+    def test_desktop_status_colors_match_across_panel_rail_and_overview(self):
+        panel = self.window.panels['claude']
+        cases = (('Connected', '#8f8e87'), ('Busy', '#8f8e87'), ('Connecting', '#8f8e87'),
+                 ('Disconnected', '#8f8e87'), ('Error', '#f27d6b'),
+                 ('Interrupted', '#f27d6b'), ('Blocked', '#f27d6b'))
+        def check(expected):
+            self.window.update_role_tabs()
+            self.window.refresh_monitor()
+            for label in (panel.state, self.window.agent_rail.cards['claude'][2],
+                          self.window.monitor_dashboard.cards['claude'].status):
+                self.assertIn(expected, label.styleSheet())
+        for state, color in cases:
+            with self.subTest(state=state):
+                self.adapters['claude'].state = state
+                panel.set_state(state)
+                check(color)
+        panel.pending_approval_events['fixture-approval'] = {}
+        check('#e3b341')
+        panel.pending_approval_events.clear()
+        check('#f27d6b')
+        self.adapters['claude'].state = 'Disconnected'
+        panel.set_state('Disconnected')
+        self.assert_no_adapter_actions()
+
+    def test_workspace_switch_has_no_visible_selection_in_record_views(self):
+        workspace, overview = self.window.workspace_view_buttons
+        for mode in ('Timeline', 'History'):
+            with self.subTest(mode=mode):
+                self.window.mode.setCurrentIndex(self.window.mode.findData(mode))
+                self.settle()
+                self.assertFalse(workspace.isChecked())
+                self.assertFalse(overview.isChecked())
+                if mode == 'Timeline':
+                    QTest.mouseClick(workspace, Qt.LeftButton)
+                else:
+                    workspace.setFocus()
+                    QTest.keyClick(workspace, Qt.Key_Space)
+                self.assertEqual('Workspace', self.window.mode.currentData())
+                self.assertTrue(workspace.isChecked())
+                self.assertFalse(overview.isChecked())
+        QTest.mouseClick(overview, Qt.LeftButton)
+        self.assertEqual('Monitor', self.window.mode.currentData())
+        self.assertTrue(overview.isChecked())
+        self.assertFalse(workspace.isChecked())
+        self.assertIs(self.window.stack.currentWidget(), self.window.monitor_dashboard)
+
     def test_agent_selectors_and_sidebar_follow_the_same_agent(self):
         self.window.resize(1800, 1000)
         self.window.layout_mode.setCurrentIndex(self.window.layout_mode.findData('Focus'))
@@ -373,7 +430,7 @@ class WorkspaceUiRefreshTests(unittest.TestCase):
         self.assertEqual(self.window.agents.index('codex'), self.window.session_tabs.currentIndex())
         self.assertTrue(self.window.context_title.text().startswith('Codex'))
         self.assertEqual('專案與對話…', self.window.panels['codex'].context_button.text())
-        self.assertIn(self.window.panels['codex'].state.text(), self.window.sidebar_agent_title.text())
+        self.assertIn(self.window.panels['codex'].state.text(), self.window.sidebar_agent_meta.text())
         self.window.layout_mode.setCurrentIndex(self.window.layout_mode.findData('Three panes'))
         self.settle()
         self.assertFalse(self.window.agent_rail.isVisible())
@@ -448,12 +505,12 @@ class WorkspaceUiRefreshTests(unittest.TestCase):
 
     def test_visible_view_switch_returns_from_timeline_and_readonly_transcripts(self):
         self.window.mode.setCurrentIndex(self.window.mode.findData('Timeline'))
-        QTest.mouseClick(self.window.workspace_views, Qt.LeftButton, pos=self.window.workspace_views.tabRect(0).center())
+        QTest.mouseClick(self.window.workspace_view_buttons[0], Qt.LeftButton)
         self.assertEqual('Workspace', self.window.mode.currentData())
         self.window.mode.setCurrentIndex(self.window.mode.findData('Monitor'))
         self.window.show_monitor_transcripts()
         self.assertEqual(0, self.window.stack.currentIndex())
-        QTest.mouseClick(self.window.workspace_views, Qt.LeftButton, pos=self.window.workspace_views.tabRect(1).center())
+        QTest.mouseClick(self.window.workspace_view_buttons[1], Qt.LeftButton)
         self.assertIs(self.window.stack.currentWidget(), self.window.monitor_dashboard)
         self.assertEqual('Monitor', self.window.mode.currentData())
 

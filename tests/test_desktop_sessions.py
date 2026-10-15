@@ -15,7 +15,7 @@ from PySide6.QtWidgets import QApplication
 
 from acw import desktop_sessions
 from acw.core import WorkspaceCore
-from acw.ui import AGENTS, SessionNavigator
+from acw.ui import AGENTS, SessionNavigator, _normalize_dir, _same_dir
 from test_ui_refresh import OfflineAdapter, OfflineWindow
 
 SESSION = "11111111-2222-4333-8444-555555555555"
@@ -72,6 +72,15 @@ class DesktopSessionFixture(unittest.TestCase):
 
 
 class ReaderTests(DesktopSessionFixture):
+    @unittest.skipUnless(os.name == 'nt', 'Windows path spelling semantics')
+    def test_same_dir_accepts_case_mixed_separators_and_trailing_separator(self):
+        directory = str(self.repo)
+        variants = (directory.upper(), directory.replace('\\', '/', 1), directory + '\\')
+        for variant in variants:
+            with self.subTest(cwd=variant):
+                self.assertTrue(_same_dir(directory, variant))
+        self.assertFalse(_same_dir(directory, self.root / 'other-repository'))
+
     def test_list_returns_only_whitelisted_fields_and_skips_unreadable_files(self):
         sessions = desktop_sessions.list_desktop_sessions()
         self.assertEqual([SESSION, OTHER], [s["id"] for s in sessions])
@@ -115,6 +124,23 @@ class CoreAndUiTests(DesktopSessionFixture):
     def tearDown(self):
         self.core.close()
         super().tearDown()
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows path spelling semantics')
+    def test_bound_directory_is_normalized_once_per_fill_and_matches_aliases(self):
+        project = self.core.create_project('Bound project', self.repo)
+        window = OfflineWindow(self.core)
+        try:
+            self.core.select_agent_project('claude', project['id'])
+            directory = project['repo_path']
+            variants = (directory.upper(), directory.replace('\\', '/', 1), directory + '\\')
+            window.navigator.sessions['claude'] = [dict(self.record, id=f'alias-{index}', cwd=value)
+                                                   for index, value in enumerate(variants)]
+            with patch('acw.ui._normalize_dir', wraps=_normalize_dir) as normalize:
+                window.navigator.fill()
+            self.assertEqual(1, [call.args[0] for call in normalize.call_args_list].count(directory))
+            self.assertEqual(3, window.navigator.tree.topLevelItem(0).childCount())
+        finally:
+            window.close()
 
     def test_open_creates_project_task_mapping_and_history_without_contacting_claude(self):
         result = self.core.open_desktop_session(self.record)

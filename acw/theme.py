@@ -109,7 +109,6 @@ QTreeWidget, QTableWidget { color: #e9eef3; background: #0f1215; border: 1px sol
 QTreeWidget::item { padding: 5px; }
 QTableCornerButton::section { background: #393e45; border: none; }
 QSplitter::handle { background: transparent; width: 8px; }
-QTabBar#sidebar_pages::tab, QTabBar#nav_source::tab { padding: 6px 10px; }
 QTreeWidget#nav_tree { border-radius: 6px; padding: 4px; outline: 0; }
 QTreeWidget#nav_tree::item { padding: 6px 4px; border-radius: 4px; }
 QTreeWidget#nav_tree::item:hover { background: #1c2126; }
@@ -131,7 +130,7 @@ QMainWindow, QDialog { background: #262624; }
 QLabel { background: transparent; }
 QLabel#brand { font-size: 15px; font-weight: 600; color: #ececea; }
 QLabel#subtitle, QLabel#muted { color: @MUTED@; }
-QLabel#agentTitle { font-size: 15px; font-weight: 600; color: #ececea; }
+QLabel#agentTitle, QLabel#sidebar_agent_title { font-size: 15px; font-weight: 600; color: #ececea; }
 QLabel#status { color: @MUTED@; font-size: 12px; background: transparent; border: none; padding: 0 4px; }
 QFrame#panel { background: #262624; border: 1px solid #3a3a3a; border-radius: @RADIUS@px; }
 QFrame#sidebar { background: #1f1e1d; border: 1px solid #3a3a3a; border-radius: @RADIUS@px; }
@@ -153,12 +152,14 @@ QFrame#activity { border: none; border-left: 2px solid #3a3a3a; background: tran
 QFrame#event QPlainTextEdit, QFrame#event_approval QPlainTextEdit { background: #1a1a19; border: 1px solid #3a3a3a; border-radius: @RADIUS@px; }
 
 QPushButton, QToolButton { color: #ececea; background: transparent; border: 1px solid #3a3a3a; border-radius: @RADIUS@px; padding: 5px 10px; min-height: 19px; }
-QPushButton:hover, QToolButton:hover { background: #30302e; border-color: #5a5953; }
+QPushButton:hover, QToolButton:hover { background: #30302e; border-color: #4a4944; }
 QPushButton:pressed, QToolButton:pressed, QPushButton:checked, QToolButton:checked { background: #3a3a3a; }
-QPushButton:focus, QToolButton:focus { border-color: @MUTED@; }
+QPushButton:focus, QToolButton:focus { border-color: #d97757; }
 QPushButton:disabled, QToolButton:disabled { color: @MUTED@; background: transparent; border-color: #3a3a3a; }
-QPushButton#primary, QPushButton[primary="true"] { color: #ececea; background: #d97757; border-color: #d97757; font-weight: 600; }
-QPushButton#primary:hover, QPushButton[primary="true"]:hover { background: #d97757; border-color: #d97757; }
+QPushButton#primary, QPushButton[primary="true"] { color: #ffffff; background: #d97757; border-color: #d97757; font-weight: 600; }
+QPushButton#primary:hover, QPushButton[primary="true"]:hover { background: #c4663f; border-color: #c4663f; }
+QPushButton#primary:pressed, QPushButton[primary="true"]:pressed { background: #b05a37; border-color: #b05a37; }
+QPushButton#primary:focus, QPushButton[primary="true"]:focus { border-color: #d97757; }
 QPushButton#stop { color: @MUTED@; }
 QPushButton#primary:disabled, QPushButton[primary="true"]:disabled { color: #8f8e87; background: #3a3a3a; border-color: #3a3a3a; font-weight: 400; }
 QPushButton#stop:disabled { color: @MUTED@; }
@@ -178,7 +179,7 @@ QSpinBox::down-button { subcontrol-position: bottom right; }
 QSpinBox::up-arrow { image: url("@ARROW_UP_LIGHT@"); width: 10px; height: 6px; }
 QSpinBox::down-arrow { image: url("@ARROW_DOWN_LIGHT@"); width: 10px; height: 6px; }
 QCheckBox { background: transparent; spacing: 7px; }
-QCheckBox::indicator { width: 14px; height: 14px; background: #30302e; border: 1px solid #5a5953; border-radius: @RADIUS@px; }
+QCheckBox::indicator { width: 14px; height: 14px; background: #30302e; border: 1px solid #4a4944; border-radius: @RADIUS@px; }
 QCheckBox::indicator:checked { background: @MUTED@; border-color: #3a3a3a; }
 QCheckBox::indicator:disabled { border-color: #3a3a3a; }
 
@@ -203,7 +204,6 @@ QTreeWidget, QTableWidget { color: #ececea; background: #262624; border: 1px sol
 QTreeWidget::item { padding: 5px; }
 QTableCornerButton::section { background: #262624; border: none; }
 QSplitter::handle { background: transparent; width: 8px; }
-QTabBar#sidebar_pages::tab, QTabBar#nav_source::tab { padding: 5px 10px; }
 QTreeWidget#nav_tree { background: transparent; border: none; padding: 0; outline: 0; }
 QTreeWidget#nav_tree::item { padding: 6px 6px; border-radius: @RADIUS@px; }
 QTreeWidget#nav_tree::item:hover { background: #2b2b29; }
@@ -225,6 +225,9 @@ QFrame#teammate { background: #262624; border: 1px solid #3a3a3a; border-radius:
 QFrame#teammate[selected="true"] { border-left: 3px solid #d97757; }
 QPushButton#teammate_open { text-align: left; color: #ececea; border: none; background: transparent; padding: 0; font-weight: 600; }
 QPushButton#teammate_open:hover { background: #30302e; }
+QToolButton[workspace_view="true"] { color: @MUTED@; background: transparent; border: none; border-radius: 0; padding: 6px 11px; }
+QToolButton[workspace_view="true"]:checked { color: #ececea; border-bottom: 2px solid #d97757; font-weight: 600; }
+QToolButton[workspace_view="true"]:focus { border: 1px solid #d97757; }
 QTabBar QToolButton { padding: 0; min-width: 22px; max-width: 22px; min-height: 20px; }
 """
 
@@ -295,7 +298,6 @@ QTabBar { background: transparent; }
 QTabBar::tab { color: #91a99b; background: #101a14; border: 1px solid #293e30; border-radius: 3px; padding: 7px 11px; margin-right: 3px; }
 QTabBar::tab:hover { color: #d9f99d; border-color: #729747; }
 QTabBar::tab:selected { color: #d9f99d; background: #22371f; border-color: #82b445; font-weight: 600; }
-QTabBar#sidebar_pages::tab, QTabBar#nav_source::tab { padding: 6px 9px; }
 QTreeWidget, QTableWidget { color: #dce8e1; background: #0d1512; border: 1px solid #2b4036; border-radius: 4px; alternate-background-color: #142019; selection-background-color: #2c4425; gridline-color: #2b4036; }
 QTreeWidget::item { padding: 6px; }
 QTreeWidget#nav_tree { background: transparent; border: none; outline: 0; }
@@ -317,6 +319,15 @@ QPushButton#teammate_open { text-align: left; background: transparent; color: #e
 QPushButton#teammate_open:focus { border: 1px solid #a3e635; }
 QPushButton#teammate_open:hover { color: #bef264; }
 """
+
+
+def desktop_state_color(state, pending=False):
+    """Reserve semantic colors for approvals and failures in the desktop theme."""
+    if pending:
+        return '#e3b341'
+    if state in ('Error', 'Interrupted', 'Blocked'):
+        return '#f27d6b'
+    return MUTED_COLOR
 
 
 def console_palette() -> QPalette:

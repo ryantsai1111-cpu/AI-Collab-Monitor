@@ -112,7 +112,7 @@ class WorkbenchTests(unittest.TestCase):
         self.fixture.assert_no_adapter_actions()
 
     def test_agent_sidebar_has_one_project_session_scope_and_records_are_separate(self):
-        self.assertFalse(hasattr(self.window, 'sidebar_pages'))
+        self.assertIs(self.window.sidebar, self.window.navigator.parentWidget())
         self.assertTrue(self.window.sidebar.isAncestorOf(self.window.navigator))
         self.assertFalse(self.window.project_combo.isVisible())
         self.assertFalse(self.window.task_combo.isVisible())
@@ -128,7 +128,7 @@ class WorkbenchTests(unittest.TestCase):
             self.window.role_tabs.setCurrentIndex(self.window.agents.index(agent))
             self.fixture.settle()
             panel = self.window.panels[agent]
-            self.assertTrue(self.window.sidebar_agent_title.text().startswith(self.window.role_names[agent] + ' · '))
+            self.assertEqual(self.window.role_names[agent], self.window.sidebar_agent_title.text())
             for control in (panel.project, panel.session_search, panel.session, panel.new_button,
                             panel.resume_button, panel.session_more):
                 self.assertTrue(control.isVisible(), control.objectName())

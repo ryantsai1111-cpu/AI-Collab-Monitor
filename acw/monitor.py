@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel, QPushBu
                                QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
 from .presentation import compact, time_label
-from .theme import MUTED_COLOR, RADIUS, SPACE
+from .theme import MUTED_COLOR, RADIUS, SPACE, desktop_state_color
 
 ROLES = {'claude': ('Claude', '依本次任務分工'), 'codex': ('Codex', '依本次任務分工'),
          'dot': ('G8毛', '可選複核'), 'local': ('Hermes', '可選協作')}
@@ -61,7 +61,7 @@ class RoleCard(QFrame):
         self.setObjectName('monitor_role_' + agent)
         self.setProperty('card', True)
         box = QVBoxLayout(self)
-        box.setContentsMargins(SPACE['lg'], (SPACE['md'] + SPACE['lg']) // 2, SPACE['lg'], (SPACE['md'] + SPACE['lg']) // 2)
+        box.setContentsMargins(SPACE['lg'], SPACE['lg'], SPACE['lg'], SPACE['lg'])
         box.setSpacing(SPACE['sm'])
         top = QHBoxLayout()
         self.title = text(name or ROLES.get(agent, (agent,))[0], 'role')
@@ -91,7 +91,7 @@ class RoleCard(QFrame):
                  COLORS['ready'] if row['state'] == 'Connected' else COLORS['muted'])
         self.status.setText(f"{row['approvals']} 待核准" if row['approvals'] else STATES.get(row['state'], row['state']))
         desktop = self.window().property('theme') == 'desktop'
-        self.status.setStyleSheet('color: ' + (MUTED_COLOR if desktop else color))
+        self.status.setStyleSheet('color: ' + (desktop_state_color(row['state'], row['approvals']) if desktop else color))
         participation = ('本輪參與' if run['state'] == 'running' else '最近協作角色') if in_scope else '獨立角色'
         duty = ROLES.get(row.get('provider', row['agent']), ('', '依本次任務分工'))[1]
         if in_scope:
@@ -121,7 +121,7 @@ class MonitorDashboard(QScrollArea):
         self.body.setObjectName('monitor_body')
         self.setWidget(self.body)
         self.box = QVBoxLayout(self.body)
-        self.box.setContentsMargins(SPACE['xl'], SPACE['lg'] + SPACE['xs'], SPACE['xl'], SPACE['xl'])
+        self.box.setContentsMargins(SPACE['xl'], SPACE['xl'], SPACE['xl'], SPACE['xl'])
         self.box.setSpacing(SPACE['lg'])
         eyebrow = text('>_ ACW / OPERATIONS CONSOLE', 'eyebrow')
         eyebrow.setProperty('terminal', True)
@@ -137,8 +137,8 @@ class MonitorDashboard(QScrollArea):
         self.hero.setObjectName('monitor_run')
         self.hero.setProperty('card', True)
         hero = QVBoxLayout(self.hero)
-        hero.setContentsMargins(SPACE['lg'] + SPACE['xs'], SPACE['lg'] + SPACE['xs'] // 2, SPACE['lg'] + SPACE['xs'], SPACE['lg'] + SPACE['xs'] // 2)
-        hero.setSpacing((SPACE['sm'] + SPACE['md']) // 2)
+        hero.setContentsMargins(SPACE['xl'], SPACE['lg'], SPACE['xl'], SPACE['lg'])
+        hero.setSpacing(SPACE['md'])
         self.phase = text('尚未啟動協作', 'phase')
         self.task = text()
         self.metrics = text('', 'accent')
@@ -315,9 +315,9 @@ class AgentRail(QScrollArea):
                 card = QFrame()
                 card.setObjectName('teammate')
                 box = QVBoxLayout(card)
-                margin = (SPACE['sm'] + SPACE['md']) // 2
+                margin = SPACE['md']
                 box.setContentsMargins(margin, margin, margin, margin)
-                box.setSpacing((SPACE['xs'] + SPACE['sm']) // 2)
+                box.setSpacing(SPACE['sm'])
                 action = QPushButton()
                 action.setObjectName('teammate_open')
                 action.clicked.connect(lambda checked=False, agent=agent: self.open_role.emit(agent))
@@ -338,7 +338,7 @@ class AgentRail(QScrollArea):
                      COLORS['running'] if row['state'] == 'Busy' else
                      COLORS['ready'] if row['state'] == 'Connected' else COLORS['muted'])
             status.setText('● ' + state)
-            status.setStyleSheet('color: ' + (MUTED_COLOR if self.property('theme') == 'desktop' else color))
+            status.setStyleSheet('color: ' + (desktop_state_color(row['state'], row['approvals']) if self.property('theme') == 'desktop' else color))
             context.setText(row['project'])
             context.setToolTip(row['project'] + '\n' + row['task'])
             session.setText(row['session'])
