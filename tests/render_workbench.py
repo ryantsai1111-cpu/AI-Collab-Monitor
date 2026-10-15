@@ -11,9 +11,11 @@ from acw.store import now
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--stage', choices=('task-a', 'task-b'))
+    parser.add_argument('--stage', choices=('task-a', 'task-b', 'a', 'b'))
     parser.add_argument('--output', type=Path)
     args = parser.parse_args()
+    if args.stage in ('a', 'b'):
+        args.stage = 'task-' + args.stage
     app = QApplication.instance() or QApplication([])
     app.setStyle('Fusion')
     for name in ('segoeui.ttf', 'segoeuib.ttf', 'seguisym.ttf', 'msjh.ttc', 'msjhbd.ttc', 'consola.ttf', 'consolab.ttf'):

@@ -128,7 +128,7 @@ class WorkbenchTests(unittest.TestCase):
             self.window.role_tabs.setCurrentIndex(self.window.agents.index(agent))
             self.fixture.settle()
             panel = self.window.panels[agent]
-            self.assertTrue(self.window.sidebar_agent_title.text().startswith(self.window.role_names[agent] + ' · '))
+            self.assertEqual(self.window.role_names[agent], self.window.sidebar_agent_title.text())
             for control in (panel.project, panel.session_search, panel.session, panel.new_button,
                             panel.resume_button, panel.session_more):
                 self.assertTrue(control.isVisible(), control.objectName())
