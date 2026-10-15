@@ -258,13 +258,18 @@ class AgentContextTests(unittest.TestCase):
         self.assertEqual(self.tasks['codex']['id'], self.core.agent_task('codex')['id'])
         self.assertEqual(self.projects['claude']['id'], self.core.current_project_id)
 
-    def test_auto_collaboration_rejects_different_role_tasks_before_any_send(self):
+    def test_auto_collaboration_keeps_different_role_tasks_and_freezes_each_binding(self):
         from acw.orchestrator import Orchestrator
         self.select_all()
         for agent in AGENTS: self.connect_session(agent)
-        run = Orchestrator(self.core, 'fixture', lambda *args: self.fail('No dispatch expected'))
-        with self.assertRaises(ValueError): run.start()
-        self.assertEqual('idle', run.state)
+        pending = []
+        run = Orchestrator(self.core, 'fixture', lambda *args: pending.append(args))
+        run.start()
+        self.assertEqual('running', run.state)
+        for agent in run.agents:
+            self.assertEqual(self.tasks[agent]['id'], run._bindings[agent]['task_id'])
+            self.assertEqual(self.projects[agent]['id'], run._bindings[agent]['project_id'])
+        self.assertEqual(1, len(pending))
         self.assertFalse(any(call[0] == 'send' for adapter in self.adapters.values() for call in adapter.calls))
 
     def test_git_poll_does_not_overwrite_another_project_branch_label(self):
@@ -276,7 +281,7 @@ class AgentContextTests(unittest.TestCase):
         window.poll_events()
         self.assertEqual('Codex branch fixture', panel.branch_label.text())
 
-    def test_real_worker_blocks_its_role_and_shared_navigation_until_finished(self):
+    def test_real_worker_blocks_its_role_but_allows_record_navigation_until_finished(self):
         from acw.ui import MainWindow
         window = self.window()
         started, release = threading.Event(), threading.Event()
@@ -288,7 +293,7 @@ class AgentContextTests(unittest.TestCase):
             self.assertTrue(started.wait(2))
             self.assertFalse(window.panels['codex'].project.isEnabled())
             self.assertTrue(window.panels['claude'].project.isEnabled())
-            self.assertFalse(window.confirm_context_change())
+            self.assertTrue(window.confirm_context_change())
             self.assertFalse(window.confirm_agent_context_change('codex'))
             self.assertTrue(window.confirm_agent_context_change('claude'))
         finally:

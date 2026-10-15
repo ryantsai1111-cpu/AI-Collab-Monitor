@@ -1,6 +1,0 @@
-﻿time: 2026-10-04T23:15:28.2756911+08:00
-host: Ryan-PC
-user: ryan-pc\ryant
-elevated: False
-last boot: 2026-10-04T23:12:28.5000000+08:00
-previous boot (round 1 record): 2026-10-02T23:54:19

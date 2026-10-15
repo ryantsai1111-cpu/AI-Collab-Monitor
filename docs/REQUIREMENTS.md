@@ -1,5 +1,7 @@
 # AI Collaboration Workspace — Requirements and Acceptance Tracker
 
+> 歷史文件（2026-10-09 標註）：保留原始交付／驗收內容。啟動與現況以 [文件索引](README.md)、[使用指南](USER_GUIDE.md) 及 [目前測試紀錄](../tests/README.md) 為準；文內舊計數、路徑或操作授權不能直接套用本版。部分 evidence 未隨此 checkout 提供。
+
 Current evidence-gated 1.0.0-candidate snapshot: **593 PASS, 0 FAIL, 56 BLOCKED, 4 UNSUPPORTED, 0 PENDING** across653 individual criteria. Original184 independent items reconciled explicitly:184PASS/0independent BLOCKED. Visible Qt50PASS, last widget25PASS, official two-agent UI16PASS, official readonly native history5PASS. Core129PASS/2opt-in skips (131discovered). Dot, compiled EXE and the listed native/prerequisite gates remain unresolved. **Final BLOCKED / NOT ACCEPTED**; scoped passes do not constitute653 live end-to-end tests.
 
 ## Supplemental installed-source checks (outside criterion counts)

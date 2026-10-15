@@ -90,24 +90,31 @@ class LocalCoreTests(unittest.TestCase):
             finally:
                 core.close()
 
-    def test_reconnect_applies_saved_local_settings_and_harness(self):
-        from acw.adapters.local import LocalCodexAdapter, LocalClaudeAdapter
+    def test_reconnect_replaces_legacy_harness_without_carrying_its_session(self):
+        from acw.adapters.local import LocalCodexAdapter
+        from test_hermes_core import HermesFixture
         with tempfile.TemporaryDirectory() as temporary:
             core = WorkspaceCore(Path(temporary) / 'data')
             try:
                 adapter = LocalCodexAdapter(core.make_emitter('local'), codex_executable='codex.exe',
                                             claude_executable='claude.exe')
                 core.set_adapter('local', adapter)
-                core.set_setting('agent.local', {'harness': 'claude', 'base_url': 'http://localhost:1234',
-                                                'model': 'custom-model', 'api_key_env': 'LOCAL_TEST_ENV'})
-                with patch.object(LocalClaudeAdapter, 'connect', return_value=None):
+                adapter.session_id = 'missing-native-session'
+                adapter._resume = True
+                core.set_setting('agent.local', {'harness': 'hermes', 'hermes_executable': 'hermes.exe',
+                                                'provider': 'fixture-provider', 'model': 'custom-model'})
+                replacement = HermesFixture()
+                with patch('acw.adapters.hermes.HermesAdapter', return_value=replacement) as factory:
                     core.connect('local')
-                replacement = core.adapters['local']
-                self.assertIsInstance(replacement, LocalClaudeAdapter)
-                self.assertEqual('claude.exe', replacement.executable)
-                self.assertEqual('custom-model', replacement.settings['model'])
-                self.assertEqual('LOCAL_TEST_ENV', replacement.settings['api_key_env'])
-                self.assertEqual('LOCAL_TEST_ENV', core.get_setting('agent.local')['api_key_env'])
+                self.assertIs(replacement, core.adapters['local'])
+                self.assertEqual('hermes', replacement.local_harness)
+                self.assertEqual('', replacement.session_id)
+                self.assertEqual('', replacement.native_session_id)
+                self.assertEqual('hermes.exe', factory.call_args.kwargs['hermes_executable'])
+                self.assertEqual('custom-model', factory.call_args.kwargs['model'])
+                self.assertNotIn('codex_executable', factory.call_args.kwargs)
+                self.assertNotIn('claude_executable', factory.call_args.kwargs)
+                self.assertEqual('fixture-provider', core.get_setting('agent.local')['provider'])
             finally:
                 core.close()
 

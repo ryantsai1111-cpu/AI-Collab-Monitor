@@ -60,9 +60,14 @@ class HumanSessionLabels(unittest.TestCase):
         for agent,panel in self.window.panels.items():
             texts=[panel.session.itemText(i) for i in range(1,panel.session.count())]
             self.assertTrue(all('訂單管理' in t and '檢查訂單搜尋' in t and agent.title() in t for t in texts))
-            self.assertTrue(any('台灣訂單' in t for t in texts));self.assertTrue(any('海外訂單' in t for t in texts))
+            self.assertTrue(any('台灣訂單' in t for t in texts))
+            if agent != 'dot':
+                self.assertFalse(any('海外訂單' in t for t in texts), 'The Agent picker is scoped to its own Project')
+            all_labels = [session_display(row, agent, self.projects, preview='檢查訂單搜尋')['label'] for row in self.saved if row['agent'] == agent]
+            self.assertTrue(any('台灣訂單' in t for t in all_labels))
+            self.assertTrue(any('海外訂單' in t for t in all_labels))
             self.assertTrue(all('opaque-' not in t for t in texts))
-            self.assertEqual(panel.session.itemData(1),f'opaque-{agent}-1')
+            self.assertEqual(panel.session.itemData(1),f'opaque-{agent}-' + ('1' if agent == 'dot' else '0'))
             self.assertTrue(all('2026-10-' in t for t in texts))
             panel.session.setCurrentIndex(panel.session.findData(f'opaque-{agent}-0'))
             self.assertIn('檢查訂單搜尋',panel.session.currentText())
@@ -98,7 +103,9 @@ class HumanSessionLabels(unittest.TestCase):
         panel.session.setCurrentIndex(panel.session.findData('opaque-claude-0'))
         QTest.mouseClick(panel.session_search,Qt.LeftButton)
         panel.session_search.setText('海外訂單');QTest.qWait(20)
-        self.assertIsNone(panel.session.currentData());self.assertEqual(panel.session.count(),2)
+        self.assertIsNone(panel.session.currentData());self.assertEqual(panel.session.count(),1)
+        panel.session_search.setText('台灣訂單');QTest.qWait(20)
+        self.assertEqual(panel.session.count(),2)
         self.assertEqual(panel.input.toPlainText(),'尚未送出的中文內容')
         self.assertEqual(self.adapters['claude'].calls,[])
 

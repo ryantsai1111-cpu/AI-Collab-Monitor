@@ -1,3 +1,0 @@
-Claude initial review: APPROVE
-time: 2026-10-05T00:14:23+08:00
-spec: collab-smoke-01-task-spec.md

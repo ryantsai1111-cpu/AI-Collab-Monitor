@@ -1,58 +1,66 @@
-# Troubleshooting
+# 疑難排解
 
-## Startup
+更新日期：2026-10-09；依目前原始碼入口整理。舊 EXE 與舊驗收報告只作歷史參考。
 
-If the launcher reports a missing runtime, inspect `python-path.txt` and point it to an already installed compatible Python 3.12 `pythonw.exe`. The tested runtime is recorded in `evidence/toolchain-manifest.json`. Reinstalling system software is not an automatic fallback. PySide6 lives in the application-local vendor directory. `startup-error.log` records a sanitized startup failure.
+## 開不起來或仍是舊畫面
 
-Use a separate `--data-dir` for tests. A lock prevents two windows from using the same dataset simultaneously. If the process crashed, Qt can recover a stale lock. Do not delete unrelated process state.
+從本 repo 執行 `python run.py`，或雙擊本機 `AI Collab Workspace.lnk`。捷徑應指向這份 checkout 的 `run.py`，而非舊安裝目錄或 EXE。執行中的 Python 不會自動載入修改，請先正常關閉再啟動。
 
-Compiled EXE launch was actually attempted and rejected by Windows security; installed EXE subsequently absent. Per-user source installation and shortcut targets were verified, and source Qt50cases plus25last-widget regressions passed. Neither restores EXE startup acceptance. Do not restore/copy/rebuild/retry this launcher or alter protections without explicit new authorization. See EXE-SECURITY-BLOCKER.md, LAUNCHER-STATIC-REVIEW.md and the current Final Acceptance Report. Historical Qt/token errors and failed first runs remain preserved; they are not current blanket UI blockers.
+找不到 PySide6 時先確認同層 `vendor/` 存在。若沒有，依 `requirements.txt` 安裝到使用中的 Python 環境；不要刪除現有 vendor。錯誤可能寫入根目錄 `startup-error.log`。
 
-## Backend disconnected / offline
+「This data directory is already open」表示相同資料已被另一個視窗使用。先找既有視窗，不要直接刪除 lock 或資料庫。測試用 `--data-dir` 指向新目錄。
 
-Use Connect, inspect Settings/Diagnostics, and confirm the exact executable path/version. The running Claude Desktop process may show a virtual Roaming path that does not exist from ordinary processes; the tested executable is in the Microsoft Store package LocalCache path.
+## Codex／Claude 更新後無法連線
 
-Connect does not resume a session automatically. Select an existing Workspace session and Resume explicitly. Existing official CLI login is used; if the backend asks for authentication, perform that separately only with user approval. Never copy auth.json or tokens into this app.
+1. 打開該 Agent 的設定與診斷，確認實際 executable、狀態及錯誤。
+2. 自訂 executable 若指向已移除的版本，改成有效 CLI，或清空自訂欄位後重啟 Workspace，讓啟動流程重新偵測。
+3. 新增 Agent 各有獨立設定；修改原始 Codex／Claude 不會覆寫其他 instance 的自訂值。
+4. 找得到 CLI 不代表 handshake 成功。保留實際錯誤判斷協定或登入問題，不應用新 session 掩蓋它。
 
-An executable being present is not a connection. Errors from handshake or turn execution remain visible. The app does not silently create a replacement conversation after disconnect.
+官方 backend 要求登入時，使用官方工具處理，不要把 token 或 credential 檔案貼入 Workspace。離線回歸不能證明本機最新版 CLI 已實際連線成功。
 
-## Claude authentication status
+## Hermes 設定或連線
 
-The original error `Failed to authenticate: OAuth session expired and could not be refreshed` is retained in historical evidence. After the user completed official login separately, the [new isolated run](../evidence/claude-live-run-1791165118613641100.json) passed 13 backend checks including messages, streaming, model/effort selection, tools, resume and stop. Do not diagnose the current build as OAuth-blocked based on the earlier report. If the same error recurs, retain the sanitized exact error and use the user's official authentication workflow; Workspace never collects a token or initiates login itself.
+原 Local LLM 面板已改接 Hermes。CLI 路徑留白會自動尋找 Hermes；找不到時指定 `hermes.exe`。provider 與模型留白沿用 Hermes 設定；Workspace 不收集或改寫其認證。
 
-## Native session discovery / history
+舊 `config/local-llm.json` 不再覆蓋已保存的 UI 設定。舊 endpoint、harness 與 executable 不會套用於 Hermes；不必刪除此檔案。新增 Hermes instance 的設定各自保存。
 
-Select the intended Project, sync its directory and use **Discover…**. Claude discovery uses the pinned project-local official TypeScript SDK 0.3.289 and only the selected cwd; worktrees are excluded. Select a result, then **View native history** for read-only **Conversation / activity** and **Sanitized structured records** tabs. If the helper is unsupported or unavailable, that control is disabled and its tooltip gives the reason. Fetching runs in a worker and displays the actual error on failure.
+舊 Local harness 的 session 無法由 Hermes 接續；請建立新對話，原歷史仍保存。Hermes native session 遺失或被外部刪除時，錯誤會保留，不會默默建立替代 session。
 
-**Import selected (no resume)** stores metadata locally. Neither importing metadata nor viewing native history maps the current Task, resumes, sends a prompt or persists the original transcript into Workspace History. **Resume** remains an explicit separate action, and panel **History** shows locally recorded messages.
+「檢查 Hermes CLI」與連線只驗證本機 `chat --help` 是否支援 stream-json、query-file、resume 與預算參數。這不會驗證模型推論或認證；送出失敗時查診斷中的 error 與有界 stderr。只接受 Hermes executable，不接受 `.cmd`／`.bat` shell wrapper。詳細邊界見 [HERMES](HERMES.md)。
 
-The backend reader's [seven-check native acceptance](../evidence/claude-native-session-check-1791165508399169700.json) passed for isolated test sessions; its UI integration still needs revalidation. If discovery fails, inspect `native_session_sdk_version`, `native_session_error` and `native_session_scope` in Diagnostics. Missing helper/runtime/public SDK methods produce an explicit unavailable error; they do not disable stored Workspace history. An empty list can mean no native sessions exist for that exact cwd and is not a reason to search other projects automatically.
+Hermes provider 的 endpoint 或認證問題須在 Hermes／服務端排查。Workspace 不再執行舊 Local endpoint 的 `/v1/models` 檢查。
 
-Native history rejects an undiscovered session, a different project, missing/unknown transcript size or a file larger than the configured bound (16 MiB default). Select the correct project and rediscover before a deliberate native read. SDK history is paginated; the page limit is 1–500 and offset 0–10000. Importing metadata alone is not transcript-import acceptance.
+Local Connect 不會自動恢復已存對話；開啟舊對話或 Send 時才恢復確切 session。若 Claude 回報 `No conversation found with session ID`，Workspace 紀錄可能仍在，但原生 session 不存在或 cwd 不符。確認 Project 後開啟正確對話，或重新連線並明確按「新增」建立新對話；不會自動刪除歷史或以新對話取代失敗的恢復。
 
-## Artifacts and screenshots
+## Session、專案與歷史
 
-Use **Diff / Tests → Artifacts → Import file…** for a selected project file. Text must be UTF-8; JSONL must have valid JSON records. Files outside the selected project/artifact roots, credential-like names and files over 16 MiB are refused. Managed copies keep imports available even if their original source later changes. **Open selected** uses Windows file associations for text; an OS handler error does not mean the artifact was lost.
+核對該 Agent 的 project、task、session，不只看共用導覽。新增 Agent 不跟隨其他 Agent 或 Desktop 焦點。
 
-PNG/JPEG screenshot imports require explicit confirmation and structure checks. Image pixels are not redacted. If image export confirmation is disabled, open every image in the review selector, ensure each preview loaded and check the review box; **Actual size** helps inspect small text. Cancelling review cancels the export. Task ZIP includes screenshot bytes only after that review; other task formats retain metadata. Do not interpret text secret-filter tests as proof that an image contains no sensitive text.
+Connect、匯入 metadata、resume 是不同動作。離線歷史仍可查看；後端工作需連線與正確 session。兩個同類 Agent 控制同一 session 會被拒絕，外部 Desktop 的傳送狀態則無法由此偵測。
 
-Invalid image structure or recognizable sensitive image metadata is rejected. Export targets must have a matching supported extension and an existing parent directory, and cannot be Windows device/alternate-stream paths, symlinks, credential filenames or managed storage files. Choose an ordinary user-selected output file without changing filesystem permissions.
+側欄原生對話與 adapter 原生探索是不同入口。Claude SDK 探索受 cwd、helper 能力、頁數與大小限制；空清單不表示可搜尋所有專案。請看 capability／error。一般 Claude Chat 尚未支援。
 
-## dot
+定時同步不是完整雙向同步，Workspace 重新命名與封存不寫回 Desktop。
 
-The current integration is blocked pending a verified official external message bridge. OpenAI API access or Codex app-server with ChatGPT authentication does not provide the original dot conversation. See ADAPTERS.md. Do not install an unofficial bridge as an unreviewed workaround.
+## 協作沒有前進
 
-## Streaming / command output
+Monitor 顯示目前負責者、待核准要求、回合／步數／有效時間及事件。參與者須選相同 project／task、有各自 session，且符合連線要求。
 
-Claude and Codex event schemas differ. Codex commandExecution provides combined output, not independent stderr. Empty stderr in a normalized record does not prove the command produced none. UI and exports identify this limitation.
+錯誤、逾時、綁定變更、無法關聯的回覆或不明傳送結果，都不能當成可直接重送的情況。先核對歷史與後端結果。重啟程式不會重播協作。
 
-Git diff has separate native command/exit/stderr details. Without an upstream, ahead/behind are unknown, not zero. Before the first commit, the viewer labels unborn HEAD and preserves staged additions and unstaged tracked edits as separate patches. Untracked files have no tracked Git patch. A failed Git command must be read as an error, not as a clean repository.
+主導者與實作者必須是不同 instance，可同為 Claude。一次 run 尚無多實作者平行排程。
 
-## Diagnostics and legacy Monitor
+## G8毛與工具紀錄
 
-Export portable diagnostics from Settings. Diagnostics exclude secrets and hidden reasoning. The old `C:\Users\ryant\Desktop\AI-Collab-Monitor` remains a read-only optional log source and separate fallback; its panes may stay open. Workspace does not launch, stop or reset those panes.
+G8毛 使用釘選的非官方整合，啟動不連線。手動與協作授權規則見 [DOT-UNOFFICIAL](DOT-UNOFFICIAL.md) 與 [DESIGN-auto-collab](DESIGN-auto-collab.md)。舊「官方 bridge 不可用」不等於現在沒有 Dot adapter。
 
+Codex command output 可能是 combined stdout/stderr；空 stderr 不等於沒有錯誤。無 upstream 的 ahead/behind 是未知，Git 查詢失敗不等於工作目錄乾淨。
 
-## Current approved Dot integration update
+Artifact 須符合範圍、格式與大小限制；圖片像素不自動遮罩。Raw 是安全過濾後事件，詳見 [SECURITY](SECURITY.md)。
 
-The earlier official-bridge blocker remains historical context. An explicitly approved, pinned unofficial Dot adapter and manual UI are now implemented and offline-tested. See [Dot activation and boundaries](DOT-UNOFFICIAL.md). Only the human may trigger live credential-bearing list/connect/read/send. No live Dot PASS or Final acceptance is claimed. EXE work remains deferred.
+## 測試與維護
+
+`python scripts/run_tests.py` 以每模組獨立程序執行目前頂層測試，報告寫入新的 `evidence/test-runs/` 子目錄。缺少 fixture、Windows symlink 權限或歷史測試不相容會如實顯示。
+
+`tests/legacy_ui/` 不由目前 runner 執行。更多限制見 [tests/README](../tests/README.md)。不要批次執行整個 scripts 資料夾，其中有歷史 live 驗收、部署與一次性文件重寫程式。

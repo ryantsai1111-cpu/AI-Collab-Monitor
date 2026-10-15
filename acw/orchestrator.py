@@ -1,5 +1,5 @@
-"""Bounded automatic collaboration: Claude plans and gives the final review, G8毛 relays and
-reviews in between, Codex implements.
+"""Bounded automatic collaboration with a user-selected lead and implementer.
+G8毛 can optionally review and relay between them.
 
 A run exists only between an explicit start and its first stop condition. Nothing here
 approves a tool request, retries on its own, or survives a restart. The class has no Qt and
@@ -8,6 +8,7 @@ no threads: the owner calls `tick()` and supplies `dispatch` to run blocking cal
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 import re
 import secrets
 import time
@@ -24,19 +25,19 @@ PROMPTS = {
              '回覆的第一行必須是 `VERDICT: PLAN_READY`。'),
     'replan': ('【自動協作 · 修訂計畫】\n審查者 G8毛 對你的計畫有以下意見。請據此修訂計畫，不要修改任何檔案。\n'
                '回覆的第一行必須是 `VERDICT: PLAN_READY`。\n\n---\n{body}'),
-    'review_plan': ('【自動協作 · 審查計畫並轉交】\n原始任務：{task}\n\n以下是 Claude 的計畫。請審查，需要時可自行到 GitHub 查看程式碼。\n'
-                    '若可行，第一行寫 `VERDICT: PASS`，接著寫出給實作者 Codex 的完整交接單（自足，含驗收條件）。\n'
+    'review_plan': ('【自動協作 · 審查計畫並轉交】\n原始任務：{task}\n\n以下是 {lead} 的計畫。請審查，需要時可自行到 GitHub 查看程式碼。\n'
+                    '若可行，第一行寫 `VERDICT: PASS`，接著寫出給實作者 {implementer} 的完整交接單（自足，含驗收條件）。\n'
                     '若需修改，第一行寫 `VERDICT: REVISE`，接著列出具體意見。\n\n---\n{body}'),
     'implement': ('【自動協作 · 實作】\n請依以下交接單實作。commit、push 或發布需要原始任務明確授權；實作許可本身不包含發布。\n'
                   '回報：改了哪些檔、測試結果、repo URL／分支／commit SHA、未盡事項。\n'
                   '回覆的第一行必須是 `VERDICT: IMPLEMENTED`；無法完成則寫 `VERDICT: BLOCKED` 並說明原因。\n\n---\n{body}'),
-    'review_work': ('【自動協作 · 審查實作並轉交】\n原始任務：{task}\n\n以下是 Codex 的實作回報。請依回報中的 repo／分支／commit 自行查看變更並審查。\n'
-                    '第一行寫 `VERDICT: PASS` 或 `VERDICT: CONCERNS`，接著寫給最終審查者 Claude 的審查請求，包含你的發現。\n\n---\n{body}'),
+    'review_work': ('【自動協作 · 審查實作並轉交】\n原始任務：{task}\n\n以下是 {implementer} 的實作回報。請依回報中的 repo／分支／commit 自行查看變更並審查。\n'
+                    '第一行寫 `VERDICT: PASS` 或 `VERDICT: CONCERNS`，接著寫給最終審查者 {lead} 的審查請求，包含你的發現。\n\n---\n{body}'),
     'final_review': ('【自動協作 · 最終審查】\n原始任務：{task}\n\n請審查目前專案資料夾中的實作。只讀，不要修改任何檔案。以下是 G8毛 的審查意見。\n'
                      '通過寫 `VERDICT: APPROVED`；需修改寫 `VERDICT: CHANGES_REQUESTED` 並列出具體修改項。第一行必須是判定。\n\n---\n{body}'),
-    'local_review': ('【自動協作 · 本地模型第二意見】\n原始任務：{task}\n\n請檢查目前專案資料夾中的實作。只讀，不要修改任何檔案。以下是實作者的回報。\n'
+    'local_review': ('【自動協作 · Hermes 第二意見】\n原始任務：{task}\n\n請檢查目前專案資料夾中的實作。只讀，不要修改任何檔案。以下是實作者的回報。\n'
                      '第一行寫 `VERDICT: PASS` 或 `VERDICT: CONCERNS`，接著簡短列出你的發現。\n\n---\n{body}'),
-    'relay_changes': ('【自動協作 · 轉交修改意見】\n以下是 Claude 的最終審查意見。請改寫成給實作者 Codex 的修改交接單（自足，含驗收條件）。\n'
+    'relay_changes': ('【自動協作 · 轉交修改意見】\n以下是 {lead} 的最終審查意見。請改寫成給實作者 {implementer} 的修改交接單（自足，含驗收條件）。\n'
                       '第一行寫 `VERDICT: PASS`。\n\n---\n{body}'),
 }
 # step -> (agent, {verdict: next step or terminal marker})
@@ -49,11 +50,24 @@ STEPS = {
     'final_review': ('claude', {'APPROVED': '=Claude 最終審查通過', 'CHANGES_REQUESTED': 'relay_changes'}),
     'relay_changes': ('dot', {'PASS': 'implement'}),
 }
-STEP_NAMES = {'local_review': 'Local LLM 第二意見', 'plan': 'Claude 規劃', 'replan': 'Claude 修訂計畫', 'review_plan': 'G8毛 審查計畫', 'implement': 'Codex 實作',
+STEP_NAMES = {'local_review': 'Hermes 第二意見', 'plan': 'Claude 規劃', 'replan': 'Claude 修訂計畫', 'review_plan': 'G8毛 審查計畫', 'implement': 'Codex 實作',
               'review_work': 'G8毛 審查實作', 'final_review': 'Claude 最終審查', 'relay_changes': 'G8毛 轉交修改意見'}
 NEW_ROUND = ('replan', 'relay_changes')
 LOCAL_ROLES = (None, 'reviewer', 'implementer')
-ROLE_NAMES = {'claude': 'Claude', 'dot': 'G8毛', 'codex': 'Codex', 'local': 'Local LLM'}
+ROLE_NAMES = {'claude': 'Claude', 'dot': 'G8毛', 'codex': 'Codex', 'local': 'Hermes'}
+
+
+@dataclass(frozen=True)
+class RunLimits:
+    max_rounds: int = 3
+    max_steps: int = 24
+    max_active_seconds: int = 3600
+
+    def __post_init__(self):
+        for name, upper in (('max_rounds', 10), ('max_steps', 100), ('max_active_seconds', 86400)):
+            value = getattr(self, name)
+            if type(value) is not int or not 1 <= value <= upper:
+                raise ValueError(f'{name} must be an integer between 1 and {upper}')
 
 
 def _verdict_parts(text):
@@ -124,28 +138,64 @@ def _reply_envelope(text, correlation_id):
 
 class Orchestrator:
     def __init__(self, core, task, dispatch, *, max_rounds=3, has_pending_approval=lambda: False,
-                 clock=time.monotonic, timeouts=None, dot_poll_seconds=DOT_POLL_SECONDS, local_role=None):
+                 clock=time.monotonic, timeouts=None, dot_poll_seconds=DOT_POLL_SECONDS, local_role=None,
+                 workflow='direct', max_steps=24, max_active_seconds=3600, lead='claude', implementer=None):
         if not str(task).strip():
             raise ValueError('請輸入任務')
         if local_role not in LOCAL_ROLES:
-            raise ValueError('Local LLM 的角色不正確')
+            raise ValueError('Hermes 的角色不正確')
+        if workflow not in ('direct', 'relay'):
+            raise ValueError('協作流程不正確')
+        if lead not in core.agent_ids or core.provider(lead) not in ('claude', 'codex', 'local'):
+            raise ValueError('請選擇可派工的 Agent')
+        self.role_names = {agent: core.agent_name(agent) for agent in core.agent_ids}
+        self._lead = lead
+        counterpart = implementer or ('codex' if core.provider(lead) == 'claude' else 'claude')
+        if counterpart not in core.agent_ids or core.provider(counterpart) not in ('claude', 'codex', 'local'):
+            raise ValueError('請選擇可實作的 Agent')
+        self._implementer = 'local' if local_role == 'implementer' else counterpart
+        if self._implementer == lead or (local_role == 'reviewer' and 'local' in (lead, self._implementer)):
+            raise ValueError('同一次協作的派工、實作與第二意見需使用不同 Agent instance')
+        self.workflow = workflow
         self.local_role = local_role
         self.steps = dict(STEPS)
         self.names = dict(STEP_NAMES)
+        self.prompts = dict(PROMPTS)
+        if workflow == 'direct':
+            self.steps = {
+                'plan': ('claude', {'PLAN_READY': 'implement'}),
+                'implement': ('codex', {'IMPLEMENTED': 'final_review', 'BLOCKED': '!Codex 回報無法完成'}),
+                'final_review': ('claude', {'APPROVED': '=Claude 最終審查通過', 'CHANGES_REQUESTED': 'implement'}),
+            }
+            self.names['plan'] = 'Claude 派工'
+            self.prompts['plan'] += '\n請直接寫成給實作者的完整交接單，包含範圍、限制、驗收條件與必要測試。'
+            self.prompts['final_review'] = PROMPTS['final_review'].replace('G8毛 的審查意見', '實作者的回報與可選第二意見')
+        self.review_target = 'final_review' if workflow == 'direct' else 'review_work'
         self.optional = set()
         if local_role == 'implementer':
-            self.steps['implement'] = ('local', STEPS['implement'][1])
-            self.names['implement'] = 'Local LLM 實作'
+            self.steps['implement'] = ('local', dict(self.steps['implement'][1], BLOCKED='!Hermes 回報無法完成'))
+            self.names['implement'] = 'Hermes 實作'
         elif local_role == 'reviewer':
-            self.steps['implement'] = ('codex', dict(STEPS['implement'][1], IMPLEMENTED='local_review'))
-            self.steps['local_review'] = ('local', {'PASS': 'review_work', 'CONCERNS': 'review_work'})
+            self.steps['implement'] = ('codex', dict(self.steps['implement'][1], IMPLEMENTED='local_review'))
+            self.steps['local_review'] = ('local', {'PASS': self.review_target, 'CONCERNS': self.review_target})
             self.optional.add('local_review')
+        # Roles belong to this run, never to a backend's permanent capability set.
+        assignments = {'claude': self.lead, 'codex': counterpart, 'local': 'local', 'dot': 'dot'}
+        self.steps = {step: (assignments[agent], dict(routes)) for step, (agent, routes) in self.steps.items()}
+        self.steps['implement'][1]['BLOCKED'] = '!' + self.role_names[self.implementer] + ' 回報無法完成'
+        self.steps['final_review'][1]['APPROVED'] = '=' + self.role_names[self.lead] + ' 最終審查通過'
+        self.names.update(plan=self.role_names[self.lead] + (' 派工' if workflow == 'direct' else ' 規劃'),
+                          replan=self.role_names[self.lead] + ' 修訂計畫',
+                          implement=self.role_names[self.implementer] + ' 實作',
+                          final_review=self.role_names[self.lead] + ' 最終審查')
         self.agents = tuple(dict.fromkeys(agent for agent, _ in self.steps.values()))
         self._carry = ''
         self.core, self.task, self.dispatch = core, str(task).strip(), dispatch
-        self.max_rounds = max(1, min(int(max_rounds), 10))
+        self.limits = RunLimits(max_rounds, max_steps, max_active_seconds)
         self.has_pending_approval, self.clock = has_pending_approval, clock
         self.timeouts = dict(TIMEOUTS, **(timeouts or {}))
+        for agent in self.agents:
+            self.timeouts.setdefault(agent, self.timeouts[core.provider(agent)])
         self.dot_poll_seconds = dot_poll_seconds
         self.state, self.reason, self.step, self.round = 'idle', '', '', 1
         self.run_id = secrets.token_hex(16)
@@ -164,27 +214,68 @@ class Orchestrator:
         self._call_deadline = 0.0
         self._deferred_dispatch = None
         self._frozen_task_text = self.task
+        self._started_at = self._ended_at = None
+        self._held_seconds = 0.0
+
+    @property
+    def lead(self):
+        return self._lead
+
+    @property
+    def implementer(self):
+        return self._implementer
+
+    @property
+    def max_rounds(self):
+        return self.limits.max_rounds
+
+    def snapshot(self):
+        """Read-only local view; no adapter calls or clock/approval state mutation."""
+        now = self._ended_at if self._ended_at is not None else self.clock()
+        held = self._held_seconds + (max(0, now - self._paused_at) if self._paused_at is not None else 0)
+        elapsed = max(0, now - self._started_at - held) if self._started_at is not None else 0
+        return dict(state=self.state, reason=self.reason, task=self._frozen_task_text,
+                    task_id=self.task_id, project_id=self.project_id, run_id=self.run_id,
+                    workflow=self.workflow, agents=self.agents, step=self.step,
+                    lead=self.lead, implementer=self.implementer,
+                    stage=self.names.get(self.step, '準備中'), agent=self.steps.get(self.step, ('',))[0],
+                    round=self.round, max_rounds=self.max_rounds, steps=self.step_sequence,
+                    max_steps=self.limits.max_steps, elapsed_seconds=int(elapsed),
+                    remaining_seconds=max(0, int(self.limits.max_active_seconds - elapsed)),
+                    max_active_seconds=self.limits.max_active_seconds,
+                    waiting_approval=self._paused_at is not None,
+                    stages=tuple((key, self.names[key]) for key in self.steps if key not in ('replan', 'relay_changes')))
+
+    def _check_run_budget(self):
+        self._budget_now()
+        if self.snapshot()['elapsed_seconds'] >= self.limits.max_active_seconds:
+            self._finish('paused', '已達整次執行的有效時間上限；未重送，請檢查目前角色的執行結果')
+            return False
+        return True
 
     def start(self):
         if self.state != 'idle':
             raise RuntimeError('這次執行已經開始過')
-        task, project = self.core.current_task, self.core.current_project
+        task, project = self.core.agent_task(self.lead), self.core.agent_project(self.lead)
         if not project or not task:
-            raise ValueError('請先選擇專案與任務')
-        mismatched = [agent for agent in self.agents if (self.core.agent_task(agent) or {}).get('id') != task['id']
-                      or (self.core.agent_project(agent) or {}).get('id') != project['id']]
-        if mismatched:
-            raise ValueError('自動協作前，請將參與角色切換到目前的協作任務：' + '、'.join(ROLE_NAMES[a] for a in mismatched))
+            raise ValueError('請先為主導 Agent 選擇 Project 並開啟對話')
+        missing = [agent for agent in self.agents if not self.core.agent_task(agent) or not self.core.agent_project(agent)]
+        if missing:
+            raise ValueError('請先為參與 Agent 選擇 Project 並開啟對話：' + '、'.join(self.role_names[a] for a in missing))
         offline = [agent for agent in self.agents if getattr(self.core.adapters.get(agent), 'state', '') != 'Connected']
         if offline:
-            raise RuntimeError('請先連線：' + '、'.join(ROLE_NAMES[a] for a in offline))
-        dot = self.core.adapters['dot']
-        if not getattr(dot, 'target', '') or not getattr(dot, 'native_room_id', ''):
+            raise RuntimeError('請先連線：' + '、'.join(self.role_names[a] for a in offline))
+        dot = self.core.adapters.get('dot')
+        if 'dot' in self.agents and (not getattr(dot, 'target', '') or not getattr(dot, 'native_room_id', '')):
             raise RuntimeError('G8毛 缺少已驗證的 Dot／對話識別，請先連線')
         self.task_id, self.project_id = task['id'], project['id']
+        self._legacy_global_scope = any(a not in getattr(self.core, '_agent_selections', {}) for a in self.agents)
         self._bindings = {a: self._binding(a) for a in self.agents}
         self.state = 'running'
-        self._note('started', f'自動協作開始 · 回合上限 {self.max_rounds}')
+        self._started_at = self.clock()
+        self._note('started', f'自動協作開始 · {self.role_names[self.lead]} 主導 / {self.role_names[self.implementer]} 實作 · '
+                   f'{self.workflow} · 回合上限 {self.max_rounds} · '
+                   f'步數上限 {self.limits.max_steps} · 有效時間上限 {self.limits.max_active_seconds} 秒')
         self._prepare_sessions()
 
     def stop(self, reason='使用者停止'):
@@ -193,7 +284,7 @@ class Orchestrator:
         waiting, contract = self._waiting, dict(self._contract or {})
         bound = self._bindings.get(waiting, {}).get('adapter')
         self._finish('stopped', reason)
-        if waiting in ('claude', 'codex', 'local') and bound is self.core.adapters.get(waiting) and getattr(bound, 'state', '') == 'Busy':
+        if waiting in self.agents and self.core.provider(waiting) != 'dot' and bound is self.core.adapters.get(waiting) and getattr(bound, 'state', '') == 'Busy':
             # Core atomically rejects delayed cancellation after a new send or replacement.
             self.dispatch(lambda: self.core.stop_orchestration_message(waiting, contract),
                           lambda _: None, lambda _: None)
@@ -222,10 +313,9 @@ class Orchestrator:
     def _context_reason(self, allow_session_agent=None):
         if self.task != self._frozen_task_text:
             return '執行任務內容已被變更'
-        if self.core.current_task_id != self.task_id:
-            return '任務已被切換'
-        if self.core.current_project_id != self.project_id or (self.core.current_task or {}).get('project_id') != self.project_id:
-            return '專案已被切換'
+        if getattr(self, '_legacy_global_scope', False):
+            if self.core.current_task_id != self.task_id: return '任務已被切換'
+            if self.core.current_project_id != self.project_id: return '專案已被切換'
         for agent, frozen in self._bindings.items():
             current = self._binding(agent)
             for key, value in frozen.items():
@@ -233,7 +323,7 @@ class Orchestrator:
                     continue
                 changed = current[key] is not value if key == 'adapter' else current[key] != value
                 if changed:
-                    return f'{ROLE_NAMES[agent]} 的專案、任務、session 或對話綁定已變更'
+                    return f'{self.role_names[agent]} 的專案、任務、session 或對話綁定已變更'
         return ''
 
     def _check_context(self, allow_session_agent=None):
@@ -245,9 +335,12 @@ class Orchestrator:
 
     def _note(self, kind, content):
         self.core._record('orchestration', 'workspace', task_id=self.task_id, status=kind, content=content,
-                          step=self.step, round=self.round, run_id=self.run_id, step_sequence=self.step_sequence)
+                          step=self.step, round=self.round, run_id=self.run_id, step_sequence=self.step_sequence,
+                          workflow=self.workflow, max_rounds=self.max_rounds, max_steps=self.limits.max_steps,
+                          max_active_seconds=self.limits.max_active_seconds, lead=self.lead, implementer=self.implementer)
 
     def _finish(self, state, reason):
+        self._ended_at = self.clock()
         self._cancel_event.set()  # Also blocks already-entered Core/adapter preparation.
         self._generation += 1  # Queued operations and callbacks from this run are now inert.
         self.state, self.reason, self._waiting, self._calling = state, reason, None, False
@@ -267,6 +360,7 @@ class Orchestrator:
     def _resume_clock(self, now):
         if self._paused_at is not None:
             held = now - self._paused_at
+            self._held_seconds += held
             self._deadline += held
             if self._call_deadline:
                 self._call_deadline += held
@@ -294,6 +388,8 @@ class Orchestrator:
     def _call(self, operation, done, *, allow_session_agent=None, expected_session=None):
         if self.state != 'running' or not self._check_context():
             return
+        if not self._check_run_budget():
+            return
         self._generation += 1
         generation = self._generation
         self._calling = True
@@ -308,6 +404,8 @@ class Orchestrator:
                 return None
             if not self._check_context():
                 return None
+            if not self._check_run_budget():
+                return None
             if self._budget_now() >= self._call_deadline:
                 self._expire_call()
                 return None
@@ -317,6 +415,8 @@ class Orchestrator:
             if settled or self.state != 'running' or generation != self._generation:
                 return
             settled = True
+            if not self._check_run_budget():
+                return
             if self._budget_now() >= self._call_deadline:
                 return self._expire_call()
             self._calling = False
@@ -328,7 +428,7 @@ class Orchestrator:
                 returned = result.get('id', result.get('session_id', '')) if isinstance(result, dict) else result
                 expected = expected_session or returned
                 if not isinstance(expected, str) or not expected or current['task_session'] != expected or current['session_id'] != expected:
-                    return self._finish('paused', f'{ROLE_NAMES[allow_session_agent]} session 準備未完成')
+                    return self._finish('paused', f'{self.role_names[allow_session_agent]} session 準備未完成')
                 self._bindings[allow_session_agent] = current
             self._preparing_agent = None
             done(result)
@@ -371,7 +471,7 @@ class Orchestrator:
 
     def _messages(self, agent):
         session_id = self._bindings.get(agent, {}).get('session_id')
-        return [m for m in self.core.messages(self.task_id, agent) if m.get('role') == 'assistant'
+        return [m for m in self.core.messages(self._bindings[agent]['task_id'], agent) if m.get('role') == 'assistant'
                 and m.get('status', 'complete') == 'complete' and m.get('session_id', '') == session_id]
 
     def _skip_optional(self, reason):
@@ -379,7 +479,7 @@ class Orchestrator:
             return
         self._waiting = None
         self._note('skipped', f'{self.names[self.step]} 未提供意見（{reason}），流程繼續')
-        self._send('review_work', self._carry + f'\n\n## Local LLM 第二意見\n未提供（{reason}）。')
+        self._send(self.review_target, self._carry + f'\n\n## Hermes 第二意見\n未提供（{reason}）。')
 
     def _assert_dispatch_allowed(self, contract):
         """RAM-only late dispatch gate; it grants no authorization and performs no I/O."""
@@ -388,6 +488,8 @@ class Orchestrator:
         reason = self._context_reason()
         if reason:
             raise RuntimeError(reason + '；未傳送')
+        if self.snapshot()['elapsed_seconds'] >= self.limits.max_active_seconds:
+            raise RuntimeError('Run time budget expired; request was not sent')
         if contract['step_sequence'] > 1 and self.has_pending_approval():
             raise RuntimeError('Pending human approval blocks native dispatch; request was not sent')
         # A human hold is excluded from the operation's budget, including before its next tick.
@@ -404,6 +506,10 @@ class Orchestrator:
                 '未截斷或傳送，請查看原始訊息並重新整理完整交接')
         if self.state != 'running' or not self._check_context():
             return
+        if not self._check_run_budget():
+            return
+        if self.step_sequence >= self.limits.max_steps:
+            return self._finish('paused', f'已達步數上限 {self.limits.max_steps}，尚未取得最終 APPROVED')
         if self.step_sequence and self.has_pending_approval():
             self._generation += 1
             self._waiting, self._contract, self._dot_snapshot = None, None, None
@@ -412,7 +518,8 @@ class Orchestrator:
         agent = self.steps[step][0]
         self.step_sequence += 1
         correlation_id = f'{self.run_id}:{self.step_sequence}:{secrets.token_hex(16)}'
-        text = PROMPTS[step].format(task=self._frozen_task_text, body=body)
+        text = self.prompts[step].format(task=self._frozen_task_text, body=body,
+                                         lead=self.role_names[self.lead], implementer=self.role_names[self.implementer])
         text += ('\n\n【單一訊息回覆格式】第一個非空行使用上面的 VERDICT 判定；'
                  f'第二個非空行必須原樣寫 ACW_REPLY: {correlation_id}。'
                  '\n接著寫完整且非空的交接內容，最後一個非空行必須原樣寫 '
@@ -420,7 +527,7 @@ class Orchestrator:
                  '\n這些標記只界定應用程式交接內容完整性，不代表原生完成訊號或作者身分驗證。')
         binding = self._bindings[agent]
         contract = {'run_id': self.run_id, 'step_sequence': self.step_sequence, 'correlation_id': correlation_id,
-                    'step': step, 'task_id': self.task_id, 'project_id': self.project_id, 'agent': agent,
+                    'step': step, 'task_id': binding['task_id'], 'project_id': binding['project_id'], 'agent': agent,
                     'session_id': binding['session_id'], 'dot_id': binding['dot_id'], 'room_id': binding['room_id'],
                     'prompt': text, '_cancel_event': self._cancel_event}
         contract['_dispatch_guard'] = lambda: self._assert_dispatch_allowed(contract)
@@ -532,6 +639,8 @@ class Orchestrator:
                 self._paused_at = now
             return
         self._resume_clock(now)
+        if not self._check_run_budget():
+            return
         if self._calling:
             if now >= self._call_deadline:
                 self._expire_call()
@@ -547,7 +656,7 @@ class Orchestrator:
         if state in ('Error', 'Offline', 'Disconnected'):
             if self.step in self.optional:
                 return self._skip_optional(f'連線狀態：{state}')
-            return self._finish('paused', f'{ROLE_NAMES[agent]} 連線狀態：{state}')
+            return self._finish('paused', f'{self.role_names[agent]} 連線狀態：{state}')
         if agent == 'dot':
             previous_sequence = self.step_sequence
             self._process_dot_snapshot()
@@ -583,7 +692,7 @@ class Orchestrator:
             if self.step in self.optional:
                 return self._skip_optional('逾時或未提供完整相關交接')
             detail = '：' + self._reply_problem if self._reply_problem else ''
-            self._finish('paused', f'{ROLE_NAMES[agent]} 逾時未完成相關交接' + detail)
+            self._finish('paused', f'{self.role_names[agent]} 逾時未完成相關交接' + detail)
 
     def _advance(self, reply):
         if self.state != 'running' or not self._check_context():
@@ -602,12 +711,12 @@ class Orchestrator:
             return self._finish('done', target[1:])
         if target.startswith('!'):
             return self._finish('paused', target[1:])
-        if target in NEW_ROUND:
+        if target in NEW_ROUND or (self.step == 'final_review' and target == 'implement'):
             if self.round >= self.max_rounds:
                 return self._finish('paused', f'已達回合上限 {self.max_rounds}，尚未取得最終 APPROVED；最後判定：{verdict}')
             self.round += 1
         if target == 'local_review':
             self._carry = body
         elif self.step == 'local_review':
-            body = self._carry + f'\n\n## Local LLM 第二意見（{verdict}）\n' + body
+            body = self._carry + f'\n\n## Hermes 第二意見（{verdict}）\n' + body
         self._send(target, body)

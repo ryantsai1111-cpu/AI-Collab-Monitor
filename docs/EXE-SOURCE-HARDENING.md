@@ -1,5 +1,7 @@
 # EXE source hardening — approval boundaries
 
+> 歷史文件（2026-10-09 標註）：保留原始交付／驗收內容。啟動與現況以 [文件索引](README.md)、[使用指南](USER_GUIDE.md) 及 [目前測試紀錄](../tests/README.md) 為準；文內舊計數、路徑或操作授權不能直接套用本版。部分 evidence 未隨此 checkout 提供。
+
 G8二審批准 A–F 的 source-only 修正。原 source 的逐檔備份／SHA 在 `evidence/exe-source-hardening/original-source/`、`baseline.json`；Claude 原提案保持原樣。
 
 Launcher：未知／多餘參數拒絕，不會靜默回落到正式 data。只接受無參數或 `--data-dir` 絕對路徑。全 Main 錯誤處理，檢查已配置 Python 的絕對路徑、檔名、存在與 run.py。檔名／path/hash 不等於 publisher/PE identity 完整驗證。Windows quoting 使用兩個 .NET regex；離線測試取實際 C# 常數，以可信 PowerShell 的 .NET Regex 執行，再用 Windows CommandLineToArgvW 作獨立 oracle；**沒有編譯／執行 C#**。Process.Start／兩秒非零早退檢查不證明 UI ready。版本與 asInvoker manifest 僅供追溯。

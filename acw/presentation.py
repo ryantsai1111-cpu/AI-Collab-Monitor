@@ -55,7 +55,7 @@ def project_label(project, projects=()):
     duplicates = sum(compact(p.get('name')) == compact(project.get('name')) for p in projects) > 1
     others = [p.get('repo_path') or p.get('repo') or '' for p in projects if compact(p.get('name')) == compact(project.get('name'))]
     clue = distinct_path_clue(cwd, others) if duplicates and cwd else path_name(cwd)
-    return name + (' · ' + clue if clue else '')
+    return name + (' · ' + clue if clue and (duplicates or clue != name) else '')
 
 
 def session_identity(row):
@@ -95,7 +95,8 @@ def local_session_displays(core, agent, rows):
         if hasattr(core, 'store') and sid:
             saved = core.store.query("SELECT substr(content,1,300) AS content FROM messages WHERE agent=? AND session_id=? AND role IN ('user','assistant') AND status='complete' ORDER BY timestamp,id LIMIT 1", (agent, sid))
             preview = saved[0]['content'] if saved else ''
-        displays.append((row, session_display(row, agent, projects, preview)))
+        name = core.agent_name(agent) if hasattr(core, 'provider') and core.provider(agent) != agent else agent
+        displays.append((row, session_display(row, name, projects, preview)))
     return sorted(displays, key=lambda pair: (-pair[1]['sort_time'], pair[1]['label'], str(pair[1]['id'])))
 
 

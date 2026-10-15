@@ -1,190 +1,93 @@
 # AI Collaboration Workspace — 使用指南
 
-本指南對應 Windows／PySide6 驗收候選版。**Final 尚未通過**：真實 Qt UI 50 項及最後 widget 回歸 25 項通過；官方 Claude／Codex 雙向 handoff、串流、resume、Stop 的 16 項，以及官方唯讀 history UI 5 項通過。Dot 官方橋接仍不可用；桌面 EXE 曾被安全軟體拒絕啟動，installed EXE 現已不存在，未還原或重試。Claude 隔離 Edit 請求因視窗關閉而取消，未批准，不會自行重開。完整狀態見 [需求追蹤](REQUIREMENTS.md) 與 [Final Acceptance Report](../evidence/FINAL-ACCEPTANCE-REPORT.md)。
+更新日期：2026-10-09。對應目前 Python／PySide6 介面；驗證範圍見 [測試紀錄](../tests/README.md)。舊 EXE、三份 ZIP 與歷史驗收文件不代表目前啟動方式。
 
-## 1. 開啟與資料位置
+## 啟動與資料
 
-程式入口是 `AI Collaboration Workspace.exe`；launcher 已編譯，installer 已備妥，但尚未完成 per-user 安裝、建立桌面／Start menu 捷徑或雙擊 EXE 驗收。可見 Qt 測試已實際執行，並非從未啟動 UI；目前結果與執行限制見 [UI 驗收紀錄](../evidence/UI-EXECUTION-BLOCKERS.md)。啟動器使用 `python-path.txt` 指定的既有 Python 與程式內的 `vendor` 相依套件。
+在專案根目錄執行：
 
-預設資料目錄是 `%LOCALAPPDATA%\AI-Collaboration-Workspace\data`；安裝程式位置是 `%LOCALAPPDATA%\AI-Collaboration-Workspace\app`。原本的 `C:\Users\ryant\Desktop\AI-Collab-Monitor` 保持獨立。
+```powershell
+python run.py
+```
 
-需要獨立測試資料時，可在程式目錄以既有 Python 執行：
+本機資料夾已有 `AI Collab Workspace.lnk`，指向同層 `run.py`；雙擊即可啟動。已開啟的視窗需正常關閉再載入更新。捷徑不隨 Git 散布。程式優先使用 `vendor/` 的 PySide6，請保留此資料夾。
+
+預設資料位於 `%LOCALAPPDATA%\AI-Collaboration-Workspace\data`。同一資料目錄一次只能開一個視窗。隔離測試可用：
 
 ```powershell
 python run.py --data-dir C:\path\to\isolated-data
 ```
 
-請指定新建的測試目錄與測試 repo。相同資料目錄一次只能開啟一個 Workspace 視窗。
+重開會還原 Agent、設定、project／task／session 綁定與本機歷史，不自動連線、resume 或重送任務。草稿只保留在本次程式記憶體。
 
-啟動會還原本機選取的 Project、Task、對話與 session 對應；不會自動連線 Agent、不會自動 resume，也不會重送 prompt。
+## Project、Session 與獨立 Agent
 
-## 2. 建立 Project 與 Task
+1. 用主畫面上方分頁或右側成員卡片選擇 Agent，展開左側欄並切到「Agent」。側欄只顯示目前 Agent 的 Project／Session；Project 旁邊「＋」可建立專案。
+2. 在 Agent 面板按「連線」。Claude／Codex 已有綁定 session 時會接續它；Hermes 先檢查 CLI 協定，按「開啟」或 Send 才恢復已保存的 Hermes 對話。沒有 session 時可按「新對話」，或直接輸入首次訊息。忙碌中的 Agent 必須完成或停止工作後才能切換。
+3. 對話分頁右側按「＋ Agent」，選 Claude、Codex 或 Hermes、名稱與專案。同一 provider 可建立多個視窗，新增本身不連線或送出任務。
+4. Session 下拉清單只列出此 Agent／Project 已保存的對話。選取本身不會開啟；按「開啟對話」才接續原 session 與歷史。「新對話」建立獨立歷史，不覆蓋原對話。
 
-1. 按上方 **+ Project**。
-2. 填入 **Name**、**Repository / directory**；可使用 **Browse** 選擇目錄。
-3. 視需要填入 **Default branch** 與 **Notes**，按 **Save**。
-4. 按 **+ Task**，輸入任務名稱。
-5. 使用 **Project**、**Task** 選單切換；右側狀態選單可記錄 NEW、PLANNING、IMPLEMENTING 等固定狀態。
+日常側欄只保留 Project、Session 搜尋／選取與「新對話／開啟對話」。Session 旁「⋯」提供重新命名、詳細／ID、探索原生對話與專案資訊（工作目錄、Git 狀態）；Hermes Agent 另有「Hermes 設定…」，直接開啟該 instance 的設定分頁。側欄不再重複顯示 Agent 分頁、綁定標題與 Git 資訊。檢視模式改從右上「⋯ → 檢視」切換。
 
-**Sync to agents** 會將目前 Project 的目錄交給 Claude／Codex adapter；Dot 只記錄專案、repo 名稱、branch、task 等本機 metadata，不代表 Dot 已能存取檔案或已接收訊息。
+聊天不需要先建立或選擇任務。內部沿用 task 表保存歷史關聯，不改 DB schema。「紀錄」頁保留舊任務、筆記與狀態；這些選取只供紀錄管理，不會切換 Agent。主視窗第一次載入時固定舊共用選取，往後各自獨立。工作區保存 Agent 定義、設定、綁定與視窗布局，不強制共用 Project。
 
-若有尚未送出的文字或附件，切換 Project／Task 會詢問是否清除。選 **No** 留在原上下文；選 **Yes** 才清除草稿並繼續。Agent 忙碌時應先等待或 Stop，不能切換上下文。
+切換檢視或其他 Agent 不會重新派工。文字、附件與畫面狀態按情境保存在本次記憶體；關閉前請處理尚未送出的草稿。綁定規則見 [AGENT-CONTEXTS](AGENT-CONTEXTS.md)。
 
-Workspace 不自行將工作標記 APPROVED，也不會因你選取 DONE 而推論 Agent 已完成驗證。
+## 連線與模型
 
-## 3. 連線 Agent
+| Provider | 整合方式 |
+| --- | --- |
+| Claude | 官方 Claude Code CLI；能力依實際 handshake 回報 |
+| Codex | 官方 Codex CLI 的 app-server |
+| Hermes（原 Local LLM） | Hermes CLI 的 stream-json，provider／模型可沿用 Hermes 設定 |
+| G8毛 | 釘選的非官方 Dot 整合；手動操作有個別同意，協作有本次 run 的範圍與上限 |
 
-三欄各有獨立 **Connect Claude**、**Connect Dot**、**Connect Codex** 控制與狀態。正式 backend 的通訊握手完成後才會顯示 Connected；單純找到 executable 不算連線成功。
+「設定」可調整各 Agent 的 CLI 與模型；每個 Hermes Agent 有自己的 executable、provider、模型、執行預算與回合上限。provider／模型留白沿用 Hermes 設定。設定會在下次明確連線時套用，憑證值不填入程式設定。
 
-| Panel | 目前行為與限制 |
-|---|---|
-| Claude | 使用官方 Claude Code programmatic streaming；隔離真實測試已證明 message、streaming、cwd、tool、resume、model／effort 與 stop。先前 OAuth 過期屬歷史錯誤，使用者官方登入後的新實測已成功；不要將憑證貼入 Workspace。 |
-| Dot | 顯示 Blocked 與 `Managed by ChatGPT / dot`，不提供假的可選 model／effort。沒有已批准的官方 transport，因此 Send、session 與 Stop 不可用。 |
-| Codex | 使用官方 app-server，連線後取得實際 model／effort。既有登入與 sandbox／approval 政策仍由官方 backend 管理。 |
+Hermes 設定頁的「檢查 Hermes CLI」使用目前表單值執行 CLI help，不儲存、不建立 session、不做推論。成功只代表協定可用，認證、推論與工具仍須實際驗證。
 
-連線成功且閒置時，Connect 會變成 **Disconnect**。錯誤／離線狀態可按 **Reconnect**。重新連線不等於恢復原 session；請明確選取 session 並按 **Resume**。
+舊 `config/local-llm.json` 不再覆蓋已存設定。只有明確指定 `harness: "hermes"` 且沒有已存 Local 設定時才作一次性 seed；新增 instance 各自保存。舊 example JSON 保留作歷史參考。詳見 [Hermes 整合](HERMES.md)。
 
-如果 backend 回傳錯誤，欄位提示與下方狀態列會保留經安全過濾後的具體錯誤。完整狀態可在 **Diagnostics** 查看。
+Claude／Codex 連線到已有綁定 session 時會接續它，不讀取其他對話；未綁定者只連接後端。Local 的連線與恢復分開，開啟或 Send 時才恢復指定 session。模型／effort 依後端能力提供；Local 模型使用自己的設定。斷線或找不到原 session 時不會默默建立替代對話。首次明確傳送才準備尚未建立的對話；傳送失敗保留文字與附件，不自動重送。
 
-## 4. Session、Model、Effort
+## 原生對話與同步
 
-每欄的 **Session** 選單顯示 Workspace 已記錄的 sessions。選定 Project 並連線、閒置後，可按 **Discover…** 查詢後端支援的 session index。Claude 使用官方 SDK，範圍限於目前 cwd，不展開其他 worktree，也不會在啟動或 Connect 時自行掃描。
+側欄「對話」列出本機 Claude Desktop **Code** 與 Codex 保存的對話，一般 Claude Chat 尚未整合。可只載入紀錄、接續對話，或在所選專案開新對話。重新命名與封存僅作用於 Workspace，不寫回 Desktop。
 
-- **Import selected (no resume)**：將選定原生 session 的 metadata 加入本機選單；不改變目前 Task 對應、不讀取整段 transcript，也不會 resume。
-- **New**：為目前 Task 建立新的 backend session。
-- **Resume**：明確接續選中的 session，並建立 Task 對應。重新連線後仍需選擇正確 session。
-- **Rename**：修改 Workspace 本機顯示名稱，不同步修改官方 Desktop 名稱。
-- **History**：開啟 Workspace 已保存的歷史並套用 Agent 篩選；匯入原生 metadata 不會自動匯入原生 transcript。
+各 Agent 綁定自己的 session，以定時更新同步內容，不跟隨 Desktop 焦點。目前不是完整雙向即時同步。新增 instance 可透過自己的 session 控制與「探索原生對話」使用後端支援的功能。
 
-在 Discover 視窗選中一個 session 後，可按 **View native history** 開啟唯讀預覽，分為 **Conversation / activity** 和 **Sanitized structured records**。只有實際 helper capability 可用時才啟用；否則顯示 **Native history unavailable** 並附原因。讀取在背景 worker 執行，只預覽選中的 session，不保存訊息、不改變 Task 對應、不 resume，也不發送 prompt。原生 SDK backend 讀取已在隔離測試通過，新 UI 控制尚待重測。若中途切換 project，結果會被丟棄並要求重新查詢。不能假設列出了所有官方 Desktop 私有對話。
+探索、唯讀預覽、匯入 metadata、resume 是不同操作，依畫面說明執行。同一 Workspace 禁止兩個同類 Agent 同時控制同一 native session；程式無法偵測另一個 Desktop 是否也正在送訊息。
 
-**Model** 與 **Effort** 選項只來自連線 backend 的回報，可能依版本、帳號和模型改變。沒有可查詢的 model catalog 時顯示 **Default backend model**；沒有 effort 支援時顯示 **Unsupported / backend default**。這些文字不是可切換的模型。
+## 聊天、核准與轉交
 
-## 5. 發送、串流與停止
+Ctrl+Enter 傳送、Enter 換行。各 Agent 的停止操作只針對自身工作，是否支援取決於 adapter。附件依模型能力及允許路徑提供。
 
-選取 Project、Task，連線 Agent，建立或 resume 正確 session 後，在該欄底部輸入訊息，按 **Send** 或 **Ctrl+Enter**。
+Claude／Codex 的「⋯ → 核准方式」預設每次詢問，也可明確選擇自動核准讀取／專案編輯或全部模式。Hermes 則沿用自身單次工具核准設定，可能自動允許工具，本視窗不能逐次核准；Workspace 不傳 `--yolo`、不改 Hermes config。詳見 [SECURITY](SECURITY.md)。
 
-回覆會在串流到達時更新。對話、tool、command、file、error 會以不同種類記錄；可展開活動卡片查看其內容。來源沒有提供的欄位不代表零或成功。
+訊息的「轉交」可選其他 Agent。「預覽後傳送」先查看 envelope 與補充說明；「手動直接傳送」以點選目標作為傳送動作。來源訊息與註解分開保存，狀態不明的傳送不會在重啟後自動重試。
 
-各欄 **Stop** 只在該 Agent 忙碌且 adapter 確認支援取消時啟用。它要求官方 backend 中斷目前 turn，不會使用 taskkill 或殺掉 process tree。上方 **Stop current task** 需要確認，然後向忙碌中的 adapter 發出取消要求。
+## 自動協作
 
-若出現 tool approval 卡片，先檢查請求，再按 **Deny** 或 **Approve**；Approve 另有確認。Workspace 不會自動允許工具，也不會替 Agent 放寬 sandbox。
+標題列「自動協作…」選主導者、實作者、任務及執行限制。可使用 Claude A → Claude B → Claude A，也可混用 provider。主導者決定是否通過驗收，未通過則交回修正。
 
-**Attach** 與拖放只在 adapter 宣告支援時啟用，檔案必須位於允許的 project／artifact 範圍。Claude 支援有大小限制的 UTF-8 文字及 PNG／JPEG／GIF／WebP 圖片；文字與 PNG 已有獨立真實測試通過證據，其他格式不因此自動算通過。文字會套用秘密過濾；圖片像素不會自動遮罩。選擇附件後仍須按 Send 才會送出。附件發送與下方的 artifact 保存／匯出是不同操作。
+參與者須連線、選好各自 Project 與對話；可以使用不同 project／task。啟動前確認綁定預覽，流程不會默默調整它們。協作只鎖定參與者，其他 Agent 可以繼續工作。可選 G8毛 複核／轉交或 Hermes 第二意見。預設 3 回合、24 步、60 分鐘有效時間，啟動時可調整。核准等待不計時；錯誤、逾時、參與者綁定變更或無法關聯的回覆會停止推進。可隨時要求停止。
 
-## 6. Copy 與 Raw Events
+目前一個 run 為一位主導者、一位實作者及可選複核，尚無多實作者平行排程、自動增添隊員或 worktree 隔離。詳見 [DESIGN-auto-collab](DESIGN-auto-collab.md)。
 
-訊息右上方的動作選單提供：
+## Monitor 與工作紀錄
 
-- **Copy**：只複製該訊息內容。
-- **Copy with metadata**：包含訊息 metadata。
-- **Open raw event**：開啟該訊息連結的安全過濾後 raw event；如果 raw 已不存在，改顯示已保存的訊息 metadata 及原因。
+主畫面「Monitor 工作台」可直接操作各 Agent 對話，使用近黑底、磷光綠重點的控制台主題。預設專注模式有主要對話與右側 Agent 狀態欄；點右側成員只切換操作對象，不會改 project／session 或啟動工作。窄視窗自動收起狀態欄，改由上方 Agent 分頁切換。
 
-各欄 **Raw** 左側列出 event index，選取項目後右側顯示其安全過濾後 raw record；過期／缺少的 record 會顯示 metadata 和原因。**Logs** 在檔案總管開啟本機 raw log 目錄；**Files** 開啟目前 Project 目錄。
+標題列「協作總覽」或「檢視 → 協作總覽（唯讀）」顯示規則、派工／驗收、待核准項目與交接事件。它仍是唯讀頁，按「返回工作台」或 Agent 卡片回到可操作對話。右側欄及總覽每秒更新本機狀態，不會因此讀取 backend 原生歷史。
 
-Raw event 盡量保留 backend 原始結構，但秘密與隱藏 reasoning 不會保存；相關刪除／遮蔽會留下記錄。不要把 raw 等同於可取得隱藏 chain-of-thought 的介面。
+對話布局可切換自動、專注或並排並保存選擇，原本的聊天元件、草稿、附件與 session 不會因切換而重建。工作詳情、筆記、匯出與 Git 檢視依目前 Agent 的對話／專案；在「紀錄」頁則使用所選紀錄。歷史頁雙擊任務只查看本機紀錄，不會恢復 Agent。Tests 顯示已觀察到的結果，不會因開啟畫面就執行測試。Git diff 檢視不包含 commit、push 或 merge 操作。
 
-## 7. Forward／Handoff
+匯入 artifact／截圖、匯出 task 與診斷有各自檢查。圖片像素不自動遮罩，匯出圖片需檢視確認。診斷不收集 backend credential 檔案；Raw 是安全過濾後的公開事件，不包含隱藏 reasoning。
 
-上方 **Handoff** 模式選單提供 **Assisted**（預設）與 **Manual**。在已完成的 assistant response 上按 **Forward**，選擇另一個 Agent，或從訊息動作選單選 **Send to …**。
+舊 `AI-Collab-Monitor/` 是獨立 PowerShell 工具；Workspace 只讀取指定 legacy root 的既定 log，不啟動、重設或清除它。
 
-- **Assisted**：先開啟預覽，可加入 Additional note，按 Confirm and send 才送出。
-- **Manual**：你點選 Forward 的目標即是明確發送動作；不另開預覽，直接送原始內容與 metadata。目標未連線時不會送出。
+## 結束與限制
 
-Assisted 預覽包含：來源與目標 Agent、Task、Project、Branch、時間、來源 session，以及原始訊息。**Original source message** 為唯讀；**Additional note** 可增加說明，會分開保存；**Outgoing handoff** 顯示實際將送出的 envelope。
+正常關閉保存視窗與持久化資料，有工作時依畫面確認是否取消。重新連線前可先查本機歷史與「診斷」。
 
-在 Assisted 模式按 **Confirm and send** 才會送出。目標尚未 Connected 時此按鈕停用；關閉或取消預覽不會送出。目標必須在正確 Task 上有可用的新 session 或已 resume 的對應 session。
-
-原始來源內容不會被註解覆寫。準備預覽、嘗試發送与成功收到回覆是不同階段；請以目標回覆／事件確認實際結果。重新啟動不會自動重試 handoff。Dot 目前可顯示預覽，但實際接收仍受官方橋接阻礙。
-
-**Flow** 選單提供兩個獨立步驟：最新 Claude 回覆 → Dot、最新 Dot 回覆 → Codex。每個步驟都需要使用者點選，並遵守目前 Manual／Assisted 模式；缺少來源回覆或目標未連線時會停用。它不會自動串接下一步。Automatic orchestration 固定為 OFF。
-
-## 8. 視圖、比較與筆記
-
-上方視圖選單提供：
-
-| 視圖 | 用途 |
-|---|---|
-| Workspace | 個別操作三欄 Agent。 |
-| Monitor | 以三欄唯讀方式檢視 Workspace 與設定的 legacy logs；不能輸入或送訊息。 |
-| Timeline | 按時間查看 prompt、response、tool、command、file、handoff、session、project、error、stop 等事件；雙擊看細節。 |
-| History | 找回 Task、查詢本機對話與事件。 |
-
-原 v0.1 Monitor 仍可獨立運作。Settings → Paths 的 **Legacy Monitor root** 指向舊 Monitor 根目錄；Monitor 模式會增量讀取既定四個 log，不改寫原檔案、不重啟 readers、不操作舊 session。現有四個 log 為空白時，沒有舊內容可顯示是正常狀態。reader 隔離測試及合成 UI 的唯讀切換測試已通過；正式四個 reader／pane 的端到端驗收另列於報告。
-
-雙擊 Agent 標題可放大單欄；再次雙擊、按 **Three panels** 或 **Esc** 返回三欄。**F11** 切換全螢幕。Settings → Appearance 的 **Always on top** 可保持最上層。
-
-**Compare** 至少需要目前 Task 有兩個 assistant responses；各側選擇一則回覆並排查看，不會自動判定對錯。**Task notes** 儲存本機任務筆記，不會自動送給 Agent；要分享時，明確複製到 handoff 的 Additional note。
-
-## 9. History 與搜尋
-
-進入 **History**：
-
-1. 不輸入查詢字串時會列出 tasks。
-2. 輸入字串後按 **Search** 或 Enter，查詢對話、command、file、response、error、task、project 等已保存內容。
-3. 可設定 Agent、Status、**Current project**、branch、date、**Errors only** 篩選；日期使用 `YYYY-MM-DD`。
-4. 雙擊 Task 還原其 Project／session 對應，然後仍需明確 Connect／Resume 才能接續 backend 工作。
-5. 雙擊搜尋結果可查看保存內容。
-
-backend Offline 時，本機歷史仍可查看。Date 欄位為日期範圍；branch 為精確字串篩選。Core 篩選測試及最近一次合成 UI 的 History／Search 操作已通過，不代表外部 Agent 的原生 transcript 已自動匯入。
-
-## 10. Diff、Command、Tests 與 Artifacts
-
-按 **Diff / Tests** 可查看 Unified diff、Side by side、Changed files、Tests、Branch / log 和 Artifacts。Git 查詢保留命令、stderr、exit code；沒有 upstream 時 ahead／behind 是未知，不等於 0。尚無第一個 commit 的 repo 會提示 unborn HEAD，分別列出 staged additions 與 unstaged tracked edits；untracked 檔案不會被偽造成 Git patch。
-
-**Copy diff** 複製目前 diff；**Save patch** 另存 patch；**Open selected file** 開啟允許範圍內的檔案。Diff viewer 不編輯原始碼，也沒有 commit、push、merge。
-
-Codex 官方 `commandExecution` 提供 **combined stdout/stderr**。空白 stderr 不表示命令沒有錯誤輸出；嚴格的 stdout／stderr 分流仍是 UNSUPPORTED。Tests 顯示已觀察到的 command、framework、passed／failed／skipped、duration 與 exit code；開啟檢視不會自行執行測試，也不補造未知結果。
-
-在 **Artifacts** 分頁：
-
-1. 按 **Import file…**，選擇目前 project 範圍內的 UTF-8 report、test log、diff、patch、JSONL、Markdown，或 PNG／JPEG screenshot。
-2. 文字經安全過濾後保存為 Task 的受管理副本；JSONL 必須能逐行解析。Screenshot 先確認明確匯入，並驗證圖片結構。
-3. 選取一筆後可按 **Open selected**、**Metadata** 或 **Export selected…**。Screenshot 在程式內預覽；文字副本交由 Windows 預設程式開啟。
-4. 匯出 screenshot 時需逐張開啟預覽，可用 **Actual size** 檢查小字，再勾選已檢查並確認。圖片像素不會自動遮罩；取消檢查不會匯出。
-
-輸入檔案有 16 MiB 上限，credential 類檔名與範圍外路徑會被拒絕。匯出不能覆寫 Workspace 的 DB、raw 或 artifact 儲存區。新 artifact 與 screenshot 控制仍需完整 UI 重測，不能以程式存在代替驗收。
-
-## 11. Export、Diagnostics 與 Settings
-
-選取 Task 後按 **Export**，選擇 Markdown、JSON、ZIP 或 HTML 與目的檔案。內容包含已保存的 Task／Project metadata、sessions、conversations、events、handoffs、artifacts；diff／test 資料必須先已記錄。Markdown／JSON／HTML 包含 screenshot metadata，不嵌入像素。ZIP 遇到已匯入的 screenshot 會先開啟逐張檢視與確認，確認後才包含圖片和安全說明；取消會取消此次匯出。這不是自動影像遮罩，分享前仍應確認可見內容。
-
-**Diagnostics** 顯示 executable、version、backend、session、cwd、最後事件、最後錯誤及 capability。**Export diagnostics** 產生 `workspace-diagnostics.zip`，只收錄允許的執行狀態與安全過濾後 events，不收集 agent credential/config 檔案。
-
-**Settings** 包含：
-
-| 頁面 | 目前內容 |
-|---|---|
-| Agents | Enabled、Backend、Executable、Timeout、Default model、Default effort、Default project。模型與 effort 選單只使用目前 backend discovery；Streaming 和 Raw log 為唯讀的必要政策。 |
-| Projects | Project 與唯讀 Git 使用說明。 |
-| Paths | App data 位置與 Legacy Monitor root。 |
-| Logs | Raw 保存及安全過濾說明。 |
-| Permissions | 官方權限與明確 tool approval 邊界。 |
-| Appearance | Always on top；視窗與快捷鍵說明。 |
-| Retention | Retention days、Maximum raw log size (MB)、Archive rotated logs。 |
-| Advanced | Automation OFF、啟動與 diagnostics 說明。 |
-
-Settings 中的說明頁不是完整可編輯設定表。Agent 設定會在下次明確連線時套用；Default project 只在尚未選取全域 Project 時使用，不覆寫當前專案。Streaming 在 backend 支援時啟用；安全過濾後 raw audit 必須保存，沒有假造的關閉切換。
-
-Retention 會輪替 raw segments、依 Archive 選項壓縮非使用中區段、刪除超過保留天數的自有 raw 檔案；過期 reference 會標示 expired，壓縮 reference 仍可讀。只影響新 Workspace 自己的 raw 目錄，不清理舊 Monitor。Core 設定及保留機制已有隔離測試，完整 Settings UI 重測仍依最新報告。
-
-## 12. 結束與恢復
-
-一般關閉會保存視窗大小與位置。若仍有 backend 工作，程式會詢問是否要求取消並關閉；可選擇不關閉繼續等待。
-
-再次啟動會讀取本機持久化資料，恢復 Project、Task、history 與 session mapping。中斷中的內容可能標記 interrupted，狀態不明的 handoff 不會自動重送。為避免跨 streaming 片段秘密殘留，尚未完成的最後一行暫存於記憶體，崩潰時可能遺失；已完成的安全行、完整訊息與 session／Task 對應會持久化。請先檢查歷史與 Diagnostics，再自行 Connect／Resume。
-
-若出現啟動、登入、bridge 或恢復問題，參閱 [TROUBLESHOOTING](TROUBLESHOOTING.md)、[ADAPTERS](ADAPTERS.md) 與 [SECURITY](SECURITY.md)。
-
-## 指南與驗收的區別
-
-本指南描述實際程式控制項，功能證據依各測試的原生／Core／UI 範圍分別記錄。589 PASS、0 FAIL、60 BLOCKED、4 UNSUPPORTED、0 PENDING；這不是653個原生端到端測試。Python source 的 UI 通過不能替代 EXE 啟動或三 Agent 真實同時運作驗收。現有 shortcut 指向的 EXE 仍缺失；不可自行還原、重建、重試或變更安全設定。請以 [Final Acceptance Report](../evidence/FINAL-ACCEPTANCE-REPORT.md) 為準。
-
-## Smaller high-DPI screens
-
-The workspace can scroll vertically and horizontally when the three panels exceed the available logical screen area. Scroll to reach input/actions; reopening restores the selected screen and bounds the window to available space. Diagnostics shows Claude MCP server/tool names as an observed snapshot only, with current agent connection state; it does not execute or authorize tools.
-
-
-## Current approved Dot integration update
-
-The earlier official-bridge blocker remains historical context. An explicitly approved, pinned unofficial Dot adapter and manual UI are now implemented and offline-tested. See [Dot activation and boundaries](DOT-UNOFFICIAL.md). Only the human may trigger live credential-bearing list/connect/read/send. No live Dot PASS or Final acceptance is claimed. EXE work remains deferred.
+目前驗收主要為離線測試，完整原生 Chat、雙向同步與多 Agent 真實並行仍需驗證。歷史 PASS 計數不等於本版完整驗收。問題排查見 [TROUBLESHOOTING](TROUBLESHOOTING.md)。

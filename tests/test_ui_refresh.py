@@ -236,16 +236,28 @@ class WorkspaceUiRefreshTests(unittest.TestCase):
         combo.setCurrentIndex(index)
 
     def choose_task(self, task):
+        # Cache regressions explicitly bind every fixture Agent to the chosen container.
+        # Record-page navigation alone now leaves all Agent contexts unchanged.
+        for agent in AGENTS: self.core.select_agent_task(agent, task['id'])
         index = self.window.task_combo.findData(task["id"])
         self.assertGreaterEqual(index, 0)
+        self.window.task_combo.blockSignals(True)
         self.window.task_combo.setCurrentIndex(index)
+        self.window.task_combo.blockSignals(False)
+        self.core.select_task(task['id'])
+        self.window.reload_context()
         self.settle()
         self.assertEqual(task["id"], self.core.current_task_id)
 
     def choose_project(self, project):
+        for agent in AGENTS: self.core.select_agent_project(agent, project['id'])
         index = self.window.project_combo.findData(project["id"])
         self.assertGreaterEqual(index, 0)
+        self.window.project_combo.blockSignals(True)
         self.window.project_combo.setCurrentIndex(index)
+        self.window.project_combo.blockSignals(False)
+        self.core.select_project(project['id'])
+        self.window.reload_context()
         self.settle()
         self.assertEqual(project["id"], self.core.current_project_id)
 
@@ -268,7 +280,7 @@ class WorkspaceUiRefreshTests(unittest.TestCase):
         self.assertEqual("assisted", self.window.handoff_mode.currentData())
 
     def test_primary_labels_are_traditional_chinese_with_stable_internal_enums(self):
-        self.assertEqual(["對話", "監看（唯讀）", "時間線", "歷史"],
+        self.assertEqual(["Monitor 工作台", "協作總覽（唯讀）", "時間線", "歷史"],
                          [self.window.mode.itemText(i) for i in range(self.window.mode.count())])
         self.assertEqual(["Workspace", "Monitor", "Timeline", "History"],
                          [self.window.mode.itemData(i) for i in range(self.window.mode.count())])
@@ -283,8 +295,8 @@ class WorkspaceUiRefreshTests(unittest.TestCase):
                          [self.window.handoff_mode.itemData(i) for i in range(self.window.handoff_mode.count())])
         for panel in self.window.panels.values():
             for control, title in ((panel.connect_button, "連線"), (panel.send_button, "傳送"),
-                    (panel.stop_button, "停止"), (panel.attach_button, "附件"), (panel.new_button, "新增"),
-                    (panel.resume_button, "恢復"), (panel.rename_button, "重新命名"),
+                    (panel.stop_button, "停止"), (panel.attach_button, "附件"), (panel.new_button, "新對話"),
+                    (panel.resume_button, "開啟對話"), (panel.rename_button, "重新命名"),
                     (panel.discover_button, "探索原生對話…")):
                 self.assertEqual(title, control.text())
             self.assertEqual("未連線", panel.state.text())
@@ -303,20 +315,20 @@ class WorkspaceUiRefreshTests(unittest.TestCase):
         self.assertLess(self.window.task_status.findData("APPROVED"), 0)
         self.assert_no_adapter_actions()
 
-    def test_three_independent_agent_panels_and_default_roles(self):
+    def test_independent_agent_panels_and_flexible_roles(self):
         self.assertEqual(set(AGENTS), set(self.window.panels))
         self.assertEqual(4, self.window.role_tabs.count())
         labels = [self.window.role_tabs.tabText(i) for i in range(3)]
         self.assertIn("Claude", labels[0])
         self.assertIn("G8毛", labels[1])
         self.assertIn("Codex", labels[2])
-        self.assertIn("Local LLM", self.window.role_tabs.tabText(3))
+        self.assertIn("Hermes", self.window.role_tabs.tabText(3))
         role_text = [self.window.panels[a].title.toolTip().casefold() + " " +
                      " ".join(l.text() for l in self.window.panels[a].findChildren(QLabel)).casefold()
                      for a in AGENTS]
-        self.assertTrue("review" in role_text[0] or "審" in role_text[0], role_text[0])
+        self.assertIn("協作 agent", role_text[0])
         self.assertTrue("relay" in role_text[1] or "轉" in role_text[1] or "secondary" in role_text[1], role_text[1])
-        self.assertTrue("implement" in role_text[2] or "實作" in role_text[2], role_text[2])
+        self.assertIn("協作 agent", role_text[2])
         self.assert_no_adapter_actions()
 
     def test_sidebar_contains_project_task_and_every_session_control(self):
@@ -419,16 +431,17 @@ class WorkspaceUiRefreshTests(unittest.TestCase):
         self.assertTrue(panel.send_button.isVisible())
         self.assertEqual(0, self.window.workspace_scroll.horizontalScrollBar().maximum())
 
-    def test_explicit_connect_and_disconnect_do_not_create_or_read_sessions(self):
+    def test_explicit_connect_restores_only_bound_session_and_disconnect_does_not_read_history(self):
         panel = self.window.panels["claude"]
         QTest.mouseClick(panel.connect_button, Qt.LeftButton)
         self.settle()
-        self.assertEqual([("connect",)], self.adapters["claude"].calls)
+        sid = self.core.agent_task('claude')['claude_session']
+        self.assertEqual([("connect",), ('resume_session', sid)], self.adapters["claude"].calls)
         self.assertEqual("Connected", panel.connection_state)
-        self.assertEqual("", self.adapters["claude"].session_id)
+        self.assertEqual(sid, self.adapters["claude"].session_id)
         QTest.mouseClick(panel.connect_button, Qt.LeftButton)
         self.settle()
-        self.assertEqual([("connect",), ("disconnect",)], self.adapters["claude"].calls)
+        self.assertEqual([("connect",), ('resume_session', sid), ("disconnect",)], self.adapters["claude"].calls)
         self.assertEqual("Disconnected", panel.connection_state)
 
     def test_new_session_requires_click_and_does_not_send_existing_draft(self):
@@ -439,9 +452,10 @@ class WorkspaceUiRefreshTests(unittest.TestCase):
         QTest.mouseClick(panel.new_button, Qt.LeftButton)
         self.settle()
         self.assertEqual([("create_session",)], self.adapters["claude"].calls)
-        self.assertEqual("claude-created-offline", self.core.current_task["claude_session"])
+        self.assertEqual("claude-created-offline", self.core.agent_task('claude')["claude_session"])
+        self.assertEqual(old_session, self.core.current_task['claude_session'])
         self.assertEqual("", panel.input.toPlainText())
-        self.core.store.update("tasks", {"id": self.core.current_task_id}, {"claude_session": old_session})
+        self.core.select_agent_task('claude', self.task_a['id'])
         self.window.reload_context()
         self.settle()
         self.assertEqual("original native session draft", panel.input.toPlainText())
@@ -1290,15 +1304,16 @@ class WorkspaceUiRefreshTests(unittest.TestCase):
         self.choose_task(self.task_a)
         self.assertEqual(3, self.window.details_tabs.currentIndex())
         self.assertEqual(second["id"], tree.currentItem().data(0, Qt.UserRole)["id"])
-        self.assertEqual(2, self.window.role_tabs.currentIndex())
-        self.assertEqual(2, self.window.session_tabs.currentIndex())
+        self.assertEqual(1, self.window.role_tabs.currentIndex())
+        self.assertEqual(1, self.window.session_tabs.currentIndex())
+        self.assertEqual("dot", self.core.get_setting("ui.active_agent"))
         self.assert_no_adapter_actions()
 
     def test_workspace_and_role_overflow_actions_remain_reachable(self):
         tool = self.window.findChild(QToolButton, "workspace_actions")
         actions = [action.text() for action in tool.menu().actions()]
         for name in ("任務筆記", "比較回覆", "差異／測試／附件", "匯出",
-                     "同步專案", "設定", "診斷", "停止目前任務"):
+                     "設定", "診斷", "停止全部 Agent"):
             self.assertTrue(any(name in action for action in actions), name)
         for agent, panel in self.window.panels.items():
             names = [action.text() for action in panel.more_button.menu().actions()]
@@ -1325,7 +1340,7 @@ class WorkspaceUiRefreshTests(unittest.TestCase):
         card.copy(False)
         self.assertEqual(text, self.app.clipboard().text())
         forward_labels = [action.text() for action in card.forward_button.menu().actions()]
-        self.assertEqual(["G8毛", "Codex", "Local LLM"], forward_labels)
+        self.assertEqual(["G8毛", "Codex", "Hermes"], forward_labels)
         self.assert_no_adapter_actions()
 
 

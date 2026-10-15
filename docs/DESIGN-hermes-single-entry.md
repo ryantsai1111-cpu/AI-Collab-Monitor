@@ -37,7 +37,7 @@
 
 做法：
 
-1. `run.sh` 啟動前檢查 `data_dir/workspace.lock`（Qt 格式：pid、程式名、主機名各一行）。pid 活著 → GUI 在跑，走請求檔；否則照現在直接起 hermes.exe（行為不變）。
+1. `run.sh` 啟動前檢查 `data_dir/workspace.lock`（Qt 格式：pid、程式名、主機名各一行）。pid 活著**且** dispatcher 心跳新鮮（`data_dir/requests/.dispatcher.json` 每次 `poll()` 改寫，mtime 距現在不到 15 秒）→ GUI 在跑而且會回應，走請求檔；pid 活著但心跳不存在或太舊（GUI 還是舊版程式、當掉、執行緒卡住）→ 當成 GUI 沒開；否則照現在直接起 hermes.exe（行為不變）。等結果時 run.sh 每 10 秒再看心跳，超過 30 秒沒更新就撤回請求並以 `dispatcher-lost` 結束（不回退，因為 dispatcher 可能已經啟動 Hermes）。
 2. 請求檔：`data_dir/requests/<label>.json`，內容 `{worktree, briefs, label, prompt, run_budget, max_turns, created}`。run.sh 寫完後等 `data_dir/requests/<label>.result.json` 出現，再把 result 的 exit code、`hermes_exit`、git 尾段印成和現在一樣的格式。
 3. core 新增 `poll_requests()`：由 UI 既有的 100ms tick（`ui.py` 的 `poll_events`）每秒呼叫一次。對每個新請求：
    - 以 `repo_path == worktree` 找 project，沒有就 `create_project`；`select_agent_project('local', ...)`。
@@ -56,9 +56,16 @@
 
 ## §4 順序與相依
 
-1. 階段 A：現在做，動 `inspection.py`、`core.py` 與 `tests/test_core.py`。
-2. 等「讓 ACW 的 Hermes adapter 共用 hermes.lock」那個 session 完成並驗收後，再做階段 B，因為 B 依賴 adapter 的鎖。
-3. 階段 B 完成後，`AI-Collab-Monitor/docs/claude-hermes-collaboration.md` §9 與 skill 的 SKILL.md §3 要改成指向 CLI。
+1. 階段 A：已實作（2026-10-15），動 `inspection.py`、`core.py` 與 `tests/test_core.py`。
+2. 階段 B：**已實作（2026-10-15）**。`acw/requests.py`（`RequestDispatcher`）、`core.poll_requests()`、UI `poll_events` 每約 1 秒呼叫、skill 的 `run.sh` 請求模式；格式與流程見 [HERMES.md](HERMES.md)「請求檔派工」。與上文設計的差異：
+   - 監看器投影的來源是 core 的事件鉤子（`core._event_taps`），不是查 `events` 表，因為資料庫刻意不保存 `message_delta` 文字。
+   - result 的 `rejected` 以 `reason` 的代碼前綴分兩類（請求錯誤 → run.sh REFUSED；協作站接不了 → 回退直接路徑），另有 `expired` 代碼。
+   - dispatcher 心跳（見 §3.2 第 1 點）是為了避免 GUI 開著但沒有 dispatcher 時 run.sh 空等整個 `run_budget + 180` 秒。
+   - 請求多了 `allow_dirty`（對應 `HERMES_ALLOW_DIRTY=1`）與 `monitor_root`（run.sh 的監看器根目錄，非字串或不存在時就不投影）。
+   - 先做不碰資料庫的守門：守門類拒絕（label、worktree、PROGRESS.md、髒工作樹、git、local 不是 Connected）不會留下 project 或 task；`prepare-failed`／`send-failed` 發生時 project 與一個空的 task 已經建立，會留下。
+   - `local` agent 處於 `Error` 或 `Disconnected` 時，dispatcher 先呼叫一次 `core.connect('local')` 再判斷；`Busy`／`Connecting` 不動。
+   - 監看器的每一行在 core 的 `sanitize` 之後再過 `acw/hermes_mask.py`（direct 路徑遮罩規則的刻意複本），兩條路徑的遮罩一致。
+3. 階段 B 完成後，`AI-Collab-Monitor/docs/claude-hermes-collaboration.md` §9 與 skill 的 SKILL.md §3 要改成指向請求檔路徑（SKILL.md §3 已更新；§9 尚未改）。
 
 ## §5 不做的事
 

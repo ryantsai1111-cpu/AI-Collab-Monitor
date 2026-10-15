@@ -15,8 +15,9 @@ from .presentation import (session_identity, session_display, local_session_disp
                            project_label, task_label, compact)
 from . import approvals
 from .orchestrator import Orchestrator
+from .monitor import AgentRail, MonitorDashboard, collect_snapshot
 from .theme import (CODE_BLOCK_BG, CODE_INLINE_BG, CODE_INLINE_FG, EVENT_COLOR, HEADING_COLOR, MUTED_COLOR,
-                    STATE_COLORS, STATE_IDLE, build_style, metal_palette)
+                    STATE_COLORS, STATE_IDLE, build_style, console_palette)
 
 from PySide6.QtCore import Qt, Signal, QObject, QRunnable, QThreadPool, QTimer, QUrl, QByteArray
 from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont, QKeySequence, QPixmap, QTextCharFormat,
@@ -30,11 +31,13 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
+# Same folder as run.py: the monitor lives inside the repository, not on the Desktop.
+LEGACY_MONITOR_ROOT = str(Path(__file__).resolve().parents[1] / "AI-Collab-Monitor")
 AGENTS = ("claude", "dot", "codex", "local")
 STATUSES = ("NEW", "PLANNING", "REVIEWING", "READY", "IMPLEMENTING", "VERIFYING",
             "WAITING_USER", "BLOCKED", "DONE", "FAILED", "CANCELLED")
-ROLE_NAMES = {"claude": "Claude", "dot": "G8毛", "codex": "Codex", "local": "Local LLM"}
-ROLE_LABELS = {"claude": "主審", "dot": "轉接／複核", "codex": "實作", "local": "本地模型"}
+ROLE_NAMES = {"claude": "Claude", "dot": "G8毛", "codex": "Codex", "local": "Hermes"}
+ROLE_LABELS = {"claude": "協作 agent", "dot": "轉接／複核", "codex": "協作 agent", "local": "Hermes agent"}
 STATE_LABELS = {"Disconnected": "未連線", "Connected": "已連線", "Busy": "處理中", "Connecting": "連線中",
                 "Error": "錯誤", "Blocked": "受阻", "Offline": "離線", "Stopping": "停止中", "Interrupted": "已中斷"}
 STATUS_LABELS = dict(zip(STATUSES, ("新任務", "規劃中", "主審中", "可實作", "實作中", "驗證中",
@@ -281,7 +284,7 @@ class MessageCard(QFrame):
             stamp = datetime.fromisoformat(stamp.replace("Z", "+00:00")).astimezone().strftime("%H:%M")
         except ValueError:
             stamp = stamp[11:16] if "T" in stamp else stamp
-        self.heading = label(("你" if role == "user" else ROLE_NAMES.get(panel.agent, role)) + " · " + stamp, True)
+        self.heading = label(("你" if role == "user" else panel.window.role_names.get(panel.agent, role)) + " · " + stamp, True)
         self.heading.setObjectName("message_meta")
         self.heading.setWordWrap(False)
         footer.addWidget(self.heading)
@@ -289,12 +292,16 @@ class MessageCard(QFrame):
         if role == "assistant" and panel.agent != "dot":
             self.forward_button = QToolButton()
             self.forward_button.setObjectName("ghost")
-            self.forward_button.setText("轉交 ▾")
+            self.forward_button.setText("轉交")
             self.forward_button.setPopupMode(QToolButton.InstantPopup)
             targets = QMenu(self.forward_button)
-            for target in AGENTS:
-                if target != panel.agent:
-                    targets.addAction(ROLE_NAMES[target], lambda checked=False, target=target: panel.window.forward(self.message, target))
+            def populate_targets():
+                targets.clear()
+                for target in panel.window.agents:
+                    if target != panel.agent:
+                        targets.addAction(panel.window.role_names[target], lambda checked=False, target=target: panel.window.forward(self.message, target))
+            populate_targets()
+            targets.aboutToShow.connect(populate_targets)
             self.forward_button.setMenu(targets)
             footer.addWidget(self.forward_button)
         menu_button = QToolButton()
@@ -308,9 +315,17 @@ class MessageCard(QFrame):
         menu.addAction("檢視原始事件", lambda: panel.window.open_raw(self.message))
         if role == "assistant" and panel.agent != "dot":
             menu.addSeparator()
-            for target in AGENTS:
-                if target != panel.agent:
-                    menu.addAction(f"轉交給 {ROLE_NAMES[target]}…", lambda checked=False, target=target: panel.window.forward(self.message, target))
+            forward_actions = []
+            def populate_more_targets():
+                for action in forward_actions:
+                    menu.removeAction(action)
+                    action.deleteLater()
+                forward_actions.clear()
+                for target in panel.window.agents:
+                    if target != panel.agent:
+                        forward_actions.append(menu.addAction(f"轉交給 {panel.window.role_names[target]}…", lambda checked=False, target=target: panel.window.forward(self.message, target)))
+            populate_more_targets()
+            menu.aboutToShow.connect(populate_more_targets)
         menu_button.setMenu(menu)
         footer.addWidget(menu_button)
         layout.addLayout(footer)
@@ -466,6 +481,7 @@ class AgentPanel(QFrame):
     def __init__(self, agent, window):
         super().__init__()
         self.agent, self.window = agent, window
+        self.provider = window.core.provider(agent)
         self.capabilities = {}
         self.cards = {}
         self.approvals = {}
@@ -477,6 +493,8 @@ class AgentPanel(QFrame):
         self._effort_invalid = False
         self._effort_error = ""
         self._restoring_view = False
+        self._view_generation = 0
+        self._restore_scroll = None
         self.setObjectName("panel")
         self.setMinimumWidth(300)
         layout = QVBoxLayout(self)
@@ -485,12 +503,12 @@ class AgentPanel(QFrame):
         header = QHBoxLayout()
         titles = QVBoxLayout()
         titles.setSpacing(2)
-        self.title = FocusLabel(ROLE_NAMES[agent])
+        self.title = FocusLabel(self.window.role_names[agent])
         self.title.setObjectName("agentTitle")
         self.title.setToolTip("按兩下以專注此角色")
         self.title.double_clicked.connect(lambda: window.focus_agent(agent))
         titles.addWidget(self.title)
-        titles.addWidget(label(ROLE_LABELS[agent], True))
+        titles.addWidget(label(ROLE_LABELS[self.provider], True))
         header.addLayout(titles)
         header.addStretch()
         self.state = label("未連線")
@@ -499,11 +517,11 @@ class AgentPanel(QFrame):
         self.state.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         header.addWidget(self.state)
         self.connect_button = button("Connect", self.connect_agent, f"connect_{agent}")
-        self.connect_button.setAccessibleName(f"Connect {ROLE_NAMES[agent]}")
+        self.connect_button.setAccessibleName(f"Connect {self.window.role_names[agent]}")
         header.addWidget(self.connect_button)
         self.more_button = QToolButton()
         self.more_button.setText("⋯")
-        self.more_button.setAccessibleName(f"{ROLE_NAMES[agent]} conversation actions")
+        self.more_button.setAccessibleName(f"{self.window.role_names[agent]} conversation actions")
         self.more_button.setToolTip("對話、歷史、能力、原始事件與日誌")
         self.more_button.setPopupMode(QToolButton.InstantPopup)
         more = QMenu(self.more_button)
@@ -512,16 +530,16 @@ class AgentPanel(QFrame):
             more.addAction("載入更早訊息…",lambda:self.read_dot(True))
         else:
             more.addAction("本機歷史…", self.show_session_history)
-        if agent == "codex":
-            more.addAction("Codex 本機對話…", lambda: window.show_desktop_sessions("codex"))
-        if agent == "claude":
-            more.addAction("Desktop 專案與對話…", lambda: window.show_desktop_sessions("claude"))
+        if self.provider == 'codex':
+            more.addAction("Codex 本機對話…", lambda: window.show_instance_sessions(agent))
+        if self.provider == 'claude':
+            more.addAction("Desktop 專案與對話…", lambda: window.show_instance_sessions(agent))
         more.addAction("能力詳情…", self.show_capabilities)
         more.addSeparator()
         more.addAction("原始事件…", lambda: window.show_agent_events(agent))
         more.addAction("日誌…", lambda: window.open_logs(agent))
         more.addAction("專案檔案", lambda: window.open_project(agent))
-        if agent != "dot":
+        if agent != "dot" and self.provider != 'local':
             more.addSeparator()
             mode_menu = more.addMenu("核准方式")
             self.approval_actions_menu = {}
@@ -551,18 +569,22 @@ class AgentPanel(QFrame):
         session_layout = QVBoxLayout(self.session_controls)
         session_layout.setContentsMargins(0, 8, 0, 0)
         session_layout.setSpacing(8)
+        session_layout.addWidget(label('Project · 只影響此 Agent', True))
+        project_row = QHBoxLayout()
         self.project = QComboBox()
         self.project.setObjectName(f"project_{agent}")
-        self.project.setAccessibleName(f"{ROLE_NAMES[agent]} 專案")
+        self.project.setAccessibleName(f"{self.window.role_names[agent]} 專案")
         self.project.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.project.setMinimumContentsLength(10)
         self.project.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.project.currentIndexChanged.connect(self.project_selected)
-        session_layout.addWidget(self.project)
+        project_row.addWidget(self.project, 1)
+        project_row.addWidget(button('+', lambda: self.window.new_project(agent=self.agent), f'new_project_{agent}'))
+        session_layout.addLayout(project_row)
         task_row = QHBoxLayout()
         self.task = QComboBox()
         self.task.setObjectName(f"task_{agent}")
-        self.task.setAccessibleName(f"{ROLE_NAMES[agent]} 任務")
+        self.task.setAccessibleName(f"{self.window.role_names[agent]} 任務")
         self.task.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.task.setMinimumContentsLength(10)
         self.task.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
@@ -571,32 +593,63 @@ class AgentPanel(QFrame):
         self.new_task_button = button("新增任務", self.new_task, f"new_task_{agent}")
         task_row.addWidget(self.new_task_button)
         session_layout.addLayout(task_row)
+        # Retain legacy task mappings for data compatibility, outside everyday chat controls.
+        if agent != 'dot':
+            self.task.hide()
+            self.new_task_button.hide()
+        session_heading = QWidget()
+        session_heading_row = QHBoxLayout(session_heading)
+        session_heading_row.setContentsMargins(0, 0, 0, 0)
+        session_heading_row.addWidget(label('Session', True), 1)
+        self.session_more = QToolButton()
+        self.session_more.setObjectName(f'session_actions_{agent}')
+        self.session_more.setText('⋯')
+        self.session_more.setAccessibleName(f'{self.window.role_names[agent]} 對話與專案操作')
+        self.session_more.setToolTip('重新命名、詳細 / ID、探索對話與專案資訊')
+        self.session_more.setPopupMode(QToolButton.InstantPopup)
+        self.session_menu = QMenu(self.session_more)
+        self.session_more.setMenu(self.session_menu)
+        session_heading_row.addWidget(self.session_more)
+        session_layout.addWidget(session_heading)
+        session_heading.setVisible(agent != 'dot')
         self.session_search = QLineEdit()
         self.session_search.setObjectName(f"session_search_{agent}")
         self.session_search.setPlaceholderText("搜尋已保存的對話…")
-        self.session_search.setAccessibleName(f"Search {ROLE_NAMES[agent]} local sessions")
+        self.session_search.setAccessibleName(f"Search {self.window.role_names[agent]} local sessions")
         self.session_search.textChanged.connect(self.filter_sessions)
         session_layout.addWidget(self.session_search)
         self.session = QComboBox()
         self.session.setObjectName(f"session_{agent}")
         self.session.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.session.setMinimumContentsLength(10)
-        self.session.setAccessibleName(f"{ROLE_NAMES[agent]} session")
+        self.session.setAccessibleName(f"{self.window.role_names[agent]} session")
         session_layout.addWidget(self.session)
-        self.current_session_label = label("目前對話：尚未建立或恢復", True)
+        self.current_session_label = label("綁定對話：尚未建立或開啟", True)
         self.current_session_label.setObjectName(f"current_session_{agent}")
         session_layout.addWidget(self.current_session_label)
+        self.current_session_label.hide()
         session_buttons = QGridLayout()
         self.session_details = button("詳細 / ID", self.show_session_details, f"session_details_{agent}")
         self.new_button = button("New", self.new_session, f"new_session_{agent}")
         self.resume_button = button("Resume", self.resume_session, f"resume_session_{agent}")
+        self.new_button.setText('新對話')
+        self.resume_button.setText('開啟對話')
         self.rename_button = button("Rename", self.rename_session, f"rename_session_{agent}")
         self.discover_button = button("Discover…", self.discover_sessions, f"discover_sessions_{agent}")
         self.discover_button.setToolTip("Explicitly list native backend sessions; import metadata without resuming")
-        for index, control in enumerate((self.new_button, self.resume_button, self.rename_button, self.session_details)):
-            session_buttons.addWidget(control, index // 2, index % 2)
+        for index, control in enumerate((self.new_button, self.resume_button)):
+            session_buttons.addWidget(control, 0, index)
         session_layout.addLayout(session_buttons)
-        session_layout.addWidget(self.discover_button)
+        self.session_actions = {}
+        for key, control in (('rename', self.rename_button), ('details', self.session_details), ('discover', self.discover_button)):
+            session_layout.addWidget(control)
+            control.hide()
+            action = self.session_menu.addAction(control.text(), lambda checked=False, control=control: control.click())
+            self.session_actions[key] = (action, control)
+        self.session_menu.addSeparator()
+        self.session_menu.addAction('專案資訊…', self.show_project_details)
+        if self.provider == 'local':
+            self.session_menu.addAction('Hermes 設定…', lambda: window.settings(agent=self.agent))
         if agent == "dot":
             self.dot_select = button("Select G8毛…", self.select_dot, "select_dot")
             self.dot_refresh = button("Refresh", lambda: self.read_dot(False), "refresh_dot")
@@ -622,8 +675,8 @@ class AgentPanel(QFrame):
         self.branch_label = label("分支：—", True)
         session_layout.addWidget(self.cwd_label)
         session_layout.addWidget(self.branch_label)
-        if agent == 'dot':
-            self.cwd_label.hide(); self.branch_label.hide()
+        self.cwd_label.hide()
+        self.branch_label.hide()
         session_layout.addStretch()
 
         self.pending_review = button("Pending backend approval · Review…", self.review_pending_approval, f"pending_approval_{agent}")
@@ -633,12 +686,14 @@ class AgentPanel(QFrame):
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setObjectName(f"conversation_{agent}")
+        self.scroll.setMinimumHeight(100)
         self.scroll.setProperty("well", True)
         self.transcript = QWidget()
         self.transcript_layout = QVBoxLayout(self.transcript)
         self.transcript_layout.setContentsMargins(8, 8, 8, 8)
         self.transcript_layout.setSpacing(10)
         self.empty = label("對話將顯示在這裡。\n請在準備好時連線。", True)
+        self.empty.setObjectName('empty_conversation')
         self.empty.setAlignment(Qt.AlignCenter)
         self.transcript_layout.addWidget(self.empty)
         self.transcript_layout.addStretch()
@@ -649,8 +704,8 @@ class AgentPanel(QFrame):
         layout.addWidget(self.new_messages)
         self.input = PromptEdit()
         self.input.setObjectName(f"input_{agent}")
-        self.input.setAccessibleName(f"Message {ROLE_NAMES[agent]}")
-        self.input.setPlaceholderText(f"傳送訊息給 {ROLE_NAMES[agent]}…  Ctrl+Enter 傳送")
+        self.input.setAccessibleName(f"Message {self.window.role_names[agent]}")
+        self.input.setPlaceholderText(f"傳送訊息給 {self.window.role_names[agent]}…  Ctrl+Enter 傳送")
         self.input.setMinimumHeight(56)
         self.input.setMaximumHeight(96)
         self.input.submit.connect(self.send)
@@ -661,6 +716,11 @@ class AgentPanel(QFrame):
         composer.setContentsMargins(10, 8, 10, 8)
         composer.setSpacing(4)
         layout.addWidget(self.composer)
+        self.send_error = ''
+        self.send_feedback = label('')
+        self.send_feedback.setObjectName(f'send_feedback_{agent}')
+        self.send_feedback.hide()
+        composer.addWidget(self.send_feedback)
         composer.addWidget(self.input)
         self.attachment_label = label("", True)
         self.attachment_label.hide()
@@ -669,13 +729,13 @@ class AgentPanel(QFrame):
         model_row.setSpacing(6)
         self.model = QComboBox()
         self.model.setObjectName(f"model_{agent}")
-        self.model.setAccessibleName(f"{ROLE_NAMES[agent]} 模型")
+        self.model.setAccessibleName(f"{self.window.role_names[agent]} 模型")
         self.model.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.model.setMinimumContentsLength(7)
         self.model.currentIndexChanged.connect(self.model_changed)
         self.effort = QComboBox()
         self.effort.setObjectName(f"effort_{agent}")
-        self.effort.setAccessibleName(f"{ROLE_NAMES[agent]} 思考強度")
+        self.effort.setAccessibleName(f"{self.window.role_names[agent]} 思考強度")
         self.effort.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.effort.setMinimumContentsLength(6)
         self.effort.currentIndexChanged.connect(self.effort_selected)
@@ -686,20 +746,20 @@ class AgentPanel(QFrame):
             self.model.hide(); self.effort.hide()
         controls = QHBoxLayout()
         self.attach_button = button("Attach", self.attach)
-        self.attach_button.setAccessibleName(f"Attach files to {ROLE_NAMES[agent]}")
+        self.attach_button.setAccessibleName(f"Attach files to {self.window.role_names[agent]}")
         self.clear_attach_button = button("Clear", self.clear_attachments)
         self.clear_attach_button.hide()
         controls.addWidget(self.attach_button)
         controls.addWidget(self.clear_attach_button)
         self.approval_button = QToolButton()
         self.approval_button.setObjectName("ghost")
-        self.approval_button.setAccessibleName(f"{ROLE_NAMES[agent]} 核准方式")
+        self.approval_button.setAccessibleName(f"{self.window.role_names[agent]} 核准方式")
         self.approval_button.setPopupMode(QToolButton.InstantPopup)
         approval_menu = QMenu(self.approval_button)
         for mode in approvals.MODES:
             approval_menu.addAction(approvals.MODE_LABELS[mode], lambda checked=False, mode=mode: window.set_approval_mode(agent, mode))
         self.approval_button.setMenu(approval_menu)
-        self.approval_button.setVisible(agent != "dot")
+        self.approval_button.setVisible(agent != "dot" and self.provider != 'local')
         controls.addWidget(self.approval_button)
         self._dot_follow = None
         self._dot_status_note = ""
@@ -712,16 +772,16 @@ class AgentPanel(QFrame):
             self._dot_timer.timeout.connect(self._dot_follow_tick)
         controls.addStretch()
         self.stop_button = button("Stop", self.stop, "stop")
-        self.stop_button.setAccessibleName(f"Stop {ROLE_NAMES[agent]}")
+        self.stop_button.setAccessibleName(f"Stop {self.window.role_names[agent]}")
         controls.addWidget(self.stop_button)
         self.send_button = button("Send", self.send, "primary")
-        self.send_button.setAccessibleName(f"Send to {ROLE_NAMES[agent]}")
+        self.send_button.setAccessibleName(f"Send to {self.window.role_names[agent]}")
         controls.addWidget(self.send_button)
         composer.addLayout(controls)
         self.update_capabilities({})
 
     def show_capabilities(self):
-        self.window.show_detail(f"{ROLE_NAMES[self.agent]} capabilities", {
+        self.window.show_detail(f"{self.window.role_names[self.agent]} capabilities", {
             "connection_state": self.connection_state,
             "model_selection": self.capability_status("supports_model_selection"),
             "effort": self.capability_status("supports_effort"),
@@ -748,16 +808,21 @@ class AgentPanel(QFrame):
             events[widget.event_key] = widget.toggle.isChecked()
         return {
             "draft": self.input.toPlainText(), "draft_cursor": (cursor.anchor(), cursor.position()),
+            "send_error": self.send_error,
             "attachments": list(self.attachments), "model": self.model.currentData(),
             "effort": self.effort.currentData(), "effort_invalid": self._effort_invalid, "session": self.session.currentData(),
-            "session_search": self.session_search.text(), "scroll": self.scroll.verticalScrollBar().value(),
+            "session_search": self.session_search.text(), "scroll": self._restore_scroll if self._restore_scroll is not None else self.scroll.verticalScrollBar().value(),
             "selections": selections, "expanded_events": events,
             "pending": dict(self.pending_approval_events),
         }
 
     def restore_view_state(self, state):
         self._restoring_view = True
+        self._view_generation += 1
+        generation = self._view_generation
+        self._restore_scroll = state.get('scroll', 0)
         self.input.setPlainText(state.get("draft", ""))
+        self.send_error = state.get('send_error', '')
         self.attachments = list(state.get("attachments", []))
         self.attachment_label.setText("附件：" + ", ".join(Path(value).name for value in self.attachments))
         self.attachment_label.setVisible(bool(self.attachments))
@@ -807,7 +872,9 @@ class AgentPanel(QFrame):
                 group.toggle.setChecked(True)
         self.update_controls()
         def restore_scroll():
+            if generation != self._view_generation: return
             self.scroll.verticalScrollBar().setValue(state.get("scroll", 0))
+            self._restore_scroll = None
             self._restoring_view = False
         QTimer.singleShot(0, self, restore_scroll)
 
@@ -836,11 +903,16 @@ class AgentPanel(QFrame):
         else:
             if self.agent == 'dot' and not self.dot_consent('connect'): return
             # Claude Code needs a working directory; guide instead of failing with a terse error.
-            if self.agent in ('claude', 'local') and not self.window.core.agent_project(self.agent):
-                self.window.require_project(ROLE_NAMES[self.agent] + " 需要先有專案資料夾才能連線。")
+            if self.agent != 'dot' and not self.window.core.agent_project(self.agent):
+                self.window.require_project(self.window.role_names[self.agent] + " 需要先選擇 Project 才能連線。", agent=self.agent)
                 return
             self.set_state("Connecting")
-            operation = self.connect_dot_conversation if self.agent == 'dot' else lambda: self.window.core.connect(self.agent)
+            def connect_agent():
+                self.window.core.connect(self.agent)
+                task = self.window.core.agent_task(self.agent) or {}
+                if self.provider != 'local' and task.get(self.agent + '_session'):
+                    self.window.core.resume_session(self.agent, task[self.agent + '_session'])
+            operation = self.connect_dot_conversation if self.agent == 'dot' else connect_agent
             self.window.run(operation, lambda _: self.window.reload_context(), self.agent)
 
     def connect_dot_conversation(self):
@@ -1041,22 +1113,31 @@ class AgentPanel(QFrame):
 
     def update_controls(self):
         operating = bool(getattr(self.window, '_agent_operations', {}).get(self.agent))
-        ready = self.connection_state == "Connected" and not self.monitor and not operating
+        run = getattr(self.window, 'orchestrator', None)
+        participating = bool(run and run.active and self.agent in run.agents)
+        ready = self.connection_state == "Connected" and not self.monitor and not operating and not participating
         busy = self.connection_state == "Busy"
         cap = self.capabilities
         files_supported = self.attachment_supported()
         blocked = self.agent == "dot" and not cap.get("supports_sessions")
         settings = self.window.core.get_setting("agent." + self.agent, {}) or {}
         enabled = settings.get("enabled", True)
-        changing = busy or self.connection_state == 'Connecting' or self.monitor or operating or getattr(self.window, '_opening_agent', None) == self.agent
+        changing = busy or self.connection_state == 'Connecting' or self.monitor or operating or participating or self.agent in self.window._opening_agents
         self.project.setEnabled(not changing)
         self.task.setEnabled(not changing)
         self.new_task_button.setEnabled(not changing and bool(self.window.core.agent_project(self.agent)))
-        local_missing = self.agent == 'local' and not (str(settings.get('base_url') or '').strip() and str(settings.get('model') or '').strip())
-        self.connect_button.setEnabled(enabled and not blocked and not busy and self.connection_state != "Connecting" and (not local_missing or self.connection_state == 'Connected'))
+        self.connect_button.setEnabled(enabled and not blocked and not busy and not operating and not participating and not self.monitor and self.connection_state != "Connecting")
         self.send_button.setEnabled(ready and not blocked and not (self.attachments and not files_supported) and not (self._effort_invalid and self.effort.currentData() is None))
         self.send_button.setToolTip("請移除暫存附件或選擇支援的模型" if self.attachments and not files_supported else "請先選擇此模型支援的強度" if self._effort_invalid and self.effort.currentData() is None else "傳送訊息")
-        self.input.setReadOnly(self.monitor or blocked)
+        legacy = self.window.core.legacy_local_conversation(self.agent)
+        self.send_button.setText('新對話並傳送' if legacy else BUTTON_LABELS['Send'])
+        feedback = '傳送失敗：' + self.send_error if self.send_error else ''
+        if not feedback and legacy:
+            name = ROLE_NAMES[legacy['harness']]
+            feedback = f'這是舊的 {name} Local 對話。按「新對話並傳送」會建立 Hermes 對話，舊紀錄保留。'
+        self.send_feedback.setText(feedback)
+        self.send_feedback.setVisible(bool(feedback))
+        self.input.setReadOnly(self.monitor or blocked or participating)
         self.stop_button.setEnabled(busy and cap.get("supports_cancel", False))
         self.new_button.setEnabled(ready and cap.get("supports_sessions", False) and cap.get('supports_create_session') is not False)
         self.resume_button.setEnabled(ready and cap.get("supports_sessions", False) and bool(self.session.currentData()))
@@ -1065,6 +1146,8 @@ class AgentPanel(QFrame):
         display = self.selected_session_display()
         self.session.setToolTip(display['details'] if display else '選擇對話；ID 保留在詳細資訊')
         self.discover_button.setEnabled(ready and cap.get("supports_sessions", False) and self.agent != 'dot')
+        for action, control in self.session_actions.values():
+            action.setEnabled(control.isEnabled())
         if self.agent == 'dot':
             self.connect_button.setEnabled(self.connect_button.isEnabled() and not self.monitor)
             self.dot_select.setEnabled(enabled and not self.monitor and self.connection_state not in ('Busy','Connected','Connecting'))
@@ -1086,13 +1169,11 @@ class AgentPanel(QFrame):
         self.input.setAcceptDrops(files_supported and not self.monitor)
         self.pending_review.setEnabled(bool(cap.get("supports_approval")) and not self.monitor)
         self.approval_button.setText({"ask": "每次都問", "edits": "自動核准編輯", "all": "自動核准全部"}[self.window.approval_mode(self.agent)])
+        self.approval_button.setEnabled(self.provider != 'local' and not self.monitor)
         for card in self.approvals.values():
             for control in card.approval_actions:
                 control.setEnabled(bool(cap.get('supports_approval')) and not self.monitor and not card.historical and not card.approval_resolved)
-        if local_missing:
-            self.notice.setText("請先在設定填入本地端點與模型名稱")
-            self.notice.setToolTip(self.notice.text())
-        elif blocked:
+        if blocked:
             if self.connection_state != 'Error':
                 self.state.setText("受阻")
                 self.notice.setText("請先選擇 G8毛 · 非官方整合 · 僅手動操作")
@@ -1100,8 +1181,8 @@ class AgentPanel(QFrame):
             self.input.setPlaceholderText("請先選擇 G8毛。非官方整合；手動重新整理，無串流。")
         elif not enabled:
             self.notice.setText("此角色已在設定中停用")
-        elif self.agent == 'local' and self.connection_state in ('Disconnected', 'Offline'):
-            self.notice.setText("本地模型設定已備妥 · 請按「連線」")
+        elif self.provider == 'local' and self.connection_state in ('Disconnected', 'Offline'):
+            self.notice.setText("Hermes · 請按「連線」檢查 CLI；工具權限由 Hermes 管理")
             self.notice.setToolTip(self.notice.text())
         elif self.agent == 'dot':
             self.input.setPlaceholderText("傳送訊息給 G8毛，繼續原本的對話…")
@@ -1117,7 +1198,7 @@ class AgentPanel(QFrame):
         selected = active or self.session.currentData()
         self._session_rows = local_session_displays(self.window.core, self.agent, sessions)
         current = next((d for r, d in self._session_rows if d['id'] == active), None)
-        self.current_session_label.setText('目前對話：' + (current['label'] if current else '尚未建立或恢復'))
+        self.current_session_label.setText('綁定對話：' + (current['label'] if current else '尚未建立或開啟'))
         self.current_session_label.setToolTip(current['details'] if current else '')
         self._fill_sessions(selected)
 
@@ -1149,15 +1230,20 @@ class AgentPanel(QFrame):
         display = self.selected_session_display()
         if display: SessionDetailsDialog(display, self).exec()
 
+    def show_project_details(self):
+        self.window.show_detail(self.window.role_names[self.agent] + ' · 專案資訊', {
+            'project': self.window.core.agent_project(self.agent) or {},
+            'working_directory': self.cwd_label.text(),
+            'git_status': self.branch_label.text(),
+        })
+
     def show_session_history(self):
         SessionHistoryDialog(self.window, self.agent).exec()
 
     def new_session(self):
-        def create():
-            if not self.window.core.agent_task(self.agent):
-                self.window.core.create_agent_task(self.agent, "新對話 " + datetime.now().strftime("%m-%d %H:%M"))
-            return self.window.core.create_session(self.agent)
-        self.window.run(create, lambda _: self.window.reload_context(), self.agent)
+        if not self.new_button.isEnabled() or not self.window.confirm_agent_context_change(self.agent): return
+        self.window.run(lambda: self.window.core.prepare_conversation(self.agent, fresh=True),
+                        lambda _: self.window.reload_context(), self.agent)
 
     def refresh_projects(self):
         core = self.window.core
@@ -1176,7 +1262,7 @@ class AgentPanel(QFrame):
                 self.task.addItem(task_label(row, projects), row['id'])
         self.task.setCurrentIndex(max(0, self.task.findData(task.get('id'))))
         for combo in (self.project, self.task): combo.blockSignals(False)
-        title = (project.get('name') or '選擇專案') + ' › ' + (task.get('title') or '選擇任務')
+        title = (project.get('name') or '選擇 Project') + ' › ' + (task.get('title') or '新對話')
         self.context_button.setText('交接關聯：'+compact(title, 36) if self.agent=='dot' else compact(title,48))
         self.context_button.setToolTip(title + ('\n僅供 Workspace 交接使用；不會切換或建立 dot 對話' if self.agent=='dot' else '\n只切換此角色的專案、任務與對話'))
 
@@ -1207,8 +1293,8 @@ class AgentPanel(QFrame):
 
     def resume_session(self):
         sid = self.session.currentData()
-        if sid:
-            self.window.run(lambda: self.window.core.resume_session(self.agent, sid), lambda _: self.window.reload_context(), self.agent)
+        if sid and self.resume_button.isEnabled() and self.window.confirm_agent_context_change(self.agent):
+            self.window.run(lambda: self.window.core.open_saved_conversation(self.agent, sid), lambda _: self.window.reload_context(), self.agent)
 
     def rename_session(self):
         sid = self.session.currentData()
@@ -1250,26 +1336,46 @@ class AgentPanel(QFrame):
         content = self.input.toPlainText()
         if not content.strip() or not self.send_button.isEnabled():
             return
-        if self.agent != 'dot' and not self.window.core.agent_task(self.agent):
-            self.window.show_sessions(self.agent)
-            self.window.show_error("請先為此角色選擇或建立任務。")
-            return
         model, effort, attachments = self.model.currentData(), self.effort.currentData(), list(self.attachments)
+        legacy = self.window.core.legacy_local_conversation(self.agent)
         if self.agent == 'dot':
             if self.window.orchestrator and self.window.orchestrator.active:
                 self.window.show_error('請先結束自動協作，再傳送持續對話訊息。');return
             if not self.dot_consent('send'): return
+        self.send_error = ''
         self.set_state("Busy")
         self.input.clear()
         self.clear_attachments()
-        def failed(_):
-            if not self.input.toPlainText():
-                self.input.setPlainText(content)
+        def failed(message):
+            from .security import sanitize
+            retained_text = self.input.toPlainText() or content
+            retained_files = list(dict.fromkeys(self.attachments + attachments))
+            if self.agent != 'dot': self.window.reload_context()
+            self.input.setPlainText(retained_text)
+            self.clear_attachments()
+            if retained_files: self.add_attachments(retained_files)
+            self.send_error = str(sanitize(str(message)))
+            self.update_controls()
             if self.agent == 'dot':
                 # A network timeout does not tell whether G8毛 received it; sending again may duplicate.
                 self.window.footer.setText("傳送沒有得到確認：訊息可能已經送出。請先按「重新整理」確認，再決定要不要重送。")
-        self.window.run(lambda: self.window.core.send_dot_conversation(content) if self.agent=='dot' else self.window.core.send_message(self.agent, content, model=model, effort=effort, attachments=attachments or None),
-                        (lambda _: self.follow_dot_replies()) if self.agent == 'dot' else None, agent=self.agent, on_error=failed)
+        def dispatch():
+            if self.agent == 'dot': return self.window.core.send_dot_conversation(content)
+            if self.window.core.legacy_local_conversation(self.agent) != legacy:
+                raise RuntimeError('對話已變更，請確認目前對話後再傳送')
+            self.window.core.prepare_conversation(self.agent, fresh=bool(legacy))
+            return self.window.core.send_message(self.agent, content, model=model, effort=effort, attachments=attachments or None)
+        def sent(_):
+            if self.agent == 'dot': self.follow_dot_replies()
+            else:
+                # Typing during preparation belongs to the newly opened conversation.
+                next_draft, next_files = self.input.toPlainText(), list(self.attachments)
+                self.window.reload_context()
+                self.input.setPlainText(next_draft)
+                self.clear_attachments()
+                if next_files: self.add_attachments(next_files)
+        self.window.run(dispatch,
+                        sent, agent=self.agent, on_error=failed)
 
     def _dot_replies(self):
         return tuple((m["id"], len(str(m["content"]))) for m in self.window.core.dot_conversation_messages() if m.get("role") == "assistant")
@@ -1342,7 +1448,8 @@ class AgentPanel(QFrame):
                 item.widget().hide()
                 item.widget().deleteLater()
         dot_empty="這一頁沒有可顯示的文字訊息；可嘗試載入更早訊息。" if getattr(self.window.core.adapters.get("dot"),"last_read_at","") else "尚未載入 G8毛 的對話。連接後會讀取最近訊息。"
-        self.empty = label(dot_empty if self.agent=="dot" else "這個任務尚無訊息", True)
+        self.empty = label(dot_empty if self.agent=="dot" else "從這裡開始對話\n\n先選擇專案與 session，再連線討論。\n需要協作時，選擇隊員並啟動派工。", True)
+        self.empty.setObjectName('empty_conversation')
         self.empty.setAlignment(Qt.AlignCenter)
         self.transcript_layout.insertWidget(0, self.empty)
 
@@ -1503,7 +1610,7 @@ class ArtifactPanel(QWidget):
     """Task-scoped imports and exports go through the workspace core boundary."""
     def __init__(self, window, task_id=None):
         super().__init__()
-        self.window, self.task_id = window, task_id or identifier(window.core.current_task or {})
+        self.window, self.task_id = window, task_id or identifier(window.view_task() or {})
         layout = QVBoxLayout(self)
         layout.addWidget(label("Import UTF-8 text, diff, patch, JSONL, Markdown, reports, test logs, or PNG/JPEG screenshots from the selected project. Copies are stored as managed task artifacts. Screenshot pixels are not redacted.", True))
         self.table = QTreeWidget()
@@ -1561,7 +1668,8 @@ class ArtifactPanel(QWidget):
     def import_file(self):
         if not self.task_id:
             return
-        project = self.window.core.current_project or {}
+        task = self.window.core.get_task(self.task_id) or {}
+        project = self.window.core.get_project(task.get('project_id')) or {}
         filters = "Supported artifacts (*.txt *.log *.diff *.patch *.jsonl *.md *.markdown *.png *.jpg *.jpeg);;Text / reports (*.txt);;Test logs (*.log);;Patch / diff (*.patch *.diff);;JSONL (*.jsonl);;Markdown (*.md *.markdown);;Screenshots (*.png *.jpg *.jpeg)"
         path, _ = QFileDialog.getOpenFileName(self, "Import project artifact", project.get("repo_path", ""), filters)
         if not path:
@@ -2090,7 +2198,7 @@ class HandoffDialog(QDialog):
         self.resize(760, 630)
         self.preview = window.core.prepare_handoff(identifier(message), target)
         layout = QVBoxLayout(self)
-        layout.addWidget(label(f"{ROLE_NAMES.get(message.get('agent'), message.get('agent', ''))} → {ROLE_NAMES[target]}", False))
+        layout.addWidget(label(f"{self.window.role_names.get(message.get('agent'), message.get('agent', ''))} → {self.window.role_names[target]}", False))
         task = window.core.get_task(self.preview['task_id']) or {}
         project = window.core.get_project(self.preview['project_id']) or {}
         projects = window.core.list_projects()
@@ -2125,7 +2233,7 @@ class HandoffDialog(QDialog):
         ready = window.panels[target].connection_state == "Connected"
         self.send_button.setEnabled(ready)
         if not ready:
-            layout.addWidget(label(f"{ROLE_NAMES[target]} 尚未連線。此預覽尚未傳送。", True))
+            layout.addWidget(label(f"{self.window.role_names[target]} 尚未連線。此預覽尚未傳送。", True))
         actions.rejected.connect(self.reject)
         actions.accepted.connect(self.accept)
         layout.addWidget(actions)
@@ -2139,6 +2247,9 @@ class MainWindow(QMainWindow):
     def __init__(self, core):
         super().__init__()
         self.core = core
+        core.enable_agent_independence()
+        self.agents = list(core.agent_ids)
+        self.role_names = {agent: core.agent_name(agent) for agent in self.agents}
         self.pool = QThreadPool(self)
         self.pool.setMaxThreadCount(8)
         self.workers = set()
@@ -2155,16 +2266,18 @@ class MainWindow(QMainWindow):
         self._agent_views = {}
         self._loaded_agent_keys = {}
         self._agent_operations = {}
+        self._opening_agents = set()
         self._loaded_context_key = None
         self._layout_updating = False
-        self._grid_sizes = [400] * len(AGENTS)
-        self._preferred_agent = "claude"
-        self.setWindowTitle("AI Collaboration Workspace")
+        self._grid_sizes = [400] * len(self.agents)
+        self._preferred_agent = core.get_setting('ui.active_agent', 'claude')
+        if self._preferred_agent not in self.agents: self._preferred_agent = self.agents[0]
+        self.setWindowTitle("ACW · Monitor 工作台")
         self.setObjectName("ai_collaboration_workspace")
         self.resize(1530, 920)
         self.setMinimumSize(640, 420)
-        QApplication.instance().setPalette(metal_palette())
-        self.setStyleSheet(build_style(str(core.get_setting("ui.theme", "desktop"))))
+        QApplication.instance().setPalette(console_palette())
+        self.setStyleSheet(build_style("hacker"))
         root = QWidget()
         root.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
         layout = QVBoxLayout(root)
@@ -2177,6 +2290,10 @@ class MainWindow(QMainWindow):
         self.sidebar_toggle.setCheckable(True)
         self.sidebar_toggle.setChecked(True)
         heading.addWidget(self.sidebar_toggle)
+        self.console_mark = label("ACW / CONTROL ROOM")
+        self.console_mark.setObjectName("console_mark")
+        self.console_mark.setWordWrap(False)
+        heading.addWidget(self.console_mark)
         self.context_title = label("AI 協作工作區")
         self.context_title.setObjectName("brand")
         self.context_title.setWordWrap(False)
@@ -2187,17 +2304,20 @@ class MainWindow(QMainWindow):
         self.layout_mode.setObjectName("layout_mode")
         for title, value in (("自動布局", "Auto"), ("並排", "Three panes"), ("專注", "Focus")):
             self.layout_mode.addItem(title, value)
+        saved_layout = core.get_setting('ui.layout_mode', 'Focus')
+        self.layout_mode.setCurrentIndex(max(0, self.layout_mode.findData(saved_layout)))
         self.layout_mode.setAccessibleName("對話布局")
-        self.layout_mode.setToolTip("自動布局：窄視窗顯示一個角色，空間足夠時顯示三欄")
+        self.layout_mode.setToolTip("專注：主要對話＋Agent 側欄；並排：多個完整對話；窄視窗保留可讀字級")
         self.layout_mode.currentIndexChanged.connect(self.update_workspace_layout)
         heading.addWidget(self.layout_mode)
         self.auto_button = button("自動協作…", self.start_auto_collab, "auto_collab")
-        self.auto_button.setToolTip("Claude 規劃與最終審查 · G8毛 轉交並審查 · Codex 實作")
-        heading.addWidget(self.auto_button)
+        self.auto_button.setToolTip("選擇任意兩個 Agent 派工與驗收，同一 provider 也可以")
+        self.monitor_button = button("協作總覽", self.toggle_monitor, "monitor_toggle")
+        self.monitor_button.setToolTip("協作總覽：進度、規則與待核准項目")
+        heading.addWidget(self.monitor_button)
         self.details_toggle = button("Work details", self.toggle_details, "details_toggle")
         self.details_toggle.setCheckable(True)
         self.details_toggle.setToolTip("工具、命令、變更、測試、時間線與交接 · Ctrl+Shift+D")
-        heading.addWidget(self.details_toggle)
         workspace_menu = QToolButton()
         workspace_menu.setObjectName("workspace_actions")
         workspace_menu.setText("⋯")
@@ -2206,8 +2326,8 @@ class MainWindow(QMainWindow):
         menu = QMenu(workspace_menu)
         for text, callback in (("任務筆記…", self.notes), ("比較回覆…", self.compare),
                                ("差異／測試／附件…", self.inspect_artifacts), ("匯出…", self.export),
-                               ("同步專案至角色", self.sync_project), ("設定…", self.settings),
-                               ("診斷…", self.diagnostics), ("停止目前任務…", self.stop_task)):
+                               ("設定…", self.settings),
+                               ("診斷…", self.diagnostics), ("停止全部 Agent…", self.stop_task)):
             menu.addAction(text, callback)
         workspace_menu.setMenu(menu)
         heading.addWidget(workspace_menu)
@@ -2245,7 +2365,8 @@ class MainWindow(QMainWindow):
         self.sidebar_pages.setExpanding(True)
         self.sidebar_pages.setAccessibleName("側欄頁面")
         self.sidebar_pages.addTab("對話")
-        self.sidebar_pages.addTab("工作區")
+        self.sidebar_pages.addTab("Agent")
+        self.sidebar_pages.addTab("紀錄")
         side.addWidget(self.sidebar_pages)
         self.sidebar_stack = QStackedWidget()
         self.navigator = SessionNavigator(self)
@@ -2256,7 +2377,14 @@ class MainWindow(QMainWindow):
         work.setSpacing(8)
         self.sidebar_stack.addWidget(work_page)
         side.addWidget(self.sidebar_stack, 1)
-        work.addWidget(label("專案與任務", True))
+        records_page = QWidget()
+        records = QVBoxLayout(records_page)
+        records.setContentsMargins(0, 0, 0, 0)
+        records.setSpacing(8)
+        self.sidebar_stack.addWidget(records_page)
+        records.addWidget(label('本機紀錄管理', True))
+        records.addWidget(label('此處管理舊任務與紀錄，不會切換任何 Agent 的 Project 或 Session。', True))
+        records.addWidget(label("紀錄的專案與任務", True))
         project_row = QHBoxLayout()
         self.project_combo = QComboBox()
         self.project_combo.setObjectName("global_project")
@@ -2265,11 +2393,11 @@ class MainWindow(QMainWindow):
         self.project_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.project_combo.currentIndexChanged.connect(self.project_changed)
         project_row.addWidget(self.project_combo, 1)
-        create_project = button("+", self.new_project, "new_project")
+        create_project = button("+", lambda: self.new_project(global_scope=True), "new_project")
         create_project.setAccessibleName("新增專案")
         create_project.setToolTip("新增專案")
         project_row.addWidget(create_project)
-        work.addLayout(project_row)
+        records.addLayout(project_row)
         task_row = QHBoxLayout()
         self.task_combo = QComboBox()
         self.task_combo.setObjectName("global_task")
@@ -2282,7 +2410,7 @@ class MainWindow(QMainWindow):
         create_task.setAccessibleName("新增任務")
         create_task.setToolTip("新增任務")
         task_row.addWidget(create_task)
-        work.addLayout(task_row)
+        records.addLayout(task_row)
         self.task_status = QComboBox()
         self.task_status.addItem("尚未選擇任務", None)
         for value in STATUSES:
@@ -2290,19 +2418,34 @@ class MainWindow(QMainWindow):
         self.task_status.setObjectName("task_status")
         self.task_status.setAccessibleName("任務狀態")
         self.task_status.currentIndexChanged.connect(lambda _: self.status_changed(self.task_status.currentData()))
-        work.addWidget(label("任務狀態", True))
-        work.addWidget(self.task_status)
+        records.addWidget(label("紀錄狀態（與 Agent 執行狀態分開）", True))
+        records.addWidget(self.task_status)
+        records.addStretch()
+        records.addWidget(button('任務筆記…', self.notes))
+        records.addWidget(button('匯出紀錄…', self.export))
         self.mode = QComboBox()
-        for title, value in (("對話", "Workspace"), ("監看（唯讀）", "Monitor"), ("時間線", "Timeline"), ("歷史", "History")):
+        for title, value in (("Monitor 工作台", "Workspace"), ("協作總覽（唯讀）", "Monitor"), ("時間線", "Timeline"), ("歷史", "History")):
             self.mode.addItem(title, value)
         self.mode.setObjectName("view_mode")
         self.mode.setAccessibleName("工作區檢視")
         self.mode.currentIndexChanged.connect(lambda _: self.change_mode(self.mode.currentData()))
-        work.addWidget(label("檢視", True))
         work.addWidget(self.mode)
+        self.mode.hide()
+        views_menu = menu.addMenu('檢視')
+        self.view_actions = {}
+        for index in range(self.mode.count()):
+            action = views_menu.addAction(self.mode.itemText(index), lambda checked=False, index=index: self.mode.setCurrentIndex(index))
+            action.setCheckable(True)
+            self.view_actions[self.mode.itemData(index)] = action
+        views_menu.aboutToShow.connect(lambda: [action.setChecked(value == self.mode.currentData())
+                                               for value, action in self.view_actions.items()])
+        self.sidebar_agent_title = label(self.role_names[self._preferred_agent])
+        self.sidebar_agent_title.setObjectName('console_section')
+        work.addWidget(self.sidebar_agent_title)
         self.session_tabs = QTabWidget()
         self.session_tabs.setObjectName("sidebar_sessions")
         self.session_tabs.setDocumentMode(True)
+        self.session_tabs.tabBar().hide()
         self.session_tabs.setAccessibleName("各角色對話")
         work.addWidget(self.session_tabs, 1)
         side.addWidget(button("Settings…", self.settings, "settings"))
@@ -2316,32 +2459,51 @@ class MainWindow(QMainWindow):
         self.role_tabs.setObjectName("role_tabs")
         self.role_tabs.setExpanding(False)
         self.role_tabs.setUsesScrollButtons(True)
-        self.role_tabs.setElideMode(Qt.ElideRight)
+        self.role_tabs.setElideMode(Qt.ElideNone)
         self.role_tabs.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.role_tabs.setDrawBase(False)
         self.role_tabs.setAccessibleName("對話角色")
-        for agent in AGENTS:
-            self.role_tabs.addTab(ROLE_NAMES[agent] + " · " + ROLE_LABELS[agent])
+        for agent in self.agents:
+            self.role_tabs.addTab(self.role_names[agent] + " · " + ROLE_LABELS[self.core.provider(agent)])
         self.role_tabs.currentChanged.connect(self.select_role)
         roles.addWidget(self.role_tabs, 1)
-        self.unfocus_button = button("四欄並排", lambda: self.focus_agent(None), "unfocus")
+        roles.addWidget(button('+ Agent', self.add_agent_dialog, 'add_agent'))
+        self.unfocus_button = button("並排檢視", lambda: self.focus_agent(None), "unfocus")
         self.unfocus_button.hide()
         roles.addWidget(self.unfocus_button)
         content_layout.addLayout(roles)
+        workspace_actions = QHBoxLayout()
+        self.workspace_hint = label("MONITOR / LIVE WORKSPACE")
+        self.workspace_hint.setObjectName('console_section')
+        self.workspace_hint.setWordWrap(False)
+        self.workspace_hint.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        workspace_actions.addWidget(self.workspace_hint, 1)
+        workspace_actions.addWidget(self.auto_button)
+        workspace_actions.addWidget(self.details_toggle)
+        content_layout.addLayout(workspace_actions)
         self.stack = QStackedWidget()
         self.stack.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         self.splitter = QSplitter(Qt.Horizontal)
-        self.panels = {agent: AgentPanel(agent, self) for agent in AGENTS}
+        self.panels = {agent: AgentPanel(agent, self) for agent in self.agents}
         for agent, panel in self.panels.items():
             self.splitter.addWidget(panel)
             scroll = QScrollArea()
             scroll.setWidgetResizable(True)
             scroll.setFrameShape(QFrame.NoFrame)
             scroll.setWidget(panel.session_controls)
-            self.session_tabs.addTab(scroll, ROLE_NAMES[agent])
+            self.session_tabs.addTab(scroll, self.role_names[agent])
         self.session_tabs.currentChanged.connect(self.sidebar_role_changed)
         self.splitter.setChildrenCollapsible(False)
-        self.stack.addWidget(self.splitter)
+        self.chat_workspace = QWidget()
+        chat_layout = QHBoxLayout(self.chat_workspace)
+        chat_layout.setContentsMargins(0, 0, 0, 0)
+        chat_layout.setSpacing(10)
+        chat_layout.addWidget(self.splitter, 1)
+        self.agent_rail = AgentRail()
+        self.agent_rail.open_role.connect(self.open_monitor_role)
+        self.agent_rail.add_agent.connect(self.add_agent_dialog)
+        chat_layout.addWidget(self.agent_rail)
+        self.stack.addWidget(self.chat_workspace)
         self.timeline = QTreeWidget()
         self.timeline.setHeaderLabels(["Time", "Agent", "Event", "Status", "Summary"])
         self.timeline.setAlternatingRowColors(True)
@@ -2349,6 +2511,11 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.timeline)
         self.history_page = self.build_history()
         self.stack.addWidget(self.history_page)
+        self.monitor_dashboard = MonitorDashboard(names=self.role_names)
+        self.monitor_dashboard.open_role.connect(self.open_monitor_role)
+        self.monitor_dashboard.open_transcripts.connect(self.show_monitor_transcripts)
+        self.stack.addWidget(self.monitor_dashboard)
+        self._monitor_clock = 0.0
         content_layout.addWidget(self.stack, 1)
         self.details_panel = QFrame()
         self.details_panel.setObjectName("work_details")
@@ -2425,21 +2592,21 @@ class MainWindow(QMainWindow):
             ("Toggle sidebar", "Ctrl+B", self.toggle_sidebar),
             ("Toggle work details", "Ctrl+Shift+D", self.toggle_details),
             ("Settings", "Ctrl+,", self.settings),
-            ("新增任務", "Ctrl+N", self.new_task),
+            ("新對話", "Ctrl+N", lambda: self.panels[self._preferred_agent].new_session()),
         ):
             action = QAction(text, self)
             action.setShortcut(QKeySequence(shortcut))
             action.triggered.connect(callback)
             self.addAction(action)
-        for index, agent in enumerate(AGENTS, 1):
-            action = QAction("Focus " + ROLE_NAMES[agent], self)
+        for index, agent in enumerate(self.agents[:9], 1):
+            action = QAction("Focus " + self.role_names[agent], self)
             action.setShortcut(QKeySequence(f"Ctrl+{index}"))
             action.triggered.connect(lambda checked=False, agent=agent: self.focus_agent(agent))
             self.addAction(action)
         self.reload_context()
         self.sidebar_pages.currentChanged.connect(self.sidebar_page_changed)
         # Local conversations are read only once this page is shown, never during construction.
-        self.sidebar_pages.setCurrentIndex(0 if core.get_setting("ui.sidebar_page", "work") == "nav" else 1)
+        self.sidebar_pages.setCurrentIndex({'nav': 0, 'work': 1, 'records': 2}.get(core.get_setting('ui.sidebar_page', 'work'), 1))
         self.sidebar_stack.setCurrentIndex(self.sidebar_pages.currentIndex())
         if self.sidebar_pages.currentIndex() == 0:
             QTimer.singleShot(0, self.navigator, self.navigator.ensure_loaded)
@@ -2458,16 +2625,102 @@ class MainWindow(QMainWindow):
         self.sync_timer.timeout.connect(self.sync_local_conversations)
         self.sync_timer.start(3000)
         QTimer.singleShot(0, self, self.update_workspace_layout)
+        self.refresh_monitor()
+
+    def add_agent_dialog(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle('新增獨立 Agent')
+        form = QFormLayout(dialog)
+        provider = QComboBox()
+        provider.setObjectName('new_agent_provider')
+        for key in ('claude', 'codex', 'local'):
+            provider.addItem(ROLE_NAMES[key], key)
+        name = QLineEdit()
+        name.setObjectName('new_agent_name')
+        name.setMaxLength(80)
+        name.setPlaceholderText('例如：Claude 審查、Local 研究')
+        project = QComboBox()
+        project.addItem('稍後選擇專案', None)
+        for row in self.core.list_projects():
+            project.addItem(row['name'], row['id'])
+        project.setCurrentIndex(max(0, project.findData(identifier(self.view_project() or {}))))
+        form.addRow('後端', provider)
+        form.addRow('名稱', name)
+        form.addRow('專案', project)
+        form.addRow(label('建立後可獨立選擇 session。Hermes 的 provider／模型可在設定中個別調整；連線由你啟動。', True))
+        actions = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        actions.accepted.connect(dialog.accept)
+        actions.rejected.connect(dialog.reject)
+        form.addRow(actions)
+        if dialog.exec() == QDialog.Accepted:
+            try:
+                self.add_agent_instance(provider.currentData(), name.text().strip() or
+                                        provider.currentText() + ' ' + str(len(self.agents) + 1),
+                                        project_id=project.currentData())
+            except Exception as exc:
+                self.show_error(str(exc))
+
+    def add_agent_instance(self, provider, name, *, project_id=None):
+        record = self.core.create_agent_instance(provider, name, project_id=project_id)
+        agent = record['id']
+        self.save_context_state()
+        self.agents.append(agent)
+        self.role_names[agent] = record['name']
+        panel = AgentPanel(agent, self)
+        self.panels[agent] = panel
+        self.splitter.addWidget(panel)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setWidget(panel.session_controls)
+        self.session_tabs.addTab(scroll, record['name'])
+        self.role_tabs.addTab(record['name'])
+        self.history_agent.addItem(record['name'], agent)
+        self._grid_sizes.append(400)
+        self.reload_context()
+        self.focus_role(agent)
+        self.refresh_monitor()
+        return agent
+
+    def show_instance_sessions(self, agent):
+        if agent in AGENTS:
+            return self.show_desktop_sessions(agent)
+        # Discovery operates on the selected instance and imports into its own registry.
+        self.show_sessions(agent)
+        self.panels[agent].discover_sessions()
 
     def context_key(self):
         task = self.core.current_task or {}
         return (identifier(self.core.current_project or {}), identifier(task),
-                tuple(task.get(agent + "_session") or "" for agent in AGENTS))
+                tuple(task.get(agent + "_session") or "" for agent in self.agents))
 
     def agent_context_key(self, agent):
         if agent=='dot': return ('dot-conversation',getattr(self.core.adapters.get('dot'),'target',''))
         task = self.core.agent_task(agent) or {}
         return (agent, identifier(self.core.agent_project(agent) or {}), identifier(task), task.get(agent + '_session') or '')
+
+    def view_task(self):
+        if hasattr(self, 'sidebar_pages') and self.sidebar_pages.currentIndex() == 2:
+            return self.core.current_task
+        return self.core.agent_task(self._preferred_agent)
+
+    def view_project(self):
+        if hasattr(self, 'sidebar_pages') and self.sidebar_pages.currentIndex() == 2:
+            return self.core.current_project
+        return self.core.agent_project(self._preferred_agent)
+
+    def update_context_title(self):
+        if not hasattr(self, 'context_title'): return
+        if hasattr(self, 'sidebar_agent_title'):
+            self.sidebar_agent_title.setText(self.role_names[self._preferred_agent])
+        project, task = self.view_project() or {}, self.view_task() or {}
+        prefix = '本機紀錄' if hasattr(self, 'sidebar_pages') and self.sidebar_pages.currentIndex() == 2 else self.role_names[self._preferred_agent]
+        sid = (task.get(self._preferred_agent + '_session') or '') if prefix != '本機紀錄' else ''
+        saved = self.core.store.get('sessions', {'agent': self._preferred_agent, 'id': sid}) if sid else None
+        title = (saved or {}).get('title') or task.get('title') or '新對話'
+        full_title = prefix + ' · ' + (project.get('name') or '選擇 Project') + ' › ' + title
+        self.context_title.setText(compact(full_title, 90))
+        self.context_title.setToolTip(full_title)
 
     def save_context_state(self):
         for agent, key in self._loaded_agent_keys.items():
@@ -2492,7 +2745,9 @@ class MainWindow(QMainWindow):
 
     def sidebar_page_changed(self, index):
         self.sidebar_stack.setCurrentIndex(index)
-        self.core.set_setting("ui.sidebar_page", "nav" if index == 0 else "work")
+        self.core.set_setting("ui.sidebar_page", ('nav', 'work', 'records')[index])
+        self.update_context_title()
+        self.refresh_work_details()
         if index == 0:
             self.navigator.ensure_loaded()
 
@@ -2500,7 +2755,7 @@ class MainWindow(QMainWindow):
         self.sidebar.show()
         self.sidebar_toggle.setChecked(True)
         self.sidebar_pages.setCurrentIndex(1)
-        self.session_tabs.setCurrentIndex(AGENTS.index(agent))
+        self.session_tabs.setCurrentIndex(self.agents.index(agent))
         self.panels[agent].session.setFocus()
         QTimer.singleShot(0, self, self.update_workspace_layout)
 
@@ -2511,22 +2766,29 @@ class MainWindow(QMainWindow):
     def select_role(self, index):
         if index < 0 or not hasattr(self, "panels"):
             return
-        self._preferred_agent = AGENTS[index]
+        self._preferred_agent = self.agents[index]
+        if not self._loading: self.core.set_setting('ui.active_agent', self._preferred_agent)
+        if not self._loading and self.sidebar_pages.currentIndex() == 2:
+            self.sidebar_pages.setCurrentIndex(1)
         self.session_tabs.setCurrentIndex(index)
+        self.update_context_title()
+        self.refresh_work_details()
         if self.focused_agent is not None:
             self.update_workspace_layout()
+        if hasattr(self, 'monitor_dashboard'):
+            self.refresh_monitor()
 
     def update_role_tabs(self):
         if not hasattr(self, "panels"):
             return
-        for index, agent in enumerate(AGENTS):
+        for index, agent in enumerate(self.agents):
             panel = self.panels[agent]
             pending = len(panel.pending_approval_events)
-            self.role_tabs.setTabText(index, ROLE_NAMES[agent] + " · " + ("待核准" if pending else ROLE_LABELS[agent]))
-            self.role_tabs.setTabToolTip(index, f"{ROLE_NAMES[agent]} · {ROLE_LABELS[agent]} · {panel.state.text()}")
+            self.role_tabs.setTabText(index, self.role_names[agent] + " · " + ("待核准" if pending else ROLE_LABELS[self.core.provider(agent)]))
+            self.role_tabs.setTabToolTip(index, f"{self.role_names[agent]} · {ROLE_LABELS[self.core.provider(agent)]} · {panel.state.text()}")
 
     def update_workspace_layout(self, *_):
-        if not hasattr(self, "panels") or self._layout_updating:
+        if not hasattr(self, "panels") or self._layout_updating or self._closed or self._close_pending:
             return
         self._layout_updating = True
         try:
@@ -2534,13 +2796,16 @@ class MainWindow(QMainWindow):
                 self.show_details_dialog()
             if hasattr(self, "workspace_scroll"):
                 self.workspace_scroll.widget().setMaximumHeight(max(450, self.workspace_scroll.viewport().height()))
-            available = self.splitter.width()
-            narrow = available < len(AGENTS) * 300 + (len(AGENTS) - 1) * self.splitter.handleWidth()
+            available = self.chat_workspace.width()
+            narrow = available < len(self.agents) * 300 + (len(self.agents) - 1) * self.splitter.handleWidth()
             focused = self.layout_mode.currentData() == "Focus" or narrow
             was_focused = self.focused_agent is not None
             if focused and not was_focused and all(not panel.isHidden() for panel in self.panels.values()):
                 self._grid_sizes = self.splitter.sizes()
             self.focused_agent = self._preferred_agent if focused else None
+            self.agent_rail.setVisible(focused and available >= 760 and self.mode.currentData() == 'Workspace')
+            self.console_mark.setText('ACW' if self.width() < 1050 else 'ACW / CONTROL ROOM')
+            self.workspace_hint.setText('MONITOR / 專注對話' if focused else 'MONITOR / 並排對話')
             for agent, panel in self.panels.items():
                 panel.setVisible(not focused or agent == self._preferred_agent)
             if not focused and was_focused:
@@ -2548,6 +2813,8 @@ class MainWindow(QMainWindow):
             self.unfocus_button.setVisible(focused and not narrow)
             self.role_tabs.setToolTip("窄視窗 · 一次顯示一個可讀的對話" if narrow else "選擇角色，或按兩下角色標題以專注")
             self.update_role_tabs()
+            if self.core.get_setting('ui.layout_mode', 'Focus') != self.layout_mode.currentData():
+                self.core.set_setting('ui.layout_mode', self.layout_mode.currentData())
         finally:
             self._layout_updating = False
 
@@ -2598,7 +2865,8 @@ class MainWindow(QMainWindow):
 
     def refresh_work_details(self):
         groups = {name: [] for name in self.detail_trees}
-        for event in reversed(self.core.events(limit=500)):
+        task = self.view_task() or {}
+        for event in reversed(self.core.events(task_id=task.get('id'), limit=500) if task else []):
             kind = event.get("type", "unknown")
             groups["Timeline"].append(event)
             if kind in ("tool_start", "tool_result", "approval", "approval_request", "tool_approval"):
@@ -2610,7 +2878,7 @@ class MainWindow(QMainWindow):
             if kind in ("test", "test_result"):
                 groups["Tests"].append(event)
         handoffs = getattr(self.core, "handoffs", None)
-        groups["Handoffs"] = handoffs() if callable(handoffs) else []
+        groups["Handoffs"] = handoffs(task.get('id')) if callable(handoffs) and task else []
         for name, rows in groups.items():
             tree = self.detail_trees[name]
             selected = tree.currentItem().data(0, Qt.UserRole) if tree.currentItem() else None
@@ -2628,7 +2896,7 @@ class MainWindow(QMainWindow):
                 source = event.get("agent") or event.get("source_agent") or "workspace"
                 target = event.get("target_agent")
                 summary = event.get("summary") or payload.get("command") or payload.get("tool") or event.get("annotation") or ""
-                item = QTreeWidgetItem([ROLE_NAMES.get(source, source) + (" → " + ROLE_NAMES.get(target, target) if target else ""),
+                item = QTreeWidgetItem([self.role_names.get(source, source) + (" → " + self.role_names.get(target, target) if target else ""),
                                         kind.replace("_", " ") + " · " + str(status), compact(summary, 140)])
                 item.setData(0, Qt.UserRole, event)
                 item.setToolTip(2, plain(event))
@@ -2767,9 +3035,7 @@ class MainWindow(QMainWindow):
             self.task_combo.setCurrentIndex(max(0, self.task_combo.findData(identifier(task))))
             self.task_status.setCurrentIndex(max(0, self.task_status.findData(task.get("status"))))
             self.task_status.setEnabled(bool(task))
-            full_title = (project.get("name") or "選擇專案") + " › " + (task.get("title") or "選擇任務")
-            self.context_title.setText(compact(full_title, 90))
-            self.context_title.setToolTip(full_title)
+            self.update_context_title()
             for agent, panel in self.panels.items():
                 agent_project = self.core.agent_project(agent) or {}
                 agent_task = self.core.agent_task(agent) or {}
@@ -2791,7 +3057,7 @@ class MainWindow(QMainWindow):
                         panel.add_event(row, historical=pending_id not in view.get("pending", {}))
                     else:
                         panel.add_message(row)
-                panel.cwd_label.setText(("中繼資料：" if agent == "dot" else "工作目錄：") + (agent_project.get("name", "尚未選擇") if agent == "dot" else agent_project.get(f"{agent}_cwd") or agent_project.get("repo_path") or "尚未選擇"))
+                panel.cwd_label.setText(("中繼資料：" if agent == "dot" else "工作目錄：") + (agent_project.get("name", "尚未選擇") if agent == "dot" else agent_project.get(self.core.provider(agent) + '_cwd') or agent_project.get("repo_path") or "尚未選擇"))
                 panel.cwd_label.setToolTip(panel.cwd_label.text())
                 panel.branch_label.setText("分支：" + (agent_task.get("branch") or agent_project.get("active_branch") or "—"))
                 self.refresh_agent(agent)
@@ -2800,9 +3066,9 @@ class MainWindow(QMainWindow):
             self._loaded_context_key = key
             if hasattr(self, "navigator") and self.navigator.sessions[self.navigator.agent] is not None:
                 self.navigator.fill()
-            self._preferred_agent = saved_view.get("role", self._preferred_agent)
-            self.role_tabs.setCurrentIndex(AGENTS.index(self._preferred_agent))
-            self.session_tabs.setCurrentIndex(saved_view.get("session_tab", AGENTS.index(self._preferred_agent)))
+            self.role_tabs.setCurrentIndex(self.agents.index(self._preferred_agent))
+            self.session_tabs.setCurrentIndex(self.agents.index(self._preferred_agent))
+            self.update_context_title()
             self.details_tabs.setCurrentIndex(saved_view.get("details_tab", 0))
             self.refresh_work_details()
             for name, selected in saved_view.get("detail_selections", {}).items():
@@ -2835,7 +3101,7 @@ class MainWindow(QMainWindow):
             task = self.core.agent_task(agent) or {}
             sessions = self.core.sessions(agent)
             if agent != "dot" and agent in self.core._agent_selections:
-                directory = project.get(agent + '_cwd') or project.get('repo_path')
+                directory = project.get(self.core.provider(agent) + '_cwd') or project.get('repo_path')
                 sessions = [row for row in sessions if row.get('project_id') == project.get('id')
                             or (directory and row.get('cwd') and Path(row['cwd']).resolve() == Path(directory).resolve())]
             panel.refresh_sessions(sessions, task.get(f"{agent}_session"))
@@ -2846,8 +3112,17 @@ class MainWindow(QMainWindow):
             self.show_error(str(exc), False)
 
     def poll_events(self):
+        if self.mode.currentData() in ('Workspace', 'Monitor') and time.monotonic() - self._monitor_clock >= 1:
+            self.refresh_monitor()
         self._legacy_clock += 1
         self._git_clock += 1
+        # run.sh (hermes-delegation skill) hands Hermes steps over as request files; answer them about once a second.
+        self._requests_clock = getattr(self, "_requests_clock", 0) + 1
+        if self._requests_clock >= 10 and not getattr(self, "_requests_busy", False) and not self._close_pending:
+            self._requests_clock = 0
+            self._requests_busy = True
+            self.run(self.core.poll_requests, lambda _: setattr(self, "_requests_busy", False),
+                     on_error=lambda _: setattr(self, "_requests_busy", False))
         if self.mode.currentData() == "Monitor" and self._legacy_clock >= 10 and not self._legacy_busy and not self._close_pending:
             self._legacy_clock = 0
             self._legacy_busy = True
@@ -2859,16 +3134,17 @@ class MainWindow(QMainWindow):
                         message = dict(entry, id="legacy-" + entry["agent"], role="system")
                         panel.add_message(message)
                         panel.cards[message["id"]].heading.setText("LEGACY MONITOR · READ ONLY")
-            legacy_root = self.core.get_setting("legacy.root", r"C:\Users\ryant\Desktop\AI-Collab-Monitor")
+            legacy_root = self.core.get_setting("legacy.root", LEGACY_MONITOR_ROOT)
             self.run(lambda: self.core.poll_legacy(legacy_root), loaded_legacy,
                      on_error=lambda _: setattr(self, "_legacy_busy", False))
-        if self._git_clock >= 100 and not self._git_busy and self.core.current_project and not self._close_pending:
+        if self._git_clock >= 100 and not self._git_busy and self.view_project() and not self._close_pending:
             self._git_clock = 0
             self._git_busy = True
-            git_project_id = self.core.current_project_id
+            git_project_id = identifier(self.view_project())
             def loaded_git(snapshot):
                 self._git_busy = False
-                for agent in ("claude", "codex", "local"):
+                for agent in self.agents:
+                    if self.core.provider(agent) == "dot": continue
                     if (self.core.agent_project(agent) or {}).get('id') == git_project_id:
                         self.panels[agent].branch_label.setText(self.branch_text(snapshot))
             self.run(lambda: self.core.git_snapshot(git_project_id), loaded_git, on_error=lambda _: setattr(self, "_git_busy", False))
@@ -2937,31 +3213,28 @@ class MainWindow(QMainWindow):
         if self.core.adapters[agent].state != "Connected":
             self.core.connect(agent)
 
-    def _opening_done(self, *_):
-        self._opening = False
-        self._opening_agent = None
-        if not (self.orchestrator and self.orchestrator.active):
-            for control in (self.project_combo, self.task_combo, self.navigator):
-                control.setEnabled(True)
+    def _opening_done(self, agent):
+        self._opening_agents.discard(agent)
+        self._opening = bool(self._opening_agents)
         for panel in self.panels.values(): panel.update_controls()
 
     def _opening_begin(self, agent):
-        # One open at a time: a second one landing mid-resume would attach the conversation to the wrong task.
-        if getattr(self, "_opening", False) or not self.confirm_agent_context_change(agent):
+        # Serialize only the selected Agent; independent Agents can open concurrently.
+        if agent in self._opening_agents or not self.confirm_agent_context_change(agent):
             return False
+        self._opening_agents.add(agent)
         self._opening = True
-        self._opening_agent = agent
         self.panels[agent].update_controls()
-        for control in (self.project_combo, self.task_combo, self.navigator):
-            control.setEnabled(False)
         return True
 
     def sync_local_conversations(self):
         """Show what Claude Desktop or Codex appended to an open conversation, without reopening it."""
         from .desktop_sessions import history_stamp
-        if getattr(self, "_opening", False) or self._close_pending:
+        if self._close_pending or self._closed:
             return
-        for agent in ("claude", "codex"):
+        for agent in self.agents:
+            if agent in self._opening_agents: continue
+            if self.core.provider(agent) not in ("claude", "codex"): continue
             panel = self.panels[agent]
             task = self.core.agent_task(agent) or {}
             session_id = str(task.get(agent + "_session") or "").lower()
@@ -2972,7 +3245,7 @@ class MainWindow(QMainWindow):
                 # This role is producing the new content itself; it is already on screen through the live stream.
                 self._sync_floor[key] = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + ".999Z"
                 continue
-            stamp = history_stamp(agent, session_id)
+            stamp = history_stamp(self.core.provider(agent), session_id)
             if stamp is None or stamp == self._sync_stamp.get(key):
                 continue
             first = key not in self._sync_stamp
@@ -2986,6 +3259,8 @@ class MainWindow(QMainWindow):
             self._syncing.add(agent)
             def done(result, agent=agent, key=key, panel=panel):
                 self._syncing.discard(agent)
+                if self._closed:
+                    return
                 self._sync_floor[key] = max(self._sync_floor.get(key, ""), result["latest"])
                 current = self.core.agent_task(agent) or {}
                 if result["task_id"] != current.get("id") or not result["items"]:
@@ -2996,7 +3271,7 @@ class MainWindow(QMainWindow):
                     else:
                         panel.add_event(row, historical=True)
                 if hasattr(self, "navigator") and self.navigator.sessions.get(agent) is not None:
-                    self.footer.setText(f"{ROLE_NAMES[agent]} 對話已同步 · 新增 {len(result['items'])} 筆")
+                    self.footer.setText(f"{self.role_names[agent]} 對話已同步 · 新增 {len(result['items'])} 筆")
             floor = self._sync_floor.get(key, "")
             self.run(lambda agent=agent, floor=floor: self.core.sync_local_history(agent, floor), done,
                      on_error=lambda _, agent=agent: self._syncing.discard(agent))
@@ -3009,7 +3284,7 @@ class MainWindow(QMainWindow):
             self.reload_context()
             self.focus_role(agent)
             if not resume:
-                self._opening_done()
+                self._opening_done(agent)
             self.footer.setText(f"已載入「{record.get('title', '')}」· {result['imported']} 則訊息、{result['tools']} 筆工具紀錄")
             # A conversation opens at its latest message, like the desktop apps.
             QTimer.singleShot(150, self.panels[agent], self.panels[agent].jump_to_latest)
@@ -3018,9 +3293,9 @@ class MainWindow(QMainWindow):
                 def continue_session():
                     self._agent_ready(agent)
                     return self.core.resume_session(agent, result["session_id"])
-                self.run(continue_session, lambda _: (self._opening_done(), self.reload_context(), self.refresh_agent(agent)),
-                         agent, on_error=self._opening_done)
-        self.run(lambda: self.core.open_desktop_session(record, independent=True), opened, agent, on_error=self._opening_done)
+                self.run(continue_session, lambda _: (self._opening_done(agent), self.reload_context(), self.refresh_agent(agent)),
+                         agent, on_error=lambda _: self._opening_done(agent))
+        self.run(lambda: self.core.open_desktop_session(record, independent=True), opened, agent, on_error=lambda _: self._opening_done(agent))
 
     def new_desktop_conversation(self, directory, agent="claude"):
         if not self._opening_begin(agent):
@@ -3033,14 +3308,14 @@ class MainWindow(QMainWindow):
             def start():
                 self._agent_ready(agent)
                 return self.core.create_session(agent)
-            self.run(start, lambda _: (self._opening_done(), self.reload_context(), self.refresh_agent(agent)),
-                     agent, on_error=self._opening_done)
-        self.run(lambda: self.core.open_desktop_project(directory, title, agent=agent), opened, agent, on_error=self._opening_done)
+            self.run(start, lambda _: (self._opening_done(agent), self.reload_context(), self.refresh_agent(agent)),
+                     agent, on_error=lambda _: self._opening_done(agent))
+        self.run(lambda: self.core.open_desktop_project(directory, title, agent=agent), opened, agent, on_error=lambda _: self._opening_done(agent))
 
     def focus_role(self, agent):
         self._preferred_agent = agent
-        self.role_tabs.setCurrentIndex(AGENTS.index(agent))
-        self.session_tabs.setCurrentIndex(AGENTS.index(agent))
+        self.role_tabs.setCurrentIndex(self.agents.index(agent))
+        self.session_tabs.setCurrentIndex(self.agents.index(agent))
 
     def start_auto_collab(self):
         if self.orchestrator and self.orchestrator.active:
@@ -3055,8 +3330,33 @@ class MainWindow(QMainWindow):
         dialog.setWindowTitle("自動協作")
         dialog.resize(680, 560)
         form = QVBoxLayout(dialog)
-        form.addWidget(label("Claude 規劃 → G8毛 審查並轉交 → Codex 實作 → G8毛 審查 → Claude 最終審查。"
-                             "不通過會自動再來一輪，直到通過或達到回合上限。", True))
+        lead = QComboBox()
+        lead.setObjectName('auto_lead')
+        for agent in self.agents:
+            if self.core.provider(agent) != 'dot':
+                lead.addItem(self.role_names[agent], agent)
+        lead.setCurrentIndex(max(0, lead.findData(self._preferred_agent)))
+        form.addWidget(label('本次分工（每次啟動可重新選擇）', True))
+        form.addWidget(lead)
+        implementer = QComboBox()
+        implementer.setObjectName('auto_implementer')
+        for agent in self.agents:
+            if self.core.provider(agent) != 'dot':
+                implementer.addItem(self.role_names[agent], agent)
+        implementer.setCurrentIndex(implementer.findData('codex' if lead.currentData() == 'claude' else 'claude'))
+        form.addWidget(label('實作 Agent（可以與主導者使用相同後端）', True))
+        form.addWidget(implementer)
+        preview = label('', True)
+        preview.setObjectName('auto_flow_preview')
+        form.addWidget(preview)
+        binding_preview = label('', True)
+        binding_preview.setObjectName('auto_bindings_preview')
+        form.addWidget(binding_preview)
+        workflow = QComboBox()
+        workflow.setObjectName('auto_workflow')
+        workflow.addItem('直接派工與驗收', 'direct')
+        workflow.addItem('加入 G8毛：審查計畫、實作與轉交', 'relay')
+        form.addWidget(workflow)
         task = QPlainTextEdit()
         task.setObjectName("auto_task")
         task.setPlaceholderText("要完成的任務…")
@@ -3069,19 +3369,34 @@ class MainWindow(QMainWindow):
         rounds.setValue(3)
         row.addWidget(rounds)
         row.addSpacing(16)
-        row.addWidget(label("Local LLM"))
+        row.addWidget(label("Hermes"))
         local_role = QComboBox()
         local_role.setObjectName("auto_local_role")
         local_role.addItem("不加入", None)
         local_role.addItem("第二意見（實作後多審一次，不會擋流程）", "reviewer")
-        local_role.addItem("擔任實作者（取代 Codex）", "implementer")
+        local_role.addItem("擔任實作者（取代本次實作角色）", "implementer")
         row.addWidget(local_role, 1)
         form.addLayout(row)
-        form.addWidget(label("工具核准不會自動：任何角色要求核准時流程會暫停等你。任何錯誤、逾時或回覆格式不符也會暫停。", True))
-        form.addWidget(label("G8毛 授權（僅限這一次執行）\n" + DISCLOSURE +
+        limits = QHBoxLayout()
+        limits.addWidget(label('有效時間上限（分鐘）'))
+        minutes = QSpinBox()
+        minutes.setObjectName('auto_minutes')
+        minutes.setRange(1, 1440)
+        minutes.setValue(60)
+        limits.addWidget(minutes)
+        limits.addWidget(label('步數上限'))
+        steps = QSpinBox()
+        steps.setObjectName('auto_steps')
+        steps.setRange(1, 100)
+        steps.setValue(24)
+        limits.addWidget(steps)
+        form.addLayout(limits)
+        form.addWidget(label("支援 Workspace 核准的角色會暫停等待你回覆；Hermes 使用自身工具權限設定，不透過 Workspace 核准。任何錯誤、逾時或回覆格式不符都會暫停。", True))
+        disclosure = label("G8毛 授權（僅限這一次執行）\n" + DISCLOSURE +
                              "\nDuring this run the workspace sends to and reads from the selected Dot automatically, "
                              "reading about every 10 seconds, up to 400 requests. This is automated use of an unofficial "
-                             "interface with your ChatGPT login and may lead to rate limiting or account restrictions.", True))
+                             "interface with your ChatGPT login and may lead to rate limiting or account restrictions.", True)
+        form.addWidget(disclosure)
         consent = QCheckBox("我了解上述風險，授權這一次執行自動對 G8毛 傳送與讀取")
         consent.setObjectName("auto_consent")
         form.addWidget(consent)
@@ -3090,7 +3405,38 @@ class MainWindow(QMainWindow):
         start.setText("開始")
         buttons.button(QDialogButtonBox.Cancel).setText("取消")
         def ready():
-            start.setEnabled(consent.isChecked() and bool(task.toPlainText().strip()))
+            relay = workflow.currentData() == 'relay'
+            owner = self.role_names[lead.currentData()]
+            worker_id = 'local' if local_role.currentData() == 'implementer' else implementer.currentData()
+            worker = self.role_names[worker_id]
+            implementer.setEnabled(local_role.currentData() != 'implementer')
+            stages = [owner + ' 派工']
+            if relay:
+                stages.append('G8毛 複核')
+            stages.append(worker + ' 實作')
+            if local_role.currentData() == 'reviewer':
+                stages.append('Hermes 第二意見')
+            if relay:
+                stages.append('G8毛 複核')
+            stages.append(owner + ' 驗收')
+            preview.setText(' → '.join(stages) + '。不通過會再交回實作者，直到通過或達到上限。')
+            participants = list(dict.fromkeys([lead.currentData(), worker_id] + (['local'] if local_role.currentData() == 'reviewer' else []) + (['dot'] if relay else [])))
+            bindings = []
+            for agent in participants:
+                project = self.core.agent_project(agent) or {}
+                context = self.core.agent_task(agent) or {}
+                sid = context.get(agent + '_session') or ''
+                saved = self.core.store.get('sessions', {'agent': agent, 'id': sid}) if sid else None
+                bindings.append(self.role_names[agent] + ' · ' + (project.get('name') or '未選 Project') + ' / ' + ((saved or {}).get('title') or context.get('title') or '尚未開啟對話'))
+            binding_preview.setText('沿用各 Agent 目前的綁定：\n' + '\n'.join(bindings))
+            disclosure.setVisible(relay)
+            consent.setVisible(relay)
+            distinct = worker_id != lead.currentData() and not (local_role.currentData() == 'reviewer' and 'local' in (lead.currentData(), worker_id))
+            start.setEnabled(distinct and (not relay or consent.isChecked()) and bool(task.toPlainText().strip()))
+        workflow.currentIndexChanged.connect(ready)
+        lead.currentIndexChanged.connect(ready)
+        implementer.currentIndexChanged.connect(ready)
+        local_role.currentIndexChanged.connect(ready)
         consent.toggled.connect(ready)
         task.textChanged.connect(ready)
         ready()
@@ -3098,29 +3444,38 @@ class MainWindow(QMainWindow):
         buttons.rejected.connect(dialog.reject)
         form.addWidget(buttons)
         if dialog.exec() == QDialog.Accepted:
-            self.run_auto_collab(task.toPlainText(), rounds.value(), local_role=local_role.currentData())
+            self.run_auto_collab(task.toPlainText(), rounds.value(), consented=consent.isChecked(),
+                                 local_role=local_role.currentData(), workflow=workflow.currentData(),
+                                 max_steps=steps.value(), max_active_seconds=minutes.value() * 60,
+                                 lead=lead.currentData(), implementer=implementer.currentData())
 
-    def run_auto_collab(self, task, rounds, consented=True, local_role=None):
+    def run_auto_collab(self, task, rounds, consented=False, local_role=None, workflow='direct',
+                        max_steps=24, max_active_seconds=3600, lead='claude', implementer=None):
         """Start one bounded run. `consented` is the user's run-scoped G8毛 authorisation from the dialog."""
-        if not consented:
+        if self.mode.currentData() == 'Monitor':
+            self.show_error('請先返回對話，再啟動自動協作。')
+            return
+        if workflow == 'relay' and not consented:
             return
         if self.orchestrator and self.orchestrator.active:
             self.show_error('已有自動協作正在進行');return
-        self.panels['dot'].stop_dot_follow()
+        if workflow == 'relay':
+            self.panels['dot'].stop_dot_follow()
         dot = self.core.adapters["dot"]
         run=None
         def dispatch(operation, done, failed):
             self.run(operation, done, on_error=failed)
         try:
             run = Orchestrator(self.core, task, dispatch, max_rounds=rounds, local_role=local_role,
+                               workflow=workflow, max_steps=max_steps, max_active_seconds=max_active_seconds, lead=lead, implementer=implementer,
                                has_pending_approval=lambda: any(self.panels[agent].pending_approval_events for agent in run.agents))
-            if getattr(dot, "state", "") == "Connected" and hasattr(dot, "grant_run"):
+            if 'dot' in run.agents and getattr(dot, "state", "") == "Connected" and hasattr(dot, "grant_run"):
                 dot.grant_run(400,owner=run.run_id)
             self.orchestrator = run
             run.start()
         except Exception as exc:
             self.orchestrator = None
-            if run is not None and hasattr(dot, "revoke_run"):
+            if run is not None and 'dot' in run.agents and hasattr(dot, "revoke_run"):
                 dot.revoke_run(owner=run.run_id)
             self.show_error(str(exc))
             return
@@ -3128,11 +3483,12 @@ class MainWindow(QMainWindow):
         self.run_bar.show()
         self.run_timer.start(500)
         self.tick_auto_collab()
+        self.refresh_monitor()
 
     def set_auto_collab_lock(self, locked):
         # A run must keep talking to the same task; switching context mid-run would misroute messages.
-        for control in (self.project_combo, self.task_combo, self.navigator, self.auto_button):
-            control.setEnabled(not locked)
+        self.auto_button.setEnabled(not locked)
+        for panel in self.panels.values(): panel.update_controls()
         self.run_stop.setVisible(locked)
         self.run_close.setVisible(not locked)
 
@@ -3147,24 +3503,26 @@ class MainWindow(QMainWindow):
         if not run.active:
             self.run_timer.stop()
             dot = self.core.adapters.get("dot")
-            if hasattr(dot, "revoke_run"):
+            if 'dot' in run.agents and hasattr(dot, "revoke_run"):
                 dot.revoke_run(owner=run.run_id)
             self.set_auto_collab_lock(False)
             self.reload_context()
+        if self.mode.currentData() in ('Workspace', 'Monitor'):
+            self.refresh_monitor()
 
     def stop_auto_collab(self):
         if self.orchestrator and self.orchestrator.active:
             self.orchestrator.stop()
         self.tick_auto_collab()
 
-    def require_project(self, reason):
+    def require_project(self, reason, *, agent=None):
         box = QMessageBox(QMessageBox.Question, "需要專案", "", QMessageBox.Yes | QMessageBox.No, self)
         box.setTextFormat(Qt.PlainText)
         box.setText(reason + "\n專案就是這個角色工作時所在的資料夾。\n\n要現在建立專案嗎？建立後請再按一次「連線」。")
         box.button(QMessageBox.Yes).setText("建立專案…")
         box.button(QMessageBox.No).setText("稍後")
         if box.exec() == QMessageBox.Yes:
-            self.new_project()
+            self.new_project(agent=agent)
 
     def require_task(self):
         if not self.core.current_project:
@@ -3178,7 +3536,8 @@ class MainWindow(QMainWindow):
         if box.exec() == QMessageBox.Yes:
             self.new_task()
 
-    def new_project(self):
+    def new_project(self, *, agent=None, global_scope=False):
+        agent = None if global_scope else agent or self._preferred_agent
         dialog = QDialog(self)
         dialog.setWindowTitle("建立專案")
         dialog.resize(640, 320)
@@ -3203,18 +3562,19 @@ class MainWindow(QMainWindow):
             if not name.text().strip() or not repo.text().strip():
                 self.show_error("請填寫專案名稱與資料夾。")
                 return
-            if not self.confirm_context_change():
+            if not (self.confirm_agent_context_change(agent) if agent else self.confirm_context_change()):
                 return
             project_name, project_repo = name.text().strip(), repo.text().strip()
             project_branch, project_notes = branch.text().strip(), notes.toPlainText()
             def create():
                 project = self.core.create_project(project_name, project_repo, default_branch=project_branch, notes=project_notes)
-                self.core.select_project(identifier(project))
-            self.run(create, lambda _: self.reload_context())
+                if agent: self.core.select_agent_project(agent, identifier(project))
+                else: self.core.select_project(identifier(project))
+            self.run(create, lambda _: self.reload_context(), agent)
 
     def new_task(self):
         if not self.core.current_project:
-            self.require_project("建立任務前需要先有專案。")
+            self.new_project(global_scope=True)
             return
         title, ok = QInputDialog.getText(self, "建立任務", "任務名稱")
         if ok and title.strip():
@@ -3226,19 +3586,16 @@ class MainWindow(QMainWindow):
             self.run(create, lambda _: self.reload_context())
 
     def confirm_context_change(self):
-        if any(panel.connection_state in ("Busy", "Connecting") for panel in self.panels.values()) or any(self._agent_operations.values()):
-            self.show_error("Wait for or stop active turns before changing project or task.")
-            return False
         # Navigation saves drafts locally in memory. It never sends or discards them.
         self.save_context_state()
         return True
 
     def confirm_agent_context_change(self, agent):
-        if self.orchestrator and self.orchestrator.active:
+        if self.orchestrator and self.orchestrator.active and agent in self.orchestrator.agents:
             self.show_error("請先停止自動協作，再切換角色的專案或任務。")
             return False
         panel = self.panels[agent]
-        if panel.connection_state in ('Busy', 'Connecting') or self._agent_operations.get(agent) or getattr(self, '_opening_agent', None) == agent:
+        if panel.connection_state in ('Busy', 'Connecting') or self._agent_operations.get(agent) or agent in self._opening_agents:
             self.show_error("請等待或停止此角色的作業，再切換它的專案或任務。")
             return False
         self.save_context_state()
@@ -3280,7 +3637,7 @@ class MainWindow(QMainWindow):
             self.core.update_task(identifier(task), status=value)
 
     def notes(self):
-        task = self.core.current_task
+        task = self.view_task()
         if not task:
             self.show_error("Select a task first.")
             return
@@ -3303,7 +3660,7 @@ class MainWindow(QMainWindow):
             self.layout_mode.setCurrentIndex(self.layout_mode.findData("Auto"))
         else:
             self._preferred_agent = agent
-            self.role_tabs.setCurrentIndex(AGENTS.index(agent))
+            self.role_tabs.setCurrentIndex(self.agents.index(agent))
             self.layout_mode.setCurrentIndex(self.layout_mode.findData("Focus"))
         self.update_workspace_layout()
 
@@ -3313,20 +3670,52 @@ class MainWindow(QMainWindow):
             for mid, card in panel.cards.items():
                 if mid.startswith("legacy-"):
                     card.setVisible(mode == "Monitor")
-        self.stack.setCurrentIndex(1 if mode == "Timeline" else 2 if mode == "History" else 0)
+        self.stack.setCurrentIndex(1 if mode == "Timeline" else 2 if mode == "History" else 3 if mode == 'Monitor' else 0)
+        self.monitor_button.setText('返回工作台' if mode == 'Monitor' else '協作總覽')
         if mode == "Timeline":
             self.refresh_timeline()
         elif mode == "History":
             self.refresh_history()
         elif mode == "Monitor":
             self._legacy_clock = 10
+            self.refresh_monitor()
             self.footer.setText("Monitor · Read-only workspace and legacy logs · Existing sessions are untouched")
+        else:
+            self.footer.setText('MONITOR WORKSPACE · 各 Agent 獨立 session · Ctrl+Enter 傳送 · Ctrl+B 側欄')
+        self.update_workspace_layout()
+
+    def toggle_monitor(self):
+        if self.mode.currentData() == 'Monitor' and self.stack.currentIndex() == 0:
+            self.stack.setCurrentWidget(self.monitor_dashboard)
+            self.monitor_button.setText('返回工作台')
+            self.refresh_monitor()
+            return
+        self.mode.setCurrentIndex(self.mode.findData('Workspace' if self.mode.currentData() == 'Monitor' else 'Monitor'))
+
+    def show_monitor_transcripts(self):
+        self.stack.setCurrentIndex(0)
+        self.monitor_button.setText('返回總覽')
+
+    def open_monitor_role(self, agent):
+        self.mode.setCurrentIndex(self.mode.findData('Workspace'))
+        self.sidebar_pages.setCurrentIndex(1)
+        self._preferred_agent = agent
+        self.role_tabs.setCurrentIndex(self.agents.index(agent))
+        self.layout_mode.setCurrentIndex(self.layout_mode.findData('Focus'))
+        self.update_workspace_layout()
+        self.refresh_monitor()
+
+    def refresh_monitor(self):
+        self._monitor_clock = time.monotonic()
+        snapshot = collect_snapshot(self.core, self.panels, self.orchestrator)
+        self.monitor_dashboard.refresh(snapshot)
+        self.agent_rail.refresh(snapshot, self._preferred_agent)
 
     def forward(self, message, target):
         try:
             if self.handoff_mode.currentData() == "manual":
                 if self.panels[target].connection_state != "Connected":
-                    self.show_error(f"{ROLE_NAMES[target]} 尚未連線。未傳送交接。")
+                    self.show_error(f"{self.role_names[target]} 尚未連線。未傳送交接。")
                     return
                 preview = self.core.prepare_handoff(identifier(message), target)
                 if target == 'dot' and not self.panels['dot'].dot_consent('send'): return
@@ -3348,7 +3737,7 @@ class MainWindow(QMainWindow):
             state = self.panels[target].connection_state
             blocked = target == "dot" and (not self.panels[target].capabilities.get("supports_sessions") or (self.core.agent_task("dot") or {}).get("dot_session") != getattr(self.core.adapters.get("dot"),"target",None))
             reason = " · 受阻" if blocked else " · 請先連線目標角色" if state != "Connected" else " · 尚無來源回覆" if not messages else ""
-            action = menu.addAction(f"第 {number} 步：最新 {ROLE_NAMES[source]} 回覆 → {ROLE_NAMES[target]}{reason}")
+            action = menu.addAction(f"第 {number} 步：最新 {self.role_names[source]} 回覆 → {self.role_names[target]}{reason}")
             action.setEnabled(bool(messages) and state == "Connected" and not blocked)
             if messages:
                 action.triggered.connect(lambda checked=False, message=messages[-1], target=target: self.forward(message, target))
@@ -3357,7 +3746,8 @@ class MainWindow(QMainWindow):
         explanation.setEnabled(False)
 
     def stop_task(self):
-        if QMessageBox.question(self, "Stop current task", "Request cancellation from all four adapters for the current task?", QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes:
+        if QMessageBox.question(self, "停止全部 Agent", "要求停止所有正在執行的 Agent，以及目前的自動協作？", QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes:
+            self.stop_auto_collab()
             self.run(lambda: self.core.stop_task(confirmed=True))
 
     def approval_mode(self, agent):
@@ -3368,14 +3758,14 @@ class MainWindow(QMainWindow):
         if mode == "all" and self.approval_mode(agent) != "all":
             box = QMessageBox(QMessageBox.Warning, "自動核准全部", "", QMessageBox.Yes | QMessageBox.No, self)
             box.setTextFormat(Qt.PlainText)
-            box.setText(ROLE_NAMES[agent] + " 之後執行指令、修改專案內的檔案都不會再問你。\n\n"
+            box.setText(self.role_names[agent] + " 之後執行指令、修改專案內的檔案都不會再問你。\n\n"
                         "仍然會問的：刪除資料夾、git push、強制覆寫、修改系統設定、下載後直接執行、修改專案資料夾以外的檔案。\n\n"
                         "這份清單擋得住常見的危險操作，但不保證擋得住全部。要開啟嗎？")
             box.setDefaultButton(QMessageBox.No)
             if box.exec() != QMessageBox.Yes:
                 return
         self.core.set_setting("agent." + agent, dict(self.core.get_setting("agent." + agent, {}) or {}, approval_mode=mode))
-        self.footer.setText(ROLE_NAMES[agent] + " 核准方式：" + approvals.MODE_LABELS[mode])
+        self.footer.setText(self.role_names[agent] + " 核准方式：" + approvals.MODE_LABELS[mode])
         self.panels[agent].update_controls()
 
     def auto_approve(self, agent, event, request_id):
@@ -3458,7 +3848,7 @@ class MainWindow(QMainWindow):
             self.show_error(str(exc))
 
     def open_project(self, agent=None):
-        project = (self.core.agent_project(agent) if agent in AGENTS else self.core.current_project) or {}
+        project = (self.core.agent_project(agent) if agent in self.agents else self.view_project()) or {}
         path = project.get("repo_path") or project.get("repo")
         if path:
             if not QDesktopServices.openUrl(QUrl.fromLocalFile(path)):
@@ -3468,7 +3858,8 @@ class MainWindow(QMainWindow):
 
     def refresh_timeline(self):
         self.timeline.clear()
-        for event in reversed(self.core.events(limit=2000)):
+        task = self.view_task() or {}
+        for event in reversed(self.core.events(task_id=task.get('id'), limit=2000) if task else []):
             self.add_timeline_event(event)
         for col, width in enumerate((175, 75, 140, 90)):
             self.timeline.setColumnWidth(col, width)
@@ -3489,8 +3880,8 @@ class MainWindow(QMainWindow):
         filters.addWidget(self.search, 2)
         self.history_agent = QComboBox()
         self.history_agent.addItem("All agents", None)
-        for agent in AGENTS:
-            self.history_agent.addItem(ROLE_NAMES[agent], agent)
+        for agent in self.agents:
+            self.history_agent.addItem(self.role_names[agent], agent)
         self.history_agent.currentIndexChanged.connect(self.refresh_history)
         filters.addWidget(self.history_agent)
         self.history_status = QComboBox()
@@ -3517,11 +3908,12 @@ class MainWindow(QMainWindow):
         self.history_table.setAlternatingRowColors(True)
         self.history_table.itemDoubleClicked.connect(self.open_history_item)
         layout.addWidget(self.history_table, 1)
-        layout.addWidget(label("Double-click a task to restore its project and session mapping; double-click a search result to inspect it.", True))
+        layout.addWidget(label("雙擊任務查看本機紀錄；不會切換或恢復任何 Agent。雙擊搜尋結果可查看內容。", True))
         return page
 
     def show_history(self, agent=None):
         if agent:
+            self.focus_role(agent)
             self.history_agent.setCurrentIndex(self.history_agent.findData(agent))
         self.mode.setCurrentIndex(self.mode.findData("History"))
 
@@ -3535,8 +3927,8 @@ class MainWindow(QMainWindow):
             filters["agent"] = self.history_agent.currentData()
         if self.history_status.currentIndex():
             filters["status"] = self.history_status.currentText()
-        if self.history_project.isChecked() and self.core.current_project:
-            filters["project_id"] = identifier(self.core.current_project)
+        if self.history_project.isChecked() and self.view_project():
+            filters["project_id"] = identifier(self.view_project())
         if self.history_branch.text().strip():
             filters["branch"] = self.history_branch.text().strip()
         if self.history_date.text().strip():
@@ -3569,12 +3961,13 @@ class MainWindow(QMainWindow):
     def open_history_item(self, item):
         kind, row = item.data(0, Qt.UserRole)
         if kind == "task" and self.confirm_context_change():
-            self.run(lambda: self.core.select_task(identifier(row)), lambda _: (self.reload_context(), self.mode.setCurrentIndex(self.mode.findData("Workspace"))))
+            self.run(lambda: self.core.select_task(identifier(row)), lambda _: (self.sidebar_pages.setCurrentIndex(2), self.reload_context(), self.mode.setCurrentIndex(self.mode.findData("Workspace"))))
         elif kind == "result":
             self.show_detail("Search result", row)
 
     def compare(self):
-        messages = [message for message in self.core.messages() if message.get("role") == "assistant"]
+        task = self.view_task() or {}
+        messages = [message for message in (self.core.messages(task['id']) if task else []) if message.get("role") == "assistant"]
         if len(messages) < 2:
             self.show_error("Two assistant responses are required for comparison.")
             return
@@ -3683,8 +4076,11 @@ class MainWindow(QMainWindow):
             for panel in self.panels.values():
                 if panel.agent != "dot" and (self.core.agent_project(panel.agent) or {}).get('id') == snapshot.get('project_id', self.core.current_project_id):
                     panel.branch_label.setText(self.branch_text(snapshot))
-        self.run(lambda: self.core.git_snapshot(), loaded)
-        for event in self.core.events(limit=3000):
+        project = self.view_project() or {}
+        if project: self.run(lambda: self.core.git_snapshot(project['id']), loaded)
+        else: unified.setPlainText('請先選擇目前 Agent 的 Project')
+        task = self.view_task() or {}
+        for event in (self.core.events(task_id=task['id'], limit=3000) if task else []):
             event = {**(event.get("payload") or {}), **event}
             if event.get("type") in ("test", "test_result") or event.get("test"):
                 data = event.get("test") if isinstance(event.get("test"), dict) else event
@@ -3716,14 +4112,14 @@ class MainWindow(QMainWindow):
         if not item:
             return
         try:
-            path = self.core.project_file(item.data(0, Qt.UserRole))
+            path = self.core.project_file(item.data(0, Qt.UserRole), identifier(self.view_project() or {}))
             if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
                 raise RuntimeError("The operating system could not open the selected file; no file handler may be installed.")
         except Exception as exc:
             self.show_error(str(exc))
 
     def export(self):
-        task = self.core.current_task
+        task = self.view_task()
         if not task:
             self.show_error("Select a task to export.")
             return
@@ -3770,10 +4166,38 @@ class MainWindow(QMainWindow):
         layout.addWidget(button("Close", dialog.accept))
         dialog.exec()
 
-    def settings(self):
+    @staticmethod
+    def hermes_field_values(fields):
+        return {key: widget.value() if isinstance(widget, QSpinBox) else widget.text().strip()
+                for key, widget in fields.items()}
+
+    def test_hermes_cli(self, fields, output, trigger, dialog_state):
+        from .adapters.hermes import HermesAdapter
+        values = self.hermes_field_values(fields)
+        trigger.setEnabled(False)
+        output.setText('檢查中…（只讀取 CLI help，不傳送訊息）')
+        def probe():
+            from .security import redact_text
+            try:
+                candidate = HermesAdapter(lambda *args, **kwargs: None, harness='hermes', **values)
+                result = candidate.probe()
+                return result['detail'] + ('\n執行檔：' + result['executable'] if result.get('executable') else '')
+            except Exception as exc:
+                return redact_text(str(exc))
+        def completed(message):
+            if dialog_state['closed']: return
+            output.setText(message)
+            trigger.setEnabled(True)
+        self.run(probe, completed)
+
+    def settings(self, agent=None):
+        from .adapters.hermes import hermes_settings
+        requested_agent = agent
         dialog = QDialog(self)
         dialog.setWindowTitle("設定")
         dialog.resize(800, 660)
+        dialog_state = {'closed': False}
+        dialog.finished.connect(lambda _: dialog_state.update(closed=True))
         layout = QVBoxLayout(dialog)
         tabs = QTabWidget()
         layout.addWidget(tabs)
@@ -3782,17 +4206,20 @@ class MainWindow(QMainWindow):
         agent_layout.addWidget(label("後端設定於下次連線生效。模型與思考強度選項來自實際連線的後端。", True))
         fields = {}
         local_fields = {}
-        for agent in AGENTS:
+        local_pages = []
+        for agent in self.agents:
             form = QFormLayout()
-            form.addRow(label(ROLE_NAMES[agent] + " · " + ROLE_LABELS[agent]))
+            form.addRow(label(self.role_names[agent] + " · " + ROLE_LABELS[self.core.provider(agent)]))
             diag = self.core.diagnostics(agent)
             saved = self.core.get_setting("agent." + agent, {}) or {}
+            local_settings = hermes_settings(saved) if self.core.provider(agent) == 'local' else None
             enabled = QCheckBox("啟用")
             enabled.setObjectName(f"default_enabled_{agent}")
             enabled.setChecked(saved.get("enabled", True))
-            executable = QLineEdit(saved.get("executable", "" if agent == 'local' else diag.get("executable", "")))
-            if agent == 'local':
-                executable.setPlaceholderText('留空時依 Harness 自動偵測官方 CLI')
+            executable = QLineEdit(local_settings.get('executable', '') if local_settings is not None
+                                   else saved.get("executable", diag.get("executable", "")))
+            if self.core.provider(agent) == 'local':
+                executable.setPlaceholderText('留空時自動偵測 Hermes CLI')
             executable.setObjectName(f"executable_{agent}")
             timeout = QSpinBox()
             timeout.setObjectName(f"timeout_{agent}")
@@ -3824,38 +4251,52 @@ class MainWindow(QMainWindow):
                 effort.setCurrentIndex(max(0, effort.findData(saved.get("default_effort"))))
             model.currentIndexChanged.connect(set_efforts)
             set_efforts()
-            project.addItem("目前工作區專案", None)
+            project.addItem("沿用此 Agent 選擇的 Project", None)
             for item in self.core.list_projects():
                 project.addItem(project_label(item, self.core.list_projects()), identifier(item))
             project.setCurrentIndex(max(0, project.findData(saved.get("default_project"))))
             form.addRow("", enabled)
             form.addRow("後端", label(diag.get("backend", "Unknown"), True))
             form.addRow("執行檔", executable)
-            if agent == 'local':
-                harness = QComboBox()
-                harness.setObjectName('local_harness')
-                harness.addItem('Codex', 'codex')
-                harness.addItem('Claude Code', 'claude')
-                harness.setCurrentIndex(max(0, harness.findData(saved.get('harness', 'codex'))))
-                base_url = QLineEdit(saved.get('base_url', ''))
-                base_url.setObjectName('local_base_url')
-                local_model = QLineEdit(saved.get('model', ''))
-                local_model.setObjectName('local_model')
-                api_key_env = QLineEdit(saved.get('api_key_env', ''))
-                api_key_env.setObjectName('local_api_key_env')
-                form.addRow('Harness', harness)
-                form.addRow('端點 Base URL', base_url)
-                form.addRow('模型名稱', local_model)
-                form.addRow('API key 環境變數名稱', api_key_env)
-                form.addRow(label('Codex 需要 Responses API；Claude Code 需要 Anthropic Messages API。儲存後請中斷連線再重新連線。', True))
-                local_fields = dict(harness=harness, base_url=base_url, model=local_model, api_key_env=api_key_env)
-            form.addRow("逾時（秒）", timeout)
-            form.addRow("預設模型", model)
-            form.addRow("預設強度", effort)
+            if self.core.provider(agent) == 'local':
+                provider = QLineEdit(local_settings.get('provider', ''))
+                provider.setObjectName('hermes_provider')
+                provider.setProperty('agent_id', agent)
+                provider.setPlaceholderText('留空時沿用 Hermes 設定')
+                local_model = QLineEdit(local_settings.get('model', ''))
+                local_model.setObjectName('hermes_model')
+                local_model.setPlaceholderText('留空時沿用 Hermes 設定')
+                run_budget = QSpinBox()
+                run_budget.setObjectName('hermes_run_budget')
+                run_budget.setRange(1, 86400)
+                run_budget.setValue(int(local_settings.get('run_budget', 600)))
+                max_turns = QSpinBox()
+                max_turns.setObjectName('hermes_max_turns')
+                max_turns.setRange(1, 1000)
+                max_turns.setValue(int(local_settings.get('max_turns', 60)))
+                form.addRow('Provider（選填）', provider)
+                form.addRow('模型名稱（選填）', local_model)
+                form.addRow('執行預算（秒）', run_budget)
+                form.addRow('回合上限', max_turns)
+                form.addRow(label('直接使用 Hermes CLI。Provider 與模型留空時沿用 Hermes 既有設定；API key 由 Hermes 的環境變數管理。Workspace 不修改 Hermes config、不使用 --yolo；工具權限由 Hermes 管理。', True))
+                local_fields[agent] = dict(executable=executable, provider=provider, model=local_model,
+                                           run_budget=run_budget, max_turns=max_turns)
+                probe_result = label('檢查只執行 CLI help，不儲存設定、不建立 session、不呼叫模型。', True)
+                probe_result.setObjectName('hermes_probe_result')
+                probe_button = button('檢查 Hermes CLI', lambda: None, 'hermes_probe')
+                probe_button.setProperty('agent_id', agent)
+                probe_button.clicked.connect(lambda checked=False, values=local_fields[agent], output=probe_result, trigger=probe_button:
+                                             self.test_hermes_cli(values, output, trigger, dialog_state))
+                form.addRow(probe_button)
+                form.addRow(probe_result)
+            if self.core.provider(agent) != 'local':
+                form.addRow("逾時（秒）", timeout)
+                form.addRow("預設模型", model)
+                form.addRow("預設強度", effort)
             form.addRow("預設專案", project)
             form.addRow("串流", label(self.panels[agent].capability_status("supports_streaming"), True))
             form.addRow("原始日誌", label("安全過濾後的稽核紀錄固定啟用", True))
-            if agent == 'local':
+            if self.core.provider(agent) == 'local':
                 local_page = QWidget()
                 local_layout = QVBoxLayout(local_page)
                 local_layout.addLayout(form)
@@ -3863,6 +4304,7 @@ class MainWindow(QMainWindow):
                 local_scroll = QScrollArea()
                 local_scroll.setWidgetResizable(True)
                 local_scroll.setWidget(local_page)
+                local_pages.append((local_scroll, self.role_names[agent], agent))
             else:
                 agent_layout.addLayout(form)
             fields[agent] = (saved, enabled, executable, timeout, model, effort, project)
@@ -3870,11 +4312,14 @@ class MainWindow(QMainWindow):
         agent_scroll.setWidgetResizable(True)
         agent_scroll.setWidget(agent_page)
         tabs.addTab(agent_scroll, "角色與模型")
-        tabs.addTab(local_scroll, "Local LLM")
+        for local_scroll, name, local_agent in local_pages:
+            tabs.addTab(local_scroll, name)
+            if requested_agent == local_agent:
+                tabs.setCurrentWidget(local_scroll)
         for name, text in (
-            ("Projects", "Use the project selector to choose a working directory. Sync sets Claude, Codex and Local LLM cwd; dot receives metadata only. Git integration is read only."),
+            ("Projects", "Each Agent keeps its own Project and Session. Record-page navigation never switches an Agent. Git integration is read only."),
             ("Logs", "Raw JSONL and structured events are retained locally. Safety filtering redacts credentials and excludes hidden reasoning before persistence. Open per-agent logs from each panel."),
-            ("Permissions", "Original backend permission and sandbox settings remain authoritative. Tool approval asks every time by default. Each role's ⋯ menu can loosen this to file edits inside the project, or to everything except destructive and outward-facing commands. Sandbox bypass is not available."),
+            ("Permissions", "各後端原有的權限與 sandbox 設定仍有效。Claude／Codex 可透過 Workspace 回覆工具核准，預設每次詢問；可在角色的 ⋯ 選單調整。Hermes 使用自身工具權限設定，不支援 Workspace 的核准模式；Workspace 不修改 Hermes config，也不使用 --yolo。"),
             ("Advanced", "Automatic orchestration: OFF\nNo agents connect automatically at startup. Unsupported capabilities remain unavailable. Use Diagnostics for executable, backend, session, cwd, last event and last error."),
         ):
             page = QWidget()
@@ -3885,7 +4330,7 @@ class MainWindow(QMainWindow):
         paths = QWidget()
         paths_form = QFormLayout(paths)
         paths_form.addRow("應用程式資料", label(str(getattr(self.core, "data_dir", "Per-user app data")), True))
-        legacy_root = QLineEdit(self.core.get_setting("legacy.root", r"C:\Users\ryant\Desktop\AI-Collab-Monitor"))
+        legacy_root = QLineEdit(self.core.get_setting("legacy.root", LEGACY_MONITOR_ROOT))
         paths_form.addRow("舊版監看根目錄", legacy_root)
         paths_form.addRow(label("Monitor reads the existing four log files incrementally. It does not write, reset or control the original Monitor sessions.", True))
         tabs.addTab(paths, "路徑")
@@ -3919,13 +4364,14 @@ class MainWindow(QMainWindow):
         if dialog.exec() == QDialog.Accepted:
             for agent, (saved, enabled, executable, timeout, model, effort, project) in fields.items():
                 values = dict(saved, enabled=enabled.isChecked(), executable=executable.text().strip(), timeout=timeout.value(), default_project=project.currentData())
-                if agent == 'local':
-                    values.update({key: field.currentData() if key == 'harness' else field.text().strip() for key, field in local_fields.items()})
+                if self.core.provider(agent) == 'local':
+                    values.update(self.hermes_field_values(local_fields[agent]))
+                    values['harness'] = 'hermes'
                 if model.isEnabled():
                     values["default_model"] = model.currentData()
                 if effort.isEnabled():
                     values["default_effort"] = effort.currentData()
-                if agent == 'local':
+                if self.core.provider(agent) == 'local':
                     values['default_model'] = values['model']
                 self.core.set_setting("agent." + agent, values)
                 self.panels[agent].update_controls()
@@ -3948,8 +4394,12 @@ class MainWindow(QMainWindow):
                 event.ignore()
                 return
             # Keep the event loop and store alive until adapter-defined
-            # cancellation and in-flight workers finish. Never kill a tree.
+            # cancellation and in-flight workers finish. Each adapter owns its
+            # cancellation boundary, including Hermes child-tree termination.
             self._close_pending = True
+            if self.orchestrator and self.orchestrator.active:
+                self.orchestrator.stop('正在關閉工作區')
+            self.run_timer.stop()
             self.footer.setText("Waiting for adapter cancellation before closing…")
             started = time.monotonic()
             def ready_to_close():
@@ -3974,5 +4424,9 @@ class MainWindow(QMainWindow):
         self.save_context_state()
         self.core.set_setting("ui.geometry", bytes(self.saveGeometry().toBase64()).decode())
         self.timer.stop()
+        self.sync_timer.stop()
+        self.run_timer.stop()
+        if self.orchestrator and self.orchestrator.active:
+            self.orchestrator.stop('工作區視窗已關閉')
         self._closed = True
         event.accept()

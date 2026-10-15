@@ -157,7 +157,9 @@ class CoreAndUiTests(DesktopSessionFixture):
             window.open_desktop_session(self.record, resume=True)
             window.open_desktop_session(dict(self.record, title="另一個"), resume=True)
             self.assertEqual(1, len(pending), "Only the first open may start")
-            self.assertFalse(window.navigator.isEnabled())
+            self.assertTrue(window.navigator.isEnabled(), 'Other Agents must remain navigable')
+            self.assertFalse(window.panels['claude'].project.isEnabled())
+            self.assertTrue(window.panels['codex'].project.isEnabled())
             window.run = original
             operation, callback, agent, on_error = pending.pop()
             callback(operation())

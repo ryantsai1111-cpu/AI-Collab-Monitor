@@ -113,7 +113,7 @@ class CodexDiscoveryTests(unittest.TestCase):
              patch('acw.ui.MainWindow'), \
              patch('acw.adapters.claude.ClaudeAdapter'), \
              patch('acw.adapters.dot.DotAdapter'), \
-             patch('acw.adapters.local.make_local_adapter'), \
+             patch('acw.adapters.hermes.HermesAdapter'), \
              patch('acw.adapters.codex.CodexAdapter') as adapter, \
              patch('subprocess.Popen') as popen:
             run.main()

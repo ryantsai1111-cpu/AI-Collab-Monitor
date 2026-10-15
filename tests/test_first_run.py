@@ -47,16 +47,17 @@ class FirstRunGuidanceTests(unittest.TestCase):
         self.assertEqual("Disconnected", panel.connection_state)
         self.assertEqual([], self.window.reported_errors)
 
-    def test_codex_connect_without_project_is_unchanged(self):
+    def test_codex_connect_without_project_guides_only_codex_without_connecting(self):
         with patch.object(self.window, "require_project") as guide:
             QTest.mouseClick(self.window.panels["codex"].connect_button, Qt.LeftButton)
-        guide.assert_not_called()
-        self.assertEqual([("connect",)], self.adapters["codex"].calls)
+        guide.assert_called_once()
+        self.assertEqual('codex', guide.call_args.kwargs['agent'])
+        self.assertEqual([], self.adapters["codex"].calls)
 
-    def test_send_without_task_offers_task_creation_and_keeps_draft(self):
+    def test_first_send_creates_own_conversation_without_task_form(self):
         (Path(self.temp.name) / "repo").mkdir()
         project = self.core.create_project("First", Path(self.temp.name) / "repo")
-        self.core.select_project(project["id"], sync=False)
+        self.core.select_agent_project('codex', project['id'])
         self.window.reload_context()
         panel = self.window.panels["codex"]
         self.adapters["codex"].state = "Connected"
@@ -64,10 +65,13 @@ class FirstRunGuidanceTests(unittest.TestCase):
         panel.input.setPlainText("keep me")
         with patch.object(self.window, "show_sessions") as guide:
             panel.send()
-        guide.assert_called_once_with("codex")
-        self.assertTrue(any("選擇或建立任務" in str(error) for error in self.window.reported_errors))
-        self.assertEqual("keep me", panel.input.toPlainText())
-        self.assertNotIn("send", [call[0] for call in self.adapters["codex"].calls])
+        guide.assert_not_called()
+        self.assertEqual([], self.window.reported_errors)
+        self.assertEqual('', panel.input.toPlainText())
+        self.assertEqual(['create_session', 'send'], [call[0] for call in self.adapters['codex'].calls])
+        self.assertIsNotNone(self.core.agent_task('codex'))
+        self.assertIsNone(self.core.agent_task('claude'))
+        self.assertIsNone(self.core.current_task)
 
 
 if __name__ == "__main__":
