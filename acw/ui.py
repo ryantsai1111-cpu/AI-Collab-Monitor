@@ -18,13 +18,13 @@ from . import approvals
 from .orchestrator import Orchestrator
 from .monitor import AgentRail, MonitorDashboard, collect_snapshot
 from .theme import (CODE_BLOCK_BG, CODE_INLINE_BG, CODE_INLINE_FG, EVENT_COLOR, HEADING_COLOR, MUTED_COLOR,
-                    STATE_COLORS, STATE_IDLE, SPACE, build_style, console_palette, desktop_palette, metal_palette)
+                    STATE_COLORS, STATE_IDLE, SPACE, build_style, console_palette, desktop_palette, desktop_state_color, metal_palette)
 
 from PySide6.QtCore import Qt, Signal, QObject, QRunnable, QThreadPool, QTimer, QUrl, QByteArray
 from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont, QKeySequence, QPixmap, QTextCharFormat,
                            QTextCursor, QTextDocument, QTextFormat)
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
+    QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
     QFormLayout, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
     QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
     QScrollArea, QSizePolicy, QSpinBox, QSplitter, QStackedWidget, QTabWidget,
@@ -51,6 +51,15 @@ BUTTON_LABELS = {
     "Select G8毛…": "選擇 G8毛…", "Copy": "複製", "Close": "關閉", "Deny": "拒絕", "Approve…": "核准…",
     "Open Diff / Tests / Artifacts…": "檢視差異／測試／附件…", "Open full timeline": "完整時間線",
 }
+
+
+def _normalize_dir(path):
+    return os.path.normcase(os.path.normpath(str(Path(path).resolve())))
+
+
+def _same_dir(a, b):
+    """Compare directory spellings using the host filesystem's path semantics."""
+    return _normalize_dir(a) == _normalize_dir(b)
 
 
 def plain(value: Any) -> str:
@@ -1094,8 +1103,7 @@ class AgentPanel(QFrame):
         self.state.setText(({'Connected':'通道已連接','Busy':'正在傳輸','Connecting':'正在連接'}.get(state)
                             if self.agent == 'dot' else None) or STATE_LABELS.get(state, "狀態待確認（" + state + "）"))
         if self.agent == 'dot': self.state.setToolTip('這是 Workspace 訊息通道狀態，不代表 dot 所有工作的執行狀態')
-        color = STATE_COLORS.get(state, STATE_IDLE)
-        self.state.setStyleSheet(f"color: {MUTED_COLOR if self.window.theme_name == 'desktop' else color};")
+        self.update_state_style()
         if state in ("Disconnected", "Offline"):
             self.approval_rules.clear()
             if self._dot_follow is not None:
@@ -1112,6 +1120,11 @@ class AgentPanel(QFrame):
             if error:
                 self.notice.setText(error)
                 self.notice.setToolTip(error)
+
+    def update_state_style(self):
+        color = (desktop_state_color(self.connection_state, bool(self.pending_approval_events))
+                 if self.window.theme_name == 'desktop' else STATE_COLORS.get(self.connection_state, STATE_IDLE))
+        self.state.setStyleSheet(f'color: {color};')
 
     def update_controls(self):
         operating = bool(getattr(self.window, '_agent_operations', {}).get(self.agent))
@@ -1970,8 +1983,9 @@ class NativeSessionDialog(QDialog):
 class SessionNavigator(QWidget):
     """Sidebar list of locally saved Claude desktop and Codex conversations, grouped by repository.
 
-    Nothing is read until this page is first shown. Rename and archive are kept in this
-    workspace's own settings; the source apps' files are never written."""
+    Showing the sidebar or selecting an agent loads uncached provider metadata in the
+    background when the sidebar is visible. Hidden selections defer loading until shown.
+    Rename and archive stay in workspace settings; source apps' files are never written."""
     SOURCES = (("Claude", "claude"), ("Codex", "codex"))
 
     def __init__(self, window):
@@ -2017,7 +2031,7 @@ class SessionNavigator(QWidget):
         self.status.setObjectName("nav_status")
         layout.addWidget(self.status)
         actions = QHBoxLayout()
-        actions.setSpacing((SPACE['xs'] + SPACE['sm']) // 2)
+        actions.setSpacing(SPACE['sm'])
         self.open_button = button("接續對話", lambda: self.open_selected(True), "primary")
         self.open_button.setToolTip("切換到該專案、載入紀錄並接續同一個對話（也可按兩下）")
         actions.addWidget(self.open_button, 1)
@@ -2124,10 +2138,10 @@ class SessionNavigator(QWidget):
         current = (self.window.core.agent_task(self._agent) or {}).get(self._agent + "_session")
         directory = (self.window.core.agent_project(self._agent) or {}).get('repo_path')
         self.nav_all_projects.setEnabled(bool(directory))
-        normalize = lambda path: os.path.normcase(os.path.normpath(str(Path(path).resolve())))
         rows = self.sessions[agent] or []
         if directory and not self.nav_all_projects.isChecked():
-            rows = [row for row in rows if normalize(row['cwd']) == normalize(directory)]
+            bound_directory = _normalize_dir(directory)
+            rows = [row for row in rows if _normalize_dir(row['cwd']) == bound_directory]
         self.tree.clear()
         shown, focus = 0, None
         for group in group_by_project(rows):
@@ -2321,8 +2335,8 @@ class MainWindow(QMainWindow):
         root = QWidget()
         root.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
         layout = QVBoxLayout(root)
-        layout.setContentsMargins(SPACE['md'], (SPACE['sm'] + SPACE['md']) // 2, SPACE['md'], SPACE['sm'])
-        layout.setSpacing((SPACE['sm'] + SPACE['md']) // 2)
+        layout.setContentsMargins(SPACE['md'], SPACE['md'], SPACE['md'], SPACE['sm'])
+        layout.setSpacing(SPACE['md'])
         heading = QHBoxLayout()
         self.sidebar_toggle = button("☰", self.toggle_sidebar, "sidebar_toggle")
         self.sidebar_toggle.setAccessibleName("切換專案與對話側欄")
@@ -2353,14 +2367,25 @@ class MainWindow(QMainWindow):
         heading.addWidget(self.layout_mode)
         self.auto_button = button("自動協作…", self.start_auto_collab, "auto_collab")
         self.auto_button.setToolTip("選擇任意兩個 Agent 派工與驗收，同一 provider 也可以")
-        self.workspace_views = QTabBar()
+        self.workspace_views = QWidget()
         self.workspace_views.setObjectName('workspace_views')
         self.workspace_views.setAccessibleName('工作台與協作總覽')
-        self.workspace_views.setDrawBase(False)
-        self.workspace_views.addTab('工作台')
-        self.workspace_views.addTab('協作總覽')
-        self.workspace_views.currentChanged.connect(self.select_workspace_view)
-        self.workspace_views.tabBarClicked.connect(self.select_workspace_view)
+        view_row = QHBoxLayout(self.workspace_views)
+        view_row.setContentsMargins(0, 0, 0, 0)
+        view_row.setSpacing(SPACE['xs'])
+        self.workspace_view_group = QButtonGroup(self)
+        self.workspace_view_buttons = []
+        for index, title in enumerate(('工作台', '協作總覽')):
+            control = QToolButton()
+            control.setText(title)
+            control.setCheckable(True)
+            control.setChecked(index == 0)
+            control.setProperty('workspace_view', True)
+            control.setAccessibleName(title)
+            self.workspace_view_group.addButton(control, index)
+            self.workspace_view_buttons.append(control)
+            view_row.addWidget(control)
+        self.workspace_view_group.idClicked.connect(self.select_workspace_view)
         self.monitor_button = button("協作總覽", self.toggle_monitor, "monitor_toggle")
         self.monitor_button.hide()
         self.monitor_button.setToolTip("協作總覽：進度、規則與待核准項目")
@@ -2386,7 +2411,7 @@ class MainWindow(QMainWindow):
         self.run_bar = QFrame()
         self.run_bar.setObjectName("run_bar")
         run_row = QHBoxLayout(self.run_bar)
-        run_row.setContentsMargins(SPACE['md'], (SPACE['xs'] + SPACE['sm']) // 2, SPACE['sm'], (SPACE['xs'] + SPACE['sm']) // 2)
+        run_row.setContentsMargins(SPACE['md'], SPACE['sm'], SPACE['sm'], SPACE['sm'])
         self.run_status = label("")
         self.run_status.setObjectName("run_status")
         self.run_status.setWordWrap(False)
@@ -2410,8 +2435,10 @@ class MainWindow(QMainWindow):
         side.setContentsMargins(SPACE['md'], SPACE['md'], SPACE['md'], SPACE['md'])
         side.setSpacing(SPACE['sm'])
         self.sidebar_agent_title = label(self.role_names[self._preferred_agent])
-        self.sidebar_agent_title.setObjectName('console_section')
+        self.sidebar_agent_title.setObjectName('sidebar_agent_title')
         side.addWidget(self.sidebar_agent_title)
+        self.sidebar_agent_meta = label('', True)
+        side.addWidget(self.sidebar_agent_meta)
         side.addWidget(label('目前綁定', True))
         self.records_dialog = QDialog(self)
         self.records_dialog.setWindowTitle('工作紀錄')
@@ -2537,7 +2564,7 @@ class MainWindow(QMainWindow):
         self.chat_workspace = QWidget()
         chat_layout = QHBoxLayout(self.chat_workspace)
         chat_layout.setContentsMargins(0, 0, 0, 0)
-        chat_layout.setSpacing((SPACE['sm'] + SPACE['md']) // 2)
+        chat_layout.setSpacing(SPACE['md'])
         chat_layout.addWidget(self.splitter, 1)
         self.agent_rail = AgentRail()
         self.agent_rail.box.insertWidget(self.agent_rail.box.indexOf(self.agent_rail.add_button) + 1, self.unfocus_button)
@@ -2573,7 +2600,7 @@ class MainWindow(QMainWindow):
         for title in ("Tools", "Commands", "Changes", "Tests", "Timeline", "Handoffs"):
             page = QWidget()
             page_layout = QVBoxLayout(page)
-            page_layout.setContentsMargins(0, (SPACE['xs'] + SPACE['sm']) // 2, 0, 0)
+            page_layout.setContentsMargins(0, SPACE['sm'], 0, 0)
             tree = QTreeWidget()
             tree.setObjectName("details_" + title.lower())
             tree.setHeaderLabels(["來源", "事件／狀態", "摘要"])
@@ -2674,8 +2701,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'monitor_dashboard'):
             self.monitor_dashboard.apply_theme(self.theme_name)
             for panel in self.panels.values():
-                color = MUTED_COLOR if self.theme_name == 'desktop' else STATE_COLORS.get(panel.connection_state, STATE_IDLE)
-                panel.state.setStyleSheet(f'color: {color};')
+                panel.update_state_style()
             self.navigator.fill()
             self.refresh_monitor()
 
@@ -2766,7 +2792,8 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'sidebar_agent_title'):
             agent = self._preferred_agent
             state = self.panels[agent].state.text() if hasattr(self, 'panels') else ''
-            self.sidebar_agent_title.setText(self.role_names[agent] + ' · ' + ROLE_LABELS[self.core.provider(agent)] + '\n' + state)
+            self.sidebar_agent_title.setText(self.role_names[agent])
+            self.sidebar_agent_meta.setText(ROLE_LABELS[self.core.provider(agent)] + '\n' + state)
         project, task = self.view_project() or {}, self.view_task() or {}
         prefix = '本機紀錄' if hasattr(self, 'records_dialog') and self.records_dialog.isVisible() else self.role_names[self._preferred_agent]
         sid = (task.get(self._preferred_agent + '_session') or '') if prefix != '本機紀錄' else ''
@@ -2841,6 +2868,7 @@ class MainWindow(QMainWindow):
         for index, agent in enumerate(self.agents):
             panel = self.panels[agent]
             pending = len(panel.pending_approval_events)
+            panel.update_state_style()
             self.role_tabs.setTabText(index, self.role_names[agent] + " · " + ("待核准" if pending else ROLE_LABELS[self.core.provider(agent)]))
             self.role_tabs.setTabToolTip(index, f"{self.role_names[agent]} · {ROLE_LABELS[self.core.provider(agent)]} · {panel.state.text()}")
 
@@ -3717,6 +3745,8 @@ class MainWindow(QMainWindow):
         self.update_workspace_layout()
 
     def select_workspace_view(self, index):
+        if index not in (0, 1):
+            return
         if index == 1 and self.mode.currentData() == 'Monitor' and self.stack.currentIndex() == 0:
             self.toggle_monitor()
         else:
@@ -3729,9 +3759,10 @@ class MainWindow(QMainWindow):
                 if mid.startswith("legacy-"):
                     card.setVisible(mode == "Monitor")
         self.stack.setCurrentIndex(1 if mode == "Timeline" else 2 if mode == "History" else 3 if mode == 'Monitor' else 0)
-        self.workspace_views.blockSignals(True)
-        self.workspace_views.setCurrentIndex(1 if mode == 'Monitor' else 0)
-        self.workspace_views.blockSignals(False)
+        self.workspace_view_group.setExclusive(False)
+        for control, value in zip(self.workspace_view_buttons, ('Workspace', 'Monitor')):
+            control.setChecked(mode == value)
+        self.workspace_view_group.setExclusive(True)
         self.navigator.selection_changed()
         if mode == "Timeline":
             self.refresh_timeline()
