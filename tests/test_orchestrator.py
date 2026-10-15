@@ -423,6 +423,7 @@ class WindowRunTests(unittest.TestCase):
         for agent in ("claude", "dot", "codex"):
             self.adapters[agent].core = self.core
             self.adapters[agent].state = "Connected"
+        self.core.desktop_sessions = lambda agent: []
         self.window = OfflineWindow(self.core)
 
     def tearDown(self):

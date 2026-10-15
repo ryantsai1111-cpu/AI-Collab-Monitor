@@ -25,7 +25,8 @@ class WorkbenchTests(unittest.TestCase):
 
     def test_workbench_theme_and_focus_rail_are_visible_without_backend_calls(self):
         self.assertIn('CONTROL ROOM', self.window.console_mark.text())
-        self.assertIn('#080d0c', self.window.styleSheet())
+        self.assertIn('#d97757', self.window.styleSheet())
+        self.assertNotIn('#a3e635', self.window.styleSheet())
         self.assertTrue(self.window.agent_rail.isVisible())
         self.assertEqual('Workspace', self.window.mode.currentData())
         self.assertEqual('Focus', self.window.layout_mode.currentData())
@@ -111,22 +112,23 @@ class WorkbenchTests(unittest.TestCase):
         self.fixture.assert_no_adapter_actions()
 
     def test_agent_sidebar_has_one_project_session_scope_and_records_are_separate(self):
-        self.assertEqual(['對話', 'Agent', '紀錄'], [self.window.sidebar_pages.tabText(i) for i in range(3)])
+        self.assertFalse(hasattr(self.window, 'sidebar_pages'))
+        self.assertTrue(self.window.sidebar.isAncestorOf(self.window.navigator))
         self.assertFalse(self.window.project_combo.isVisible())
         self.assertFalse(self.window.task_combo.isVisible())
         self.assertFalse(self.window.panels['claude'].task.isVisible())
-        self.window.sidebar_pages.setCurrentIndex(2)
+        self.window.show_records()
         self.fixture.settle()
         self.assertTrue(self.window.project_combo.isVisible())
         self.fixture.assert_no_adapter_actions()
 
     def test_daily_sidebar_shows_only_selected_agent_and_primary_session_controls(self):
-        self.window.sidebar_pages.setCurrentIndex(1)
+        self.window.records_dialog.close()
         for agent in ('claude', 'codex', 'local'):
             self.window.role_tabs.setCurrentIndex(self.window.agents.index(agent))
             self.fixture.settle()
             panel = self.window.panels[agent]
-            self.assertEqual(self.window.role_names[agent], self.window.sidebar_agent_title.text())
+            self.assertTrue(self.window.sidebar_agent_title.text().startswith(self.window.role_names[agent] + ' · '))
             for control in (panel.project, panel.session_search, panel.session, panel.new_button,
                             panel.resume_button, panel.session_more):
                 self.assertTrue(control.isVisible(), control.objectName())
@@ -274,13 +276,13 @@ class WorkbenchTests(unittest.TestCase):
         self.window.focus_role('codex')
         self.assertEqual(self.fixture.task_c['id'], self.window.view_task()['id'])
         self.assertIn('Codex · Beta', self.window.context_title.text())
-        self.window.sidebar_pages.setCurrentIndex(2)
+        self.window.show_records()
         self.assertEqual(self.fixture.task_a['id'], self.window.view_task()['id'])
-        self.window.sidebar_pages.setCurrentIndex(1)
+        self.window.records_dialog.close()
         self.assertEqual(self.fixture.task_c['id'], self.window.view_task()['id'])
-        self.window.sidebar_pages.setCurrentIndex(2)
+        self.window.show_records()
         self.window.open_monitor_role('codex')
-        self.assertEqual(1, self.window.sidebar_pages.currentIndex())
+        self.assertFalse(self.window.records_dialog.isVisible())
         self.assertEqual(self.fixture.task_c['id'], self.window.view_task()['id'])
 
     def test_artifact_import_and_file_open_use_explicit_conversation_project(self):
