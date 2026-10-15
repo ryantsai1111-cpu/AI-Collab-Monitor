@@ -3,7 +3,7 @@
 > 對象：接手的 AI agent（Codex）。**本文件自足，不需先前對話脈絡。**
 > 先讀 `docs/ARCHITECTURE.md`、`docs/UI-REFRESH.md` §介面改動、`docs/USER_GUIDE.md` §Project、Session 與獨立 Agent 了解現況
 > （技術棧：Python 3.12 + PySide6 桌面程式，`python run.py` 啟動，離線測試 `python scripts/run_tests.py`）。
-> 本任務在新 branch `codex/ui-agent-centric`（從 `main` 切）進行，**完成並通過驗收前不得 push main**（合併由審查者 Claude／Ryan 決定）。
+> 本任務在新 branch `codex/ui-agent-centric`（從 `ui/desktop-workspace-100pct-20261006` 切，它等於 `main` 加這份規格）進行，**完成並通過驗收前不得 push main**（合併由審查者 Claude／Ryan 決定）。
 > **這個 checkout 正被使用者開著的 GUI 使用。請用 `git worktree add ../AI-Collab-Workspace-ui codex/ui-agent-centric` 在另一個目錄工作，不要在本目錄改檔。**
 
 ---
