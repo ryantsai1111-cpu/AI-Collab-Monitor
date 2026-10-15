@@ -29,3 +29,6 @@ node_modules/
 
 # Machine-specific Local LLM endpoint
 config/local-llm.json
+
+# AI-Collab-Monitor runtime session state (leases, stop signals)
+AI-Collab-Monitor/.monitor/
