@@ -109,7 +109,6 @@ QTreeWidget, QTableWidget { color: #e9eef3; background: #0f1215; border: 1px sol
 QTreeWidget::item { padding: 5px; }
 QTableCornerButton::section { background: #393e45; border: none; }
 QSplitter::handle { background: transparent; width: 8px; }
-QTabBar#sidebar_pages::tab, QTabBar#nav_source::tab { padding: 6px 10px; }
 QTreeWidget#nav_tree { border-radius: 6px; padding: 4px; outline: 0; }
 QTreeWidget#nav_tree::item { padding: 6px 4px; border-radius: 4px; }
 QTreeWidget#nav_tree::item:hover { background: #1c2126; }
@@ -203,7 +202,6 @@ QTreeWidget, QTableWidget { color: #ececea; background: #262624; border: 1px sol
 QTreeWidget::item { padding: 5px; }
 QTableCornerButton::section { background: #262624; border: none; }
 QSplitter::handle { background: transparent; width: 8px; }
-QTabBar#sidebar_pages::tab, QTabBar#nav_source::tab { padding: 5px 10px; }
 QTreeWidget#nav_tree { background: transparent; border: none; padding: 0; outline: 0; }
 QTreeWidget#nav_tree::item { padding: 6px 6px; border-radius: @RADIUS@px; }
 QTreeWidget#nav_tree::item:hover { background: #2b2b29; }
@@ -295,7 +293,6 @@ QTabBar { background: transparent; }
 QTabBar::tab { color: #91a99b; background: #101a14; border: 1px solid #293e30; border-radius: 3px; padding: 7px 11px; margin-right: 3px; }
 QTabBar::tab:hover { color: #d9f99d; border-color: #729747; }
 QTabBar::tab:selected { color: #d9f99d; background: #22371f; border-color: #82b445; font-weight: 600; }
-QTabBar#sidebar_pages::tab, QTabBar#nav_source::tab { padding: 6px 9px; }
 QTreeWidget, QTableWidget { color: #dce8e1; background: #0d1512; border: 1px solid #2b4036; border-radius: 4px; alternate-background-color: #142019; selection-background-color: #2c4425; gridline-color: #2b4036; }
 QTreeWidget::item { padding: 6px; }
 QTreeWidget#nav_tree { background: transparent; border: none; outline: 0; }

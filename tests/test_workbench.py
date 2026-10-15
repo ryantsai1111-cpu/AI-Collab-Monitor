@@ -112,7 +112,7 @@ class WorkbenchTests(unittest.TestCase):
         self.fixture.assert_no_adapter_actions()
 
     def test_agent_sidebar_has_one_project_session_scope_and_records_are_separate(self):
-        self.assertFalse(hasattr(self.window, 'sidebar_pages'))
+        self.assertIs(self.window.sidebar, self.window.navigator.parentWidget())
         self.assertTrue(self.window.sidebar.isAncestorOf(self.window.navigator))
         self.assertFalse(self.window.project_combo.isVisible())
         self.assertFalse(self.window.task_combo.isVisible())

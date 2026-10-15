@@ -172,6 +172,7 @@ class RootConversationUITests(RootConversationTests):
     @classmethod
     def setUpClass(cls):cls.app=QApplication.instance() or QApplication([])
     def window(self):
+        self.core.desktop_sessions = lambda agent: []
         w=MainWindow(self.core);self.addCleanup(w.close);return w
     def test_null_native_message_has_truthful_display_only_placeholder(self):
         self.runner.items=[{'id':'attachment-only','content':{'text':None}}]

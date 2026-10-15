@@ -53,6 +53,15 @@ BUTTON_LABELS = {
 }
 
 
+def _normalize_dir(path):
+    return os.path.normcase(os.path.normpath(str(Path(path).resolve())))
+
+
+def _same_dir(a, b):
+    """Compare directory spellings using the host filesystem's path semantics."""
+    return _normalize_dir(a) == _normalize_dir(b)
+
+
 def plain(value: Any) -> str:
     return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, indent=2, default=str)
 
@@ -1970,8 +1979,9 @@ class NativeSessionDialog(QDialog):
 class SessionNavigator(QWidget):
     """Sidebar list of locally saved Claude desktop and Codex conversations, grouped by repository.
 
-    Nothing is read until this page is first shown. Rename and archive are kept in this
-    workspace's own settings; the source apps' files are never written."""
+    Showing the sidebar or selecting an agent loads uncached provider metadata in the
+    background when the sidebar is visible. Hidden selections defer loading until shown.
+    Rename and archive stay in workspace settings; source apps' files are never written."""
     SOURCES = (("Claude", "claude"), ("Codex", "codex"))
 
     def __init__(self, window):
@@ -2124,10 +2134,10 @@ class SessionNavigator(QWidget):
         current = (self.window.core.agent_task(self._agent) or {}).get(self._agent + "_session")
         directory = (self.window.core.agent_project(self._agent) or {}).get('repo_path')
         self.nav_all_projects.setEnabled(bool(directory))
-        normalize = lambda path: os.path.normcase(os.path.normpath(str(Path(path).resolve())))
         rows = self.sessions[agent] or []
         if directory and not self.nav_all_projects.isChecked():
-            rows = [row for row in rows if normalize(row['cwd']) == normalize(directory)]
+            bound_directory = _normalize_dir(directory)
+            rows = [row for row in rows if _normalize_dir(row['cwd']) == bound_directory]
         self.tree.clear()
         shown, focus = 0, None
         for group in group_by_project(rows):

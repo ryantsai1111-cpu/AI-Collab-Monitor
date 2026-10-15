@@ -101,6 +101,7 @@ class WindowTests(unittest.TestCase):
         project = self.core.create_project("P", self.repo)
         self.core.select_project(project["id"], sync=False)
         self.core.create_task("t")
+        self.core.desktop_sessions = lambda agent: []
         self.window = OfflineWindow(self.core)
         self.adapters["claude"].state = "Connected"
         self.adapters["claude"].cwd = str(self.repo)
