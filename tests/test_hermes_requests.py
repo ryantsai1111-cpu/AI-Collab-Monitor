@@ -127,6 +127,25 @@ class RequestDispatcherTests(unittest.TestCase):
         self.core.poll_requests()
         self.assertIsNone(self.core.requests.active())
 
+    def test_missing_request_limits_use_playbook_defaults_and_keep_legacy_timeout(self):
+        from acw import playbooks
+        playbooks.save(self.core, 'local', {'limits': {'run_budget': 1234, 'max_turns': 42, 'timeout_seconds': 1}})
+        self.request(timeout_seconds=1)
+        path = self.requests / 'r1.json'
+        body = json.loads(path.read_text(encoding='utf-8'))
+        body.pop('run_budget')
+        body.pop('max_turns')
+        path.write_text(json.dumps(body), encoding='utf-8')
+        self.core.poll_requests()
+        self.assertEqual((1234, 42), self.adapter.limits_at_send)
+        self.now[0] += 1234 + 120
+        self.core.poll_requests()
+        self.assertIsNone(self.result(), 'Local ignores timeout_seconds and keeps budget + grace')
+        self.now[0] += 1
+        self.core.poll_requests()
+        self.assertEqual('interrupted', self.result()['status'])
+        self.assertEqual((600, 60), (self.adapter.settings['run_budget'], self.adapter.settings['max_turns']))
+
     # -- rejections
     def test_invalid_label_is_rejected(self):
         for label in ('bad label', 'x' * 65, 'a.result'):

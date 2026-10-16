@@ -63,10 +63,16 @@ def timeline(root, label, actor, event, message):
         pass
 
 
+def worktree_path(value):
+    if os.name == 'nt' and re.match(r'^/[a-zA-Z]/', value):
+        value = value[1].upper() + ':/' + value[3:]
+    return Path(value)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--agent', required=True)
-    parser.add_argument('--worktree', type=Path, required=True)
+    parser.add_argument('--worktree', type=worktree_path, required=True)
     parser.add_argument('--label', required=True)
     parser.add_argument('--spec')
     parser.add_argument('--briefs')
@@ -83,6 +89,10 @@ def main(argv=None):
         parser.error('Invalid label')
     if args.agent not in ('local', 'codex') and not re.fullmatch(r'agent-[0-9a-f]{32}', args.agent):
         parser.error('agent must be local, codex or an instance id')
+    if args.agent == 'codex' and not args.spec:
+        parser.error('--agent codex requires --spec')
+    if args.agent == 'local' and not args.briefs:
+        parser.error('--agent local requires --briefs')
     if not args.worktree.is_absolute():
         parser.error('worktree must be absolute')
     if any(value is not None and value <= 0 for value in (args.timeout, args.run_budget, args.max_turns)):
@@ -109,8 +119,8 @@ def main(argv=None):
     path = directory / (args.label + '.json')
     result_path = directory / (args.label + '.result.json')
     if path.exists():
-        print('workspace: request label is already in use', flush=True)
-        return 3
+        print('workspace: request label is already in use; choose another --label', flush=True)
+        return 2
     result_path.unlink(missing_ok=True)
     temporary = None
     outcome = 'exit=1 interrupted mode=workspace'

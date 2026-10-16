@@ -53,7 +53,7 @@ Workspace 保存固定 `hermes-<UUID>` 對話 ID；真實 Hermes ID 位於原有
 
 Codex 核准留在對應面板，由使用者操作，dispatcher 不代為核准。等待至少一筆 approval 時暫停有效執行計時；每個 request_id 只寫一次 `APPROVAL_NEEDED`，收到回應寫 `APPROVAL_RESOLVED`。全部解決後繼續計時。Codex 投影寫 `codex.log`，timeline actor 為 `CODEX`。Hermes 仍寫 `hermes.log`／`HERMES`。
 
-相容決策（2026-10-16 Ryan 確認）：未提供 timeout_seconds 的舊 Hermes 請求保留 `run_budget + 120` 秒逾時，不改成 7200 秒；顯式 timeout_seconds 可覆寫。舊 run_budget／max_turns 的設定、PROGRESS.md 與 dirty 守門不變；沒有 agent 欄位仍派給 local。
+相容決策（2026-10-16 Ryan 確認）：未提供 timeout_seconds 的舊 Hermes 請求保留 `run_budget + 120` 秒逾時，不改成 7200 秒；REWORK-01 明確將 timeout_seconds 限於 Codex；Hermes 一律採 run_budget + 120 秒，不採用該欄位。Hermes 請求若未提供 run_budget／max_turns，改以該 instance 的 playbook limits 補入；請求自帶值優先，執行結束仍恢復 adapter 原設定。PROGRESS.md 與 dirty 守門不變；沒有 agent 欄位仍派給 local。
 
 通用 stdlib client（只寫請求，不開另一個 Core／資料庫）：
 
@@ -62,9 +62,13 @@ python scripts/dispatch_request.py --agent codex --worktree C:/projects/example 
 python scripts/dispatch_request.py --agent local --worktree C:/projects/example --label step-a1 --briefs docs/briefs/x --prompt-file C:/tmp/prompt.txt --run-budget 600 --max-turns 60
 ```
 
-可選 `--timeout`、`--allow-dirty`。`--data-dir` 缺省採 ACW_DATA_DIR，否則是 `%LOCALAPPDATA%/AI-Collaboration-Workspace/data`。動態 instance 用 `--agent agent-<id>`；Codex instance 帶 `--spec`，Hermes instance 帶 `--briefs`。未給 prompt-file 時，Codex 提示會要求依 spec 執行、開 PR、不 push main；Hermes 沿用固定啟動句。
+可選 `--timeout`（僅 Codex 生效）、`--allow-dirty`。內建 Codex 必須帶 `--spec`，內建 Hermes 必須帶 `--briefs`；參數缺失與 label 已被占用都 exit 2，後者請改用另一個 label。Windows 接受 `/c/...` 並轉為 `C:\...`。`--data-dir` 缺省採 ACW_DATA_DIR，否則是 `%LOCALAPPDATA%/AI-Collaboration-Workspace/data`。動態 instance 用 `--agent agent-<id>`；Codex instance 帶 `--spec`，Hermes instance 帶 `--briefs`。未給 prompt-file 時，Codex 提示會要求依 spec 執行、開 PR、不 push main；Hermes 沿用固定啟動句。
 
 Client 要求心跳 15 秒內且 pid 活著；無回應印 `workspace: dispatcher not responding` 並 exit 4，不回退直接執行。等待結果時每秒檢查，心跳超過 30 秒即撤回請求，記錄 `RUN_ENDED ... dispatcher-lost` 並 exit 1；Ctrl-C／TERM 也撤回請求，GUI 已接受的工作由 GUI 自己處理。完成印一行結果 JSON 與 codex_exit／hermes_exit，complete exit 0，其餘 exit 1；rejected 的 REFUSAL_CODES（含 no-spec）exit 3。RUN_STARTED／RUN_ENDED 由 client 寫，approval 與執行內容由 GUI 投影。
+
+已知限制：Codex 伺服端自行清除核准時可能不發事件，目前 adapter 也不發 approval_cancelled。若沒有 approval_response，dispatcher 可能仍把該筆視為待核准而暫停逾時計時，直到收到終止事件或關閉／取消工作；本 PR 不修改 adapter 來推測解決狀態。
+
+run.sh 直接路徑目前尚未套用 playbook，由審查者後續接線，不在本 PR 修改範圍。
 
 以下保留 Hermes run.sh 的既有協定；本任務不修改 skill 的接線。
 
@@ -121,4 +125,4 @@ run.sh 等待結果最多 `run_budget + 180` 秒；逾時就撤回請求檔、�
 
 ## 已刪除對話的恢復
 
-Claude／Codex 在恢復前會確認本機 transcript 是否仍存在；若已刪除，協作站記錄 session_missing、清除失效綁定並顯示「此對話的紀錄已不存在（ID 前八碼），請開新對話」，不啟動 resume。歷史仍保留，草稿不丟失；使用者按「新對話並傳送」後才建立新 session 並傳送。新建的 session 不會立刻套用這項恢復檢查。
+Claude／Codex 只在 adapter 尚未持有目標 session、真的需要恢復時檢查本機 transcript。adapter 已持有的 session 直接放行；本次 Core 透過 create_session 建立的最新 session id 也有記憶體內豁免，因為第一則訊息送出前還沒有 transcript。這份豁免不寫入設定，重啟 GUI 後即失效。需要恢復且沒有豁免時，若 transcript 已刪除或從未產生，協作站記錄 session_missing、清除失效綁定並顯示「此對話的紀錄已不存在（ID 前八碼），請開新對話」，不啟動 resume。歷史仍保留，草稿不丟失；使用者按「新對話並傳送」後才建立新 session 並傳送。

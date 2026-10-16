@@ -168,10 +168,11 @@ class PlaybookDialog(QDialog):
     def __init__(self, core, agent, parent=None):
         super().__init__(parent)
         self.core, self.agent = core, agent
+        self._loaded_data, self._loaded_index = None, -1
         self.setWindowTitle('角色腳本')
         self.resize(900, 780)
         layout = QVBoxLayout(self)
-        layout.addWidget(label('角色腳本 · 切換 Agent 前請先儲存。權限欄位記錄角色約定，實際操作仍由後端核准。', True))
+        layout.addWidget(label('角色腳本 · 切換 Agent 時會提示儲存未存修改。權限欄位記錄角色約定，實際操作仍由後端核准。', True))
         split = QSplitter()
         self.agents = QListWidget()
         self.agent_ids = list(core.agent_ids)
@@ -198,6 +199,9 @@ class PlaybookDialog(QDialog):
             field.setRange(1, 2147483647)
             self.limits[key] = field
             form.addRow(title, field)
+        self.limits_note = label('run_budget／max_turns：Hermes 請求未指定時的預設值；timeout_seconds：僅 Codex 生效。', True)
+        self.limits_note.setWordWrap(True)
+        form.addRow(self.limits_note)
         self.permissions = {}
         for key, title in (('commit', '允許 commit'), ('push', '允許 push（仍依任務授權）'), ('outside_card', '允許任務卡範圍外工作')):
             field = QCheckBox(title)
@@ -212,17 +216,34 @@ class PlaybookDialog(QDialog):
         self.feedback.setWordWrap(True)
         layout.addWidget(self.feedback)
         buttons = QHBoxLayout()
-        buttons.addWidget(button('還原預設', self.reset))
+        self.reset_button = button('還原預設', self.reset)
+        buttons.addWidget(self.reset_button)
         buttons.addStretch()
         self.save_button = button('儲存', self.save)
         buttons.addWidget(self.save_button)
         buttons.addWidget(button('關閉', self.accept))
         layout.addLayout(buttons)
+        for control in self.findChildren(QPushButton):
+            control.setAutoDefault(False)
+            control.setDefault(False)
         self.agents.currentRowChanged.connect(self.select_agent)
         self.agents.setCurrentRow(self.agent_ids.index(agent))
 
+    def form_data(self):
+        return dict(role=self.role.text(), **{key: field.toPlainText() for key, field in self.markdown.items()},
+                    limits={key: field.value() for key, field in self.limits.items()},
+                    permissions={key: field.isChecked() for key, field in self.permissions.items()})
+
     def select_agent(self, index):
         if index < 0: return
+        if index != self._loaded_index and self._loaded_data is not None and self.form_data() != self._loaded_data:
+            answer = QMessageBox.question(self, '未儲存的角色腳本', '要先儲存目前 Agent 的修改嗎？',
+                                          QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel, QMessageBox.Cancel)
+            if answer == QMessageBox.Cancel or (answer == QMessageBox.Yes and not self.save()):
+                previous = self.agents.blockSignals(True)
+                self.agents.setCurrentRow(self._loaded_index)
+                self.agents.blockSignals(previous)
+                return
         self.agent = self.agent_ids[index]
         data = playbooks.load(self.core, self.agent)
         self.role.setText(data['role'])
@@ -230,6 +251,7 @@ class PlaybookDialog(QDialog):
         for key, field in self.limits.items(): field.setValue(data['limits'][key])
         for key, field in self.permissions.items(): field.setChecked(data['permissions'][key])
         self.feedback.setText('')
+        self._loaded_data, self._loaded_index = data, index
 
     def refresh_owner(self):
         owner = self.parent()
@@ -238,17 +260,22 @@ class PlaybookDialog(QDialog):
             owner.update_context_title()
 
     def save(self):
-        data = dict(role=self.role.text(), **{key: field.toPlainText() for key, field in self.markdown.items()},
-                    limits={key: field.value() for key, field in self.limits.items()},
-                    permissions={key: field.isChecked() for key, field in self.permissions.items()})
+        data = self.form_data()
         try:
             playbooks.save(self.core, self.agent, data)
+            self._loaded_data = data
             self.refresh_owner()
             self.feedback.setText('已儲存角色腳本與 Markdown。')
+            return True
         except (ValueError, OSError) as exc:
             self.feedback.setText(str(exc))
+            return False
 
     def reset(self):
+        answer = QMessageBox.question(self, '還原角色腳本', '確定要還原預設並覆寫目前 Agent 的角色腳本嗎？',
+                                      QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if answer != QMessageBox.Yes:
+            return False
         try:
             playbooks.reset(self.core, self.agent)
             self.select_agent(self.agents.currentRow())

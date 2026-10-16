@@ -47,6 +47,7 @@ class WorkspaceCore:
         self._operations={}
         self._active_requests={}
         self._session_reservations={}
+        self._fresh_sessions={}
         self._adapter_epochs={}
         self._operation_context=threading.local()
         self._dot_root_lock=threading.Lock()
@@ -196,6 +197,7 @@ class WorkspaceCore:
         return (task.get('metadata') or {}).get('missing_sessions',{}).get(agent)
 
     def _require_available_session(self,agent,session_id,task=None):
+        if self._fresh_sessions.get(agent)==session_id: return
         if self.session_available(agent,session_id): return
         task=task or self.agent_task(agent)
         content=f'此對話的紀錄已不存在（{session_id[:8]}），請開新對話'
@@ -231,8 +233,9 @@ class WorkspaceCore:
             task=self.create_agent_task(agent,'新對話 '+now()[:16].replace('T',' '))
         session_id=task.get(agent+'_session') or ''
         if session_id:
-            self._require_available_session(agent,session_id)
-            if getattr(adapter,'session_id','')!=session_id: self.resume_session(agent,session_id)
+            if getattr(adapter,'session_id','')!=session_id:
+                self._require_available_session(agent,session_id)
+                self.resume_session(agent,session_id)
         elif self.capabilities(agent).get('supports_sessions') and self.capabilities(agent).get('supports_create_session') is not False:
             self.create_session(agent)
         return self.agent_task(agent)
@@ -251,7 +254,8 @@ class WorkspaceCore:
             raise ValueError('此對話的工作目錄與目前 Project 不符')
         task=self.get_task(saved.get('task_id')) if saved.get('task_id') else None
         if task and task['project_id']!=project['id']: raise ValueError('Saved conversation project mismatch')
-        self._require_available_session(agent,session_id,task)
+        if getattr(self._adapter(agent),'session_id','')!=session_id:
+            self._require_available_session(agent,session_id,task)
         if task: self.select_agent_task(agent,task['id'])
         else: self.create_agent_task(agent,saved.get('title') or '已保存的對話')
         return self.resume_session(agent,session_id)
@@ -859,6 +863,7 @@ class WorkspaceCore:
         result=adapter.create_session()
         sid=result.get('id',result.get('session_id','')) if isinstance(result,dict) else result
         if not isinstance(sid,str) or not sid.strip(): raise RuntimeError('Backend did not confirm a new session identifier')
+        self._fresh_sessions[agent]=sid
         self._map_session(agent,sid)
         return result
 
@@ -868,7 +873,8 @@ class WorkspaceCore:
         adapter=self._adapter(agent)
         if not self.capabilities(agent).get('supports_sessions'): raise NotImplementedError(f'{agent}: sessions Unsupported')
         if getattr(adapter,'state','')=='Busy': raise RuntimeError('Wait for the active turn before resuming a session')
-        self._require_available_session(agent,session_id)
+        if getattr(adapter,'session_id','')!=session_id:
+            self._require_available_session(agent,session_id)
         saved=self.store.get('sessions',{'agent':agent,'id':session_id})
         if self.provider(agent)=='local' and getattr(adapter,'local_harness','')=='hermes':
             if not saved or (saved.get('metadata') or {}).get('local_harness')!='hermes':

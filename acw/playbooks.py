@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import logging
 import os
 from pathlib import Path
 import tempfile
+from weakref import WeakKeyDictionary
 
 from .security import reject_link_ancestors
 
@@ -59,8 +61,22 @@ def _normalize(provider, data):
     return result
 
 
+_INVALID_WARNED = WeakKeyDictionary()
+
+
 def load(core, agent):
-    return _normalize(core.provider(agent), core.get_setting('playbook.' + agent, {}))
+    provider = core.provider(agent)
+    try:
+        result = _normalize(provider, core.get_setting('playbook.' + agent, {}))
+    except (ValueError, TypeError):
+        warned = _INVALID_WARNED.setdefault(core, set())
+        if agent not in warned:
+            warned.add(agent)
+            logging.getLogger('acw.playbooks').warning('Invalid playbook for %s; using provider defaults', agent)
+        return deepcopy(DEFAULTS[provider])
+    if core in _INVALID_WARNED:
+        _INVALID_WARNED[core].discard(agent)
+    return result
 
 
 def render(data):
@@ -78,13 +94,13 @@ def save(core, agent, data):
     reject_link_ancestors(destination)
     directory.mkdir(parents=True, exist_ok=True)
     temporary = None
+    core.set_setting('playbook.' + agent, result)
     try:
         with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', newline='\n',
                                          dir=directory, suffix='.tmp', delete=False) as handle:
             temporary = Path(handle.name)
             handle.write(render(result))
         os.replace(temporary, destination)
-        core.set_setting('playbook.' + agent, result)
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)

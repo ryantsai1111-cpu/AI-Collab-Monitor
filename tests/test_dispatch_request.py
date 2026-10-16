@@ -64,6 +64,40 @@ class DispatchClientTests(unittest.TestCase):
         self.assertFalse((self.directory / 'fixture.json').exists())
         self.assertIn('dispatcher-lost', (self.root / 'logs/timeline.log').read_text(encoding='utf-8'))
 
+    def test_builtin_agents_require_spec_or_briefs_before_contacting_dispatcher(self):
+        for agent in ('codex', 'local'):
+            args = self.args.copy()
+            args[1] = agent
+            index = args.index('--spec')
+            del args[index:index + 2]
+            with self.subTest(agent=agent), patch.object(client, 'dispatcher_ready') as ready, \
+                    contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+                client.main(args)
+            self.assertEqual(2, error.exception.code)
+            ready.assert_not_called()
+            self.assertFalse((self.directory / 'fixture.json').exists())
+
+    @unittest.skipUnless(os.name == 'nt', 'MSYS drive conversion is Windows-specific')
+    def test_msys_worktree_path_is_converted_before_writing_request(self):
+        args = self.args.copy()
+        args[args.index('--worktree') + 1] = '/c/workspace/fixture'
+        def respond(_):
+            request = json.loads((self.directory / 'fixture.json').read_text(encoding='utf-8'))
+            self.assertEqual(Path('C:/workspace/fixture'), Path(request['worktree']))
+            (self.directory / 'fixture.result.json').write_text(json.dumps(dict(label='fixture', status='complete', exit_code=0)))
+        with patch.object(client, 'pid_alive', return_value=True), patch.object(client.time, 'sleep', side_effect=respond), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(0, client.main(args))
+
+    def test_existing_label_is_argument_error_and_preserves_request(self):
+        path = self.directory / 'fixture.json'
+        path.write_text('Existing request', encoding='utf-8')
+        output = io.StringIO()
+        with patch.object(client, 'pid_alive', return_value=True), contextlib.redirect_stdout(output):
+            self.assertEqual(2, client.main(self.args))
+        self.assertIn('choose another --label', output.getvalue())
+        self.assertEqual('Existing request', path.read_text(encoding='utf-8'))
+
     def test_local_default_prompt_and_interruption_cleanup(self):
         args = self.args.copy()
         args[1] = 'local'

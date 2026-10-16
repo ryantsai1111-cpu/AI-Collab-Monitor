@@ -3,6 +3,8 @@ from copy import deepcopy
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
+import os
 
 from acw.core import WorkspaceCore
 from acw import playbooks
@@ -48,6 +50,31 @@ class PlaybookTests(unittest.TestCase):
             with self.subTest(value=str(value)[:80]), self.assertRaises(ValueError):
                 playbooks.save(self.core, 'local', value)
         self.assertIsNone(self.core.get_setting('playbook.local'))
+
+    def test_invalid_saved_data_falls_back_once_and_compose_remains_usable(self):
+        self.core.set_setting('playbook.claude', {'role': 'x' * 99})
+        with self.assertLogs('acw.playbooks', level='WARNING') as warnings:
+            first = playbooks.load(self.core, 'claude')
+            self.assertEqual(playbooks.DEFAULTS['claude'], first)
+            self.assertTrue(playbooks.compose_prompt(self.core, 'claude', 'Body').endswith('Body'))
+            playbooks.load(self.core, 'claude')
+        self.assertEqual(1, len(warnings.output))
+        first['limits']['max_turns'] = 1
+        self.assertEqual(playbooks.DEFAULTS['claude'], playbooks.load(self.core, 'claude'))
+
+    def test_save_updates_settings_before_markdown_and_failed_setting_write_preserves_projection(self):
+        real_replace = os.replace
+        def replace(source, destination):
+            self.assertEqual('Persisted first', self.core.get_setting('playbook.codex')['role'])
+            real_replace(source, destination)
+        with patch('acw.playbooks.os.replace', side_effect=replace):
+            playbooks.save(self.core, 'codex', {'role': 'Persisted first'})
+        path = self.core.data_dir / 'playbooks/codex.md'
+        original = path.read_bytes()
+        with patch.object(self.core, 'set_setting', side_effect=RuntimeError('Fixture write failure')), \
+                self.assertRaises(RuntimeError):
+            playbooks.save(self.core, 'codex', {'role': 'Must not reach Markdown'})
+        self.assertEqual(original, path.read_bytes())
 
     def test_compose_empty_and_nonempty_instructions(self):
         playbooks.save(self.core, 'codex', {'instructions': 'Instruction'})

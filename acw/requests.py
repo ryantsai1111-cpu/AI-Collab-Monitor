@@ -358,19 +358,22 @@ class RequestDispatcher:
         if type(request.get('use_playbook', True)) is not bool:
             return self._reject(label, 'bad-request', 'use_playbook 必須是布林值', started)
         limits = playbooks.load(self.core, agent)['limits']
-        timeout = request.get('timeout_seconds', limits['timeout_seconds'] if provider == 'codex' else None)
+        timeout = request.get('timeout_seconds', limits['timeout_seconds']) if provider == 'codex' else None
         if timeout is not None:
             timeout = _positive(timeout, 2147483647)
             if timeout is None:
                 return self._reject(label, 'bad-request', 'timeout_seconds 必須是正整數', started)
         prompt = request.get('prompt')
-        budget, turns = request.get('run_budget'), request.get('max_turns')
-        budget = None if budget in (None, '') else _positive(budget, MAX_BUDGET)
-        turns = None if turns in (None, '') else _positive(turns, MAX_TURNS)
+        budget_value, turns_value = request.get('run_budget'), request.get('max_turns')
+        if provider == 'local':
+            if budget_value in (None, ''): budget_value = limits['run_budget']
+            if turns_value in (None, ''): turns_value = limits['max_turns']
+        budget = None if budget_value in (None, '') else _positive(budget_value, MAX_BUDGET)
+        turns = None if turns_value in (None, '') else _positive(turns_value, MAX_TURNS)
         if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 20000:
             return self._reject(label, 'bad-request', 'prompt 必須是非空字串（上限 20000 字）', started)
-        if (request.get('run_budget') not in (None, '') and budget is None) or \
-           (request.get('max_turns') not in (None, '') and turns is None):
+        if (budget_value not in (None, '') and budget is None) or \
+           (turns_value not in (None, '') and turns is None):
             return self._reject(label, 'bad-request', 'run_budget／max_turns 必須是範圍內的正整數', started)
         wait = (timeout if provider == 'codex' else budget or 600) + EXPIRY_SECONDS
         if age > wait:

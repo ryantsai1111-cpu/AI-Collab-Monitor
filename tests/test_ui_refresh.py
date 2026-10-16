@@ -271,6 +271,8 @@ class WorkspaceUiRefreshTests(unittest.TestCase):
         dialog = PlaybookDialog(self.core, 'claude', self.window)
         dialog.show()
         self.assertEqual(list(self.core.agent_ids), dialog.agent_ids)
+        self.assertIn('Hermes 請求未指定', dialog.limits_note.text())
+        self.assertIn('僅 Codex', dialog.limits_note.text())
         dialog.role.setText('架構驗收負責人')
         dialog.save_button.click()
         self.assertIn('已儲存', dialog.feedback.text())
@@ -280,12 +282,74 @@ class WorkspaceUiRefreshTests(unittest.TestCase):
         dialog.close()
         dialog.deleteLater()
 
+    def test_playbook_role_enter_never_restores_or_overwrites_markdown(self):
+        from acw import playbooks
+        from acw.ui import PlaybookDialog
+        playbooks.save(self.core, 'claude', {'role': 'Saved review role'})
+        path = self.core.data_dir / 'playbooks/claude.md'
+        original = path.read_bytes()
+        dialog = PlaybookDialog(self.core, 'claude', self.window)
+        dialog.show()
+        dialog.role.setText('Unsaved review role')
+        dialog.role.setFocus()
+        with patch('acw.ui.QMessageBox.question') as question:
+            QTest.keyClick(dialog.role, Qt.Key_Return)
+            self.settle()
+            question.assert_not_called()
+        self.assertEqual('Unsaved review role', dialog.role.text())
+        self.assertEqual(original, path.read_bytes())
+        self.assertTrue(all(not control.autoDefault() and not control.isDefault()
+                            for control in dialog.findChildren(QPushButton)))
+        dialog.close()
+        dialog.deleteLater()
+
+    def test_playbook_switch_prompts_and_honors_save_discard_and_cancel(self):
+        from acw import playbooks
+        from acw.ui import PlaybookDialog
+        for answer in (QMessageBox.Cancel, QMessageBox.No, QMessageBox.Yes):
+            with self.subTest(answer=answer):
+                original = playbooks.load(self.core, 'claude')
+                dialog = PlaybookDialog(self.core, 'claude', self.window)
+                dialog.role.setText('Edited role')
+                target = dialog.agent_ids.index('codex')
+                with patch('acw.ui.QMessageBox.question', return_value=answer) as question:
+                    dialog.agents.setCurrentRow(target)
+                question.assert_called_once()
+                self.assertIn('要先儲存', question.call_args.args[2])
+                self.assertEqual(QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel, question.call_args.args[3])
+                if answer == QMessageBox.Cancel:
+                    self.assertEqual('claude', dialog.agent)
+                    self.assertEqual(dialog.agent_ids.index('claude'), dialog.agents.currentRow())
+                    self.assertEqual('Edited role', dialog.role.text())
+                else:
+                    self.assertEqual('codex', dialog.agent)
+                saved = playbooks.load(self.core, 'claude')
+                self.assertEqual('Edited role' if answer == QMessageBox.Yes else original['role'], saved['role'])
+                dialog.close()
+                dialog.deleteLater()
+
+    def test_playbook_reset_requires_confirmation_and_defaults_to_no(self):
+        from acw import playbooks
+        from acw.ui import PlaybookDialog
+        playbooks.save(self.core, 'claude', {'role': 'Saved custom role'})
+        dialog = PlaybookDialog(self.core, 'claude', self.window)
+        with patch('acw.ui.QMessageBox.question', return_value=QMessageBox.No) as question:
+            dialog.reset_button.click()
+        self.assertEqual(QMessageBox.No, question.call_args.args[4])
+        self.assertEqual('Saved custom role', playbooks.load(self.core, 'claude')['role'])
+        with patch('acw.ui.QMessageBox.question', return_value=QMessageBox.Yes):
+            dialog.reset_button.click()
+        self.assertEqual(playbooks.DEFAULTS['claude'], playbooks.load(self.core, 'claude'))
+        dialog.close()
+        dialog.deleteLater()
+
     def test_missing_transcript_shows_new_conversation_send_and_recovers(self):
         panel = self.connect_fixture('claude')
         self.window.reported_errors.clear()
         panel.input.setPlainText('Retained draft for missing session')
         old_task = self.core.agent_task('claude')['id']
         old_session = self.core.agent_task('claude')['claude_session']
+        self.adapters['claude'].session_id = ''
         import time
         def run_worker(*args, **kwargs):
             return MainWindow.run(self.window, *args, **kwargs)
