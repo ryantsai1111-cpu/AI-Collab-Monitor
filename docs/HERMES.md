@@ -51,7 +51,11 @@ Workspace 保存固定 `hermes-<UUID>` 對話 ID；真實 Hermes ID 位於原有
 
 新增欄位：`agent` 缺省 `local`，只接受 provider 為 `local` 或 `codex` 的內建／動態 instance id；`spec` 是 Codex 專用的 worktree 內相對檔案路徑；`timeout_seconds` 是有效執行時間上限。Codex 缺省採 playbook 的 `limits.timeout_seconds`（預設 7200 秒），不覆寫 adapter settings。缺 spec、路徑逃出 worktree 或檔案不存在會回 `no-spec`（REFUSED）。dirty／Connected 守門與 Hermes 相同，同時仍只有一個 run。
 
+派工前請在 Codex 面板設定確認沙箱至少是「可寫入專案」，並確認面板顯示目前 thread 的實際權限；否則 Codex 可能一路要求核准。設定於下次建立或恢復對話生效。核准選項「失敗時詢問」因本機 app-server schema 不支援 `on-failure` 而停用，預設仍沿用 Codex 設定。
+
 Codex 核准留在對應面板，由使用者操作，dispatcher 不代為核准。等待至少一筆 approval 時暫停有效執行計時；每個 request_id 只寫一次 `APPROVAL_NEEDED`，收到回應寫 `APPROVAL_RESOLVED`。全部解決後繼續計時。Codex 投影寫 `codex.log`，timeline actor 為 `CODEX`。Hermes 仍寫 `hermes.log`／`HERMES`。
+
+Codex 以 `Turn completed` 判定整個回合完成；個別 `message_end` 只分隔訊息，不提前回覆結果。結果另含 `turn_status` 與 `messages`。若缺少 Turn 事件，只有觀察到 Busy → Connected 且超過 5 秒沒有新事件、沒有未決核准時才推定完成，timeline 記錄 `TURN_END_INFERRED`。`codex.log` 投影指令狀態、檔案、diff 檔案數與測試摘要，不含指令輸出或 patch；回合結束只寫一次 RESULT 與 `TURN_END`。
 
 相容決策（2026-10-16 Ryan 確認）：未提供 timeout_seconds 的舊 Hermes 請求保留 `run_budget + 120` 秒逾時，不改成 7200 秒；REWORK-01 明確將 timeout_seconds 限於 Codex；Hermes 一律採 run_budget + 120 秒，不採用該欄位。Hermes 請求若未提供 run_budget／max_turns，改以該 instance 的 playbook limits 補入；請求自帶值優先，執行結束仍恢復 adapter 原設定。PROGRESS.md 與 dirty 守門不變；沒有 agent 欄位仍派給 local。
 

@@ -529,6 +529,72 @@ class WorkspaceUiRefreshTests(unittest.TestCase):
             self.window.settings()
         self.assert_no_adapter_actions()
 
+    def test_codex_settings_permissions_inherit_by_default_and_save_per_instance(self):
+        def inspect(dialog):
+            sandbox = dialog.findChild(QComboBox, 'codex_sandbox_codex')
+            approval = dialog.findChild(QComboBox, 'codex_approval_policy_codex')
+            self.assertIsNotNone(sandbox)
+            self.assertIsNotNone(approval)
+            self.assertIsNone(sandbox.currentData())
+            self.assertIsNone(approval.currentData())
+            unsupported = approval.model().item(approval.findData('on-failure'))
+            self.assertFalse(unsupported.isEnabled())
+            self.assertIn('不支援', unsupported.text())
+            sandbox.setCurrentIndex(sandbox.findData('workspace-write'))
+            approval.setCurrentIndex(approval.findData('never'))
+            return QDialog.Accepted
+        with patch('acw.ui.QDialog.exec', inspect):
+            self.window.settings('codex')
+        saved = self.core.get_setting('agent.codex')
+        self.assertEqual('workspace-write', saved['sandbox'])
+        self.assertEqual('never', saved['approval_policy'])
+        self.assertEqual('workspace-write', self.adapters['codex'].settings['sandbox'])
+        self.assertEqual('never', self.adapters['codex'].settings['approval_policy'])
+        self.assertNotIn('sandbox', self.core.get_setting('agent.claude', {}))
+        self.assert_no_adapter_actions()
+        def restore(dialog):
+            sandbox = dialog.findChild(QComboBox, 'codex_sandbox_codex')
+            approval = dialog.findChild(QComboBox, 'codex_approval_policy_codex')
+            self.assertEqual('workspace-write', sandbox.currentData())
+            self.assertEqual('never', approval.currentData())
+            sandbox.setCurrentIndex(0)
+            approval.setCurrentIndex(0)
+            return QDialog.Accepted
+        with patch('acw.ui.QDialog.exec', restore):
+            self.window.settings('codex')
+        self.assertIsNone(self.core.get_setting('agent.codex')['sandbox'])
+        self.assertIsNone(self.core.get_setting('agent.codex')['approval_policy'])
+        self.assertIsNone(self.adapters['codex'].settings['sandbox'])
+        self.assertIsNone(self.adapters['codex'].settings['approval_policy'])
+
+    def test_codex_panel_permission_line_uses_actual_thread_instead_of_saved_settings(self):
+        self.core.set_setting('agent.codex', {'sandbox': 'danger-full-access', 'approval_policy': 'never'})
+        panel = self.window.panels['codex']
+        panel.update_controls()
+        self.assertIn('尚未取得', panel.notice.text())
+        self.assertNotIn('danger-full-access', panel.notice.text())
+        self.adapters['codex'].session_id = 'permission-fixture'
+        self.adapters['codex']._session_ready = True
+        self.adapters['codex']._permission_state = {'sandbox': {'type': 'workspaceWrite'}, 'approvalPolicy': 'on-request'}
+        self.core.ingest_event('codex', 'session', session_id='permission-fixture')
+        self.window.poll_events()
+        self.settle()
+        self.assertIn('沙箱：workspace-write · 核准：on-request', panel.notice.text())
+        self.assertNotIn('danger-full-access', panel.notice.text())
+        self.assertIn('目前 thread', panel.notice.toolTip())
+        self.adapters['codex']._permission_state = {'sandbox': {'type': 'dangerFullAccess'}, 'approvalPolicy': 'never'}
+        panel.update_controls()
+        self.assertIn('沙箱：danger-full-access · 核准：never', panel.notice.text())
+        self.adapters['codex'].last_error = 'fixture sandbox helper error'
+        self.window.refresh_agent('codex')
+        self.assertIn('fixture sandbox helper error', panel.notice.text())
+        self.assertIn('沙箱：danger-full-access · 核准：never', panel.notice.text())
+        self.adapters['codex']._session_ready = False
+        panel.update_controls()
+        self.assertIn('尚未取得', panel.notice.text())
+        self.assertNotIn('danger-full-access', panel.notice.text())
+        self.assert_no_adapter_actions()
+
     def test_desktop_sidebar_name_and_metadata_have_distinct_hierarchy(self):
         self.window.focus_role('codex')
         self.settle()

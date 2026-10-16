@@ -453,6 +453,15 @@ class CodexAdapter(Adapter):
         params = {"approvalsReviewer": "user"}
         if self.cwd:
             params["cwd"] = self.cwd
+        for setting, field, choices in (
+            ("sandbox", "sandbox", ("read-only", "workspace-write", "danger-full-access")),
+            ("approval_policy", "approvalPolicy", ("untrusted", "on-request", "never")),
+        ):
+            value = self.settings.get(setting)
+            if value not in (None, "", "inherit"):
+                if value not in choices:
+                    raise ValueError("Unsupported Codex " + setting + ": " + str(value))
+                params[field] = value
         return self._accept_session(self._request("thread/start", params))
 
     def resume_session(self, session_id):
@@ -462,7 +471,17 @@ class CodexAdapter(Adapter):
         thread = self._request("thread/read", {"threadId": session_id, "includeTurns": False})["thread"]
         if self.cwd and thread.get("cwd") and Path(thread["cwd"]).resolve() != Path(self.cwd).resolve():
             raise ValueError("Session belongs to another project; select its project before resume")
-        return self._accept_session(self._request("thread/resume", {"threadId": session_id, "approvalsReviewer": "user"}))
+        params = {"threadId": session_id, "approvalsReviewer": "user"}
+        for setting, field, choices in (
+            ("sandbox", "sandbox", ("read-only", "workspace-write", "danger-full-access")),
+            ("approval_policy", "approvalPolicy", ("untrusted", "on-request", "never")),
+        ):
+            value = self.settings.get(setting)
+            if value not in (None, "", "inherit"):
+                if value not in choices:
+                    raise ValueError("Unsupported Codex " + setting + ": " + str(value))
+                params[field] = value
+        return self._accept_session(self._request("thread/resume", params))
 
     def rename_session(self, name):
         return self._request("thread/name/set", {"threadId": self.session_id, "name": name})
@@ -475,7 +494,7 @@ class CodexAdapter(Adapter):
         if not self.session_id:
             self.create_session()
         sandbox_type = (self._permission_state.get("sandbox") or {}).get("type")
-        if sandbox_type not in ("readOnly", "workspaceWrite"):
+        if sandbox_type not in ("readOnly", "workspaceWrite", "dangerFullAccess"):
             raise PermissionError("Inherited Codex sandbox is " + str(sandbox_type or "unknown") + "; configure an approved sandbox in the official CLI before using Workspace")
         if model and model not in self.capabilities.models:
             raise ValueError("Model was not advertised by Codex model/list")
