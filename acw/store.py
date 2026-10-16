@@ -4,6 +4,7 @@ from __future__ import annotations
 import errno
 import gzip
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -390,12 +391,24 @@ class Store:
             self.db.commit()
         return count
 
+    def checkpoint(self, mode='PASSIVE'):
+        mode = mode.upper()
+        if mode not in ('PASSIVE', 'FULL', 'RESTART', 'TRUNCATE'):
+            raise ValueError('Unsupported WAL checkpoint mode')
+        with self.lock:
+            self._ensure_open()
+            return tuple(self.db.execute(f'PRAGMA wal_checkpoint({mode})').fetchone())
+
     def close(self):
         with self.lock:
             if self._closed:
                 return
             try:
-                self.db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+                result = self.checkpoint('TRUNCATE')
+                if result[0]:
+                    logging.getLogger('acw.store').warning('WAL checkpoint on close is busy: %s', result)
+            except Exception:
+                logging.getLogger('acw.store').warning('WAL checkpoint on close failed', exc_info=True)
             finally:
                 self.db.close()
                 self._closed = True
