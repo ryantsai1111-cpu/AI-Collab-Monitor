@@ -266,6 +266,20 @@ class WorkspaceUiRefreshTests(unittest.TestCase):
         empty = collect_snapshot(self.core, self.window.panels)
         self.assertTrue(all(row['request_label'] == '' for row in empty['roles']))
 
+    def test_playbook_editor_saves_role_and_refreshes_rail_and_sidebar(self):
+        from acw.ui import PlaybookDialog
+        dialog = PlaybookDialog(self.core, 'claude', self.window)
+        dialog.show()
+        self.assertEqual(list(self.core.agent_ids), dialog.agent_ids)
+        dialog.role.setText('架構驗收負責人')
+        dialog.save_button.click()
+        self.assertIn('已儲存', dialog.feedback.text())
+        card = self.window.agent_rail.cards['claude'][0]
+        self.assertEqual('架構驗收負責人', card.findChild(QLabel, 'rail_role').text())
+        self.assertIn('架構驗收負責人', self.window.sidebar_agent_meta.text())
+        dialog.close()
+        dialog.deleteLater()
+
     def settle(self):
         for _ in range(3):
             self.app.processEvents()

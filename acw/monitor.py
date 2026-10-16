@@ -5,6 +5,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton,
                                QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
+from . import playbooks
 from .presentation import compact, time_label
 from .theme import MUTED_COLOR, RADIUS, SPACE, desktop_state_color
 
@@ -25,7 +26,7 @@ def collect_snapshot(core, panels, run=None):
         task, project = core.agent_task(agent) or {}, core.agent_project(agent) or {}
         sid = task.get(agent + '_session') or ''
         rows = core.store.query('SELECT title FROM sessions WHERE agent=? AND id=? LIMIT 1', (agent, sid)) if sid else []
-        roles.append(dict(agent=agent, name=core.agent_name(agent), provider=core.provider(agent), project=compact(project.get('name')) or '未選專案',
+        roles.append(dict(agent=agent, role=playbooks.load(core, agent)['role'], name=core.agent_name(agent), provider=core.provider(agent), project=compact(project.get('name')) or '未選專案',
                           task=compact(task.get('title')) or '尚未開啟對話',
                           session=compact(rows[0]['title']) if rows and rows[0]['title'] and rows[0]['title'] != sid else ('已綁定對話' if sid else '尚未綁定對話'),
                           session_id=sid, task_id=task.get('id'), project_id=project.get('id'),
@@ -99,7 +100,7 @@ class RoleCard(QFrame):
         self.status.setStyleSheet('color: ' + (COLORS['running'] if row.get('request_label') else
                                              desktop_state_color(row['state'], row['approvals']) if desktop else color))
         participation = ('本輪參與' if run['state'] == 'running' else '最近協作角色') if in_scope else '獨立角色'
-        duty = ROLES.get(row.get('provider', row['agent']), ('', '依本次任務分工'))[1]
+        duty = row.get('role') or ROLES.get(row.get('provider', row['agent']), ('', '依本次任務分工'))[1]
         if in_scope:
             duty = ('派工 / 驗收' if row['agent'] == run['lead'] else
                     '實作 / 回報' if row['agent'] == run['implementer'] else '複核 / 第二意見')
@@ -330,13 +331,16 @@ class AgentRail(QScrollArea):
                 status = text('', 'muted')
                 context = text('', 'muted')
                 session = text('', 'muted')
-                for item in (action, status, context, session):
+                role = text('', 'muted')
+                role.setObjectName('rail_role')
+                for item in (action, role, status, context, session):
                     box.addWidget(item)
                 self.rows.addWidget(card)
                 self.cards[agent] = (card, action, status, context, session)
             card, action, status, context, session = self.cards[agent]
             action.setText(action.fontMetrics().elidedText(row['name'], Qt.ElideRight, 170) + ('  ←' if agent == selected else ''))
             action.setToolTip(row['name'])
+            card.findChild(QLabel, 'rail_role').setText(row.get('role') or ROLES.get(row.get('provider', agent), ('', ''))[1])
             action.setAccessibleName('開啟 ' + row['name'] + ' 對話')
             state = f"{row['approvals']} 待核准" if row['approvals'] else STATES.get(row['state'], row['state'])
             color = (COLORS['waiting'] if row['approvals'] else
