@@ -4489,11 +4489,16 @@ class MainWindow(QMainWindow):
             self.footer.setText("Settings saved. Reconnect idle agents to apply backend settings.")
 
     def closeEvent(self, event):
-        if self._close_pending:
+        busy = self.workers or any(panel.connection_state == "Busy" for panel in self.panels.values())
+        if self._close_pending and busy:
             event.ignore()
             return
-        if self.workers or any(panel.connection_state == "Busy" for panel in self.panels.values()):
-            result = QMessageBox.question(self, "Active backend work", "Backend work is active. Closing records history but does not silently resend prompts on restart. Request cancellation and close?", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        request = self.core.requests.active()
+        if not self._close_pending and (request or busy):
+            message = (f"Hermes 仍在執行 skill 派來的步驟 {request['label']}（{request['worktree']}）。"
+                       "關閉會中止它，工作目錄可能留下未提交的修改。仍要關閉？" if request else
+                       "仍有 Agent 在執行。關閉會要求取消，歷史會保留，重啟不會自動重送。仍要關閉？")
+            result = QMessageBox.question(self, "確認關閉", message, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
             if result != QMessageBox.Yes:
                 event.ignore()
                 return
@@ -4516,7 +4521,6 @@ class MainWindow(QMainWindow):
                         return
                     QTimer.singleShot(100, self, ready_to_close)
                     return
-                self._close_pending = False
                 self.close()
             def cancelled(_):
                 QTimer.singleShot(0, self, ready_to_close)
@@ -4533,4 +4537,5 @@ class MainWindow(QMainWindow):
         if self.orchestrator and self.orchestrator.active:
             self.orchestrator.stop('工作區視窗已關閉')
         self._closed = True
+        self._close_pending = False
         event.accept()

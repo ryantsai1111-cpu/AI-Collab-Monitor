@@ -7,6 +7,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from datetime import datetime
 from unittest.mock import patch
 
 from acw.core import WorkspaceCore
@@ -109,6 +110,21 @@ class RequestDispatcherTests(unittest.TestCase):
         self.core.poll_requests()
         self.assertIsNone(self.result(label), 'a started run has no result yet')
         self.assertEqual([PROMPT], self.adapter.sent)
+
+    def test_active_snapshot_is_detached_and_cleared_after_completion(self):
+        self.assertIsNone(self.core.requests.active())
+        self.start_run('named-run')
+        active = self.core.requests.active()
+        self.assertEqual({'label', 'worktree', 'task_id', 'started'}, set(active))
+        self.assertEqual('named-run', active['label'])
+        self.assertEqual(str(self.repo), active['worktree'])
+        self.assertEqual(self.core.agent_task('local')['id'], active['task_id'])
+        self.assertIsNotNone(datetime.fromisoformat(active['started']).tzinfo)
+        active['label'] = 'tampered'
+        self.assertEqual('named-run', self.core.requests.active()['label'])
+        self.say('message_end', content='done', status='complete')
+        self.core.poll_requests()
+        self.assertIsNone(self.core.requests.active())
 
     # -- rejections
     def test_invalid_label_is_rejected(self):

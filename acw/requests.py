@@ -202,6 +202,11 @@ class RequestDispatcher:
         self._active_task = None
         core._event_taps.append(self._on_event)
 
+    def active(self):
+        """Return a detached public snapshot without exposing adapter/run internals."""
+        run = self._run
+        return {key: run[key] for key in ('label', 'worktree', 'task_id', 'started')} if run else None
+
     # ------------------------------------------------------------------ event tap
     def _on_event(self, event):
         """Called by Core._record for every event; only buffers the active run's few event types.
@@ -419,7 +424,7 @@ class RequestDispatcher:
                 pass                              # a missing nicer title is not a reason to refuse
             adapter = core.adapters[agent]
             monitor_root = request.get('monitor_root')
-            run = {'label': label, 'task_id': task_id, 'started': started, 'adapter': adapter, 'saved': {},
+            run = {'label': label, 'worktree': str(worktree), 'task_id': task_id, 'started': started, 'adapter': adapter, 'saved': {},
                    'budget': budget or _positive(adapter.settings.get('run_budget', 600), MAX_BUDGET) or 600,
                    'monitor': MonitorProjection(label, monitor_root if isinstance(monitor_root, str) else ''),
                    'session_id': '', 'operation': None, 'end': None, 'end_deferred': False, 'errors': [],

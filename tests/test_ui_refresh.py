@@ -207,6 +207,65 @@ class WorkspaceUiRefreshTests(unittest.TestCase):
         self.assertEqual([], self.qt_exceptions, "Unhandled exception in Qt callback")
         self.assertEqual([], self.window.reported_errors, "Unexpected UI error hidden by deterministic test dispatch")
 
+    def test_active_request_close_confirmation_names_run_and_defaults_to_no(self):
+        from PySide6.QtGui import QCloseEvent
+        request = {'label': 'me3-run1', 'worktree': str(self.root / 'alpha')}
+        for answer in (QMessageBox.No, QMessageBox.Yes):
+            with self.subTest(answer=answer), patch.object(self.core.requests, 'active', return_value=request), \
+                    patch('acw.ui.QMessageBox.question', return_value=answer) as question, \
+                    patch.object(self.window, 'run') as dispatch:
+                event = QCloseEvent()
+                self.window.closeEvent(event)
+                self.assertFalse(event.isAccepted())
+                self.assertEqual(answer == QMessageBox.Yes, self.window._close_pending)
+                args = question.call_args.args
+                self.assertIn(request['label'], args[2])
+                self.assertIn(request['worktree'], args[2])
+                self.assertIn('未提交的修改', args[2])
+                self.assertEqual(QMessageBox.Yes | QMessageBox.No, args[3])
+                self.assertEqual(QMessageBox.No, args[4])
+                self.assertEqual(int(answer == QMessageBox.Yes), dispatch.call_count)
+                self.window._close_pending = False
+
+    def test_confirmed_request_close_does_not_ask_again_after_cancellation(self):
+        from PySide6.QtGui import QCloseEvent
+        with patch.object(self.core.requests, 'active', return_value={'label': 'run', 'worktree': 'fixture'}), \
+                patch('acw.ui.QMessageBox.question', return_value=QMessageBox.Yes) as question, \
+                patch.object(self.window, 'run', side_effect=lambda operation, callback, **kwargs: callback(None)):
+            self.window.closeEvent(QCloseEvent())
+            self.assertTrue(self.window._close_pending)
+            self.settle()
+            self.assertTrue(self.window._closed)
+            question.assert_called_once()
+
+    def test_busy_agent_close_confirmation_is_chinese(self):
+        from PySide6.QtGui import QCloseEvent
+        self.window.panels['claude'].set_state('Busy')
+        with patch('acw.ui.QMessageBox.question', return_value=QMessageBox.No) as question:
+            event = QCloseEvent()
+            self.window.closeEvent(event)
+            self.assertFalse(event.isAccepted())
+            self.assertFalse(self.window._close_pending)
+            self.assertIn('仍有 Agent 在執行', question.call_args.args[2])
+
+    def test_request_snapshot_labels_rail_and_overview_in_both_themes(self):
+        from acw.monitor import COLORS, collect_snapshot
+        with patch.object(self.core.requests, 'active', return_value={'label': 'me3-run1'}) as active:
+            snapshot = collect_snapshot(self.core, self.window.panels)
+            active.assert_called_once_with()
+        for row in snapshot['roles']:
+            self.assertEqual('me3-run1' if row['provider'] == 'local' else '', row['request_label'])
+        for theme in ('desktop', 'hacker'):
+            self.window.setProperty('theme', theme)
+            self.window.agent_rail.setProperty('theme', theme)
+            self.window.agent_rail.refresh(snapshot, 'local')
+            self.window.monitor_dashboard.refresh(snapshot)
+            for label in (self.window.agent_rail.cards['local'][2], self.window.monitor_dashboard.cards['local'].status):
+                self.assertIn('執行中 · me3-run1', label.text())
+                self.assertIn(COLORS['running'], label.styleSheet())
+        empty = collect_snapshot(self.core, self.window.panels)
+        self.assertTrue(all(row['request_label'] == '' for row in empty['roles']))
+
     def settle(self):
         for _ in range(3):
             self.app.processEvents()
