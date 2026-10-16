@@ -15,7 +15,7 @@ from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
 
-from acw.core import WorkspaceCore
+from tests.workspace_fixtures import TranscriptFixtureCore as WorkspaceCore
 from acw.presentation import local_session_displays, project_label, session_display
 from acw.security import OMITTED_REASONING, REDACTED, is_hidden_reasoning, safe_file, sanitize
 from acw.store import now

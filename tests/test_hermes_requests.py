@@ -11,6 +11,7 @@ from datetime import datetime
 from unittest.mock import patch
 
 from acw.core import WorkspaceCore
+from acw.playbooks import compose_prompt
 from acw.requests import MonitorProjection
 from acw.security import sanitize
 from acw.adapters.hermes import HermesAdapter
@@ -109,7 +110,7 @@ class RequestDispatcherTests(unittest.TestCase):
         self.request(label, **override)
         self.core.poll_requests()
         self.assertIsNone(self.result(label), 'a started run has no result yet')
-        self.assertEqual([PROMPT], self.adapter.sent)
+        self.assertEqual([compose_prompt(self.core, 'local', PROMPT)], self.adapter.sent)
 
     def test_active_snapshot_is_detached_and_cleared_after_completion(self):
         self.assertIsNone(self.core.requests.active())
@@ -125,6 +126,25 @@ class RequestDispatcherTests(unittest.TestCase):
         self.say('message_end', content='done', status='complete')
         self.core.poll_requests()
         self.assertIsNone(self.core.requests.active())
+
+    def test_missing_request_limits_use_playbook_defaults_and_keep_legacy_timeout(self):
+        from acw import playbooks
+        playbooks.save(self.core, 'local', {'limits': {'run_budget': 1234, 'max_turns': 42, 'timeout_seconds': 1}})
+        self.request(timeout_seconds=1)
+        path = self.requests / 'r1.json'
+        body = json.loads(path.read_text(encoding='utf-8'))
+        body.pop('run_budget')
+        body.pop('max_turns')
+        path.write_text(json.dumps(body), encoding='utf-8')
+        self.core.poll_requests()
+        self.assertEqual((1234, 42), self.adapter.limits_at_send)
+        self.now[0] += 1234 + 120
+        self.core.poll_requests()
+        self.assertIsNone(self.result(), 'Local ignores timeout_seconds and keeps budget + grace')
+        self.now[0] += 1
+        self.core.poll_requests()
+        self.assertEqual('interrupted', self.result()['status'])
+        self.assertEqual((600, 60), (self.adapter.settings['run_budget'], self.adapter.settings['max_turns']))
 
     # -- rejections
     def test_invalid_label_is_rejected(self):
@@ -257,7 +277,7 @@ class RequestDispatcherTests(unittest.TestCase):
         self.adapter.fail_send = ''
         self.request('r2')
         self.core.poll_requests()
-        self.assertEqual([PROMPT], self.adapter.sent)
+        self.assertEqual([compose_prompt(self.core, 'local', PROMPT)], self.adapter.sent)
 
     def test_bad_budget_is_rejected(self):
         self.request(run_budget='lots')
@@ -356,12 +376,12 @@ class RequestDispatcherTests(unittest.TestCase):
         self.request('r2')
         self.core.poll_requests()
         self.assertIsNone(self.result('r2'))
-        self.assertEqual([PROMPT], self.adapter.sent)
+        self.assertEqual([compose_prompt(self.core, 'local', PROMPT)], self.adapter.sent)
         self.say('message_end', content='done', status='complete')
         self.core.poll_requests()
         self.assertEqual('complete', self.result('r1')['status'])
         self.core.poll_requests()
-        self.assertEqual([PROMPT, PROMPT], self.adapter.sent)
+        self.assertEqual([compose_prompt(self.core, 'local', PROMPT)] * 2, self.adapter.sent)
 
     def test_without_a_monitor_root_nothing_is_projected(self):
         self.start_run(monitor_root='')
@@ -449,7 +469,7 @@ class RequestDispatcherTests(unittest.TestCase):
         later = path.stat().st_mtime + 5
         os.utime(path, (later, later))
         self.core.poll_requests()
-        self.assertEqual([PROMPT], self.adapter.sent)
+        self.assertEqual([compose_prompt(self.core, 'local', PROMPT)], self.adapter.sent)
 
 
 class MonitorProjectionTests(unittest.TestCase):

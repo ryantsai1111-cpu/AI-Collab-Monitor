@@ -1,7 +1,7 @@
 """Offline connection reservation regressions; no process or network transport."""
 import tempfile, threading, unittest
 from pathlib import Path
-from acw.core import WorkspaceCore
+from tests.workspace_fixtures import TranscriptFixtureCore as WorkspaceCore
 from test_core import SyntheticAdapter
 
 class ConnectReservationTests(unittest.TestCase):

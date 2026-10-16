@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from acw.adapters.codex import CodexAdapter
-from acw.core import WorkspaceCore
+from tests.workspace_fixtures import TranscriptFixtureCore as WorkspaceCore
 
 
 @unittest.skipUnless(os.name == 'nt', 'Windows desktop executable discovery')

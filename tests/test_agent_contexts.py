@@ -10,7 +10,8 @@ import unittest
 from unittest.mock import patch
 
 from PySide6.QtWidgets import QApplication
-from acw.core import AGENTS, WorkspaceCore
+from acw.core import AGENTS
+from tests.workspace_fixtures import TranscriptFixtureCore as WorkspaceCore
 from tests.test_ui_refresh import OfflineAdapter, OfflineWindow
 
 

@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from PySide6.QtWidgets import QApplication, QDialog, QLineEdit
 
-from acw.core import WorkspaceCore
+from tests.workspace_fixtures import TranscriptFixtureCore as WorkspaceCore
 from acw.orchestrator import Orchestrator
 from acw.agents import load_instances
 from test_ui_refresh import OfflineAdapter, OfflineWindow

@@ -8,6 +8,7 @@ no threads: the owner calls `tick()` and supplies `dispatch` to run blocking cal
 from __future__ import annotations
 
 from collections.abc import Mapping
+from .playbooks import compose_prompt
 from dataclasses import dataclass
 import re
 import secrets
@@ -525,6 +526,7 @@ class Orchestrator:
                  '\n接著寫完整且非空的交接內容，最後一個非空行必須原樣寫 '
                  f'ACW_END: {correlation_id}。不得分成多則訊息，不得在結尾標記後加文字。'
                  '\n這些標記只界定應用程式交接內容完整性，不代表原生完成訊號或作者身分驗證。')
+        text = compose_prompt(self.core, agent, text)
         binding = self._bindings[agent]
         contract = {'run_id': self.run_id, 'step_sequence': self.step_sequence, 'correlation_id': correlation_id,
                     'step': step, 'task_id': binding['task_id'], 'project_id': binding['project_id'], 'agent': agent,

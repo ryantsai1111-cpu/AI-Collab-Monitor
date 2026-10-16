@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 
 from acw.adapters.dot import DotAdapter
-from acw.core import WorkspaceCore
+from tests.workspace_fixtures import TranscriptFixtureCore as WorkspaceCore
 from acw.orchestrator import Orchestrator, parse_verdict
 from acw.store import now, uid
 from test_ui_refresh import OfflineAdapter
@@ -136,6 +136,19 @@ class OrchestratorTests(unittest.TestCase):
         self.run_ = Orchestrator(self.core, "把按鈕改成藍色", dispatch, clock=lambda: self.clock[0],
                                  has_pending_approval=lambda: self.approval[0], dot_poll_seconds=10, **options)
         return self.run_
+
+    def test_each_dispatched_step_starts_with_instance_playbook_instructions(self):
+        from acw import playbooks
+        run = self.build()
+        for agent in AGENTS:
+            playbooks.save(self.core, agent, {'instructions': 'Fixture instruction for ' + agent})
+        run.start()
+        self.advance()
+        self.assertEqual('done', run.state)
+        for agent in ('claude', 'codex', 'dot'):
+            self.assertTrue(self.adapters[agent].sent)
+            self.assertTrue(all(prompt.startswith('Fixture instruction for ' + agent + '\n\n---\n\n')
+                                for prompt in self.adapters[agent].sent))
 
     def advance(self, ticks=40, seconds=11):
         for _ in range(ticks):
