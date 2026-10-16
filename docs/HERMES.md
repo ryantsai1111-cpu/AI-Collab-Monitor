@@ -41,6 +41,8 @@ Workspace 保存固定 `hermes-<UUID>` 對話 ID；真實 Hermes ID 位於原有
 
 ## 請求檔派工（run.sh → 協作站）
 
+關閉 GUI 會中止進行中的請求，並寫回 `interrupted` 結果；工作目錄可能留下未提交的修改。關閉前會以中文點名確認正在執行的 label 與 worktree，預設不關閉。AgentRail 與協作總覽的 Hermes 卡片會顯示「執行中 · <label>」。
+
 `hermes-delegation` skill 的 `run.sh` 在協作站開著時，不自己起 `hermes.exe`，而是寫一個請求檔，讓**協作站自己的 core** 派工；這樣 Claude 派給 Hermes 的每一步，都有對應的 project、session、messages、events，跟從 UI 送出的一樣。實作在 `acw/requests.py`（不依賴 Qt），設計見 [DESIGN-hermes-single-entry.md](DESIGN-hermes-single-entry.md) §3.2。
 
 **何時走這條路**：未設 `HERMES_DIRECT=1`，且 dispatcher 的心跳有效。每次 `poll()` 都會改寫 `ACW_DATA_DIR/requests/.dispatcher.json`（預設 `%LOCALAPPDATA%\AI-Collaboration-Workspace\data`；內容 `{pid, at, busy}`，`busy` 表示有 run 在跑，協作站關閉時刪除）。`run.sh` 要求它的 mtime 距現在不到 `HERMES_DISPATCHER_FRESH`（預設 15）秒，而且心跳裡的 pid 活著。`run.sh` **不看** `workspace.lock`：Qt 的 QLockFile 在 GUI 重啟後仍留著前一個行程的 pid，而該 pid 可能被無關的程式重用（2026-10-15 實際發生）。心跳不存在、太舊或 pid 已死（跑的是舊程式碼、當掉、執行緒卡住）時，印 `workspace: dispatcher is not responding (...), using direct mode` 並走直接路徑；若此時 `workspace.lock` 指到活著的 pid，會多印一行提示 GUI 開著但沒有 dispatcher。等結果時 `run.sh` 每 10 秒再看一次心跳，超過 `HERMES_DISPATCHER_STALE`（預設 30）秒沒更新就撤回請求、寫 `RUN_ENDED … dispatcher-lost`、exit 1，**不**回退直接路徑（dispatcher 可能已經啟動 Hermes）。否則 `run.sh` 照舊直接起 `hermes.exe`。請求模式下 `run.sh` 不建 `hermes.lock`，由 `HermesAdapter` 建。

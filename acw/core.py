@@ -3,6 +3,8 @@ from __future__ import annotations
 import html
 import hashlib
 import json
+import logging
+import time
 import queue
 import shutil
 import threading
@@ -35,7 +37,7 @@ def _agent_action(method):
 
 
 class WorkspaceCore:
-    def __init__(self,data_dir,adapters=None):
+    def __init__(self,data_dir,adapters=None,*,clock=time.monotonic):
         self.store=Store(data_dir)
         self.data_dir=self.store.data_dir
         self.adapters={}
@@ -50,6 +52,8 @@ class WorkspaceCore:
         self._dot_root_lock=threading.Lock()
         self._streams={}
         self._closed=False
+        self._checkpoint_clock=clock
+        self._last_checkpoint=clock()
         self._legacy_readers={}
         self._event_taps=[]
         self._native_discovery={}
@@ -1546,7 +1550,25 @@ class WorkspaceCore:
     def poll_requests(self):
         """Advance file requests written by the hermes-delegation skill's run.sh (see acw/requests.py)."""
         if self._closed: return []
-        return self.requests.poll()
+        results = self.requests.poll()
+        self.maybe_checkpoint()
+        return results
+
+    def maybe_checkpoint(self):
+        """Checkpoint idle workspaces at most once per five-minute success interval."""
+        with self._lock:
+            if self._closed or any(getattr(adapter, 'state', '') == 'Busy' for adapter in self.adapters.values()):
+                return None
+            if self._checkpoint_clock() - self._last_checkpoint <= 300:
+                return None
+            try:
+                result = self.store.checkpoint('PASSIVE')
+                if not result[0] and result[1] == result[2]:
+                    self._last_checkpoint = self._checkpoint_clock()
+                return result
+            except Exception:
+                logging.getLogger('acw.store').warning('Periodic WAL checkpoint failed', exc_info=True)
+                return None
 
     def logs_path(self,agent=None):
         if agent: self._check_agent(agent)

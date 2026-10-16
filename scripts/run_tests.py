@@ -5,6 +5,7 @@ import argparse
 import datetime
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -83,10 +84,15 @@ def main(argv=None):
                        'exit_code': result.returncode}
             except subprocess.TimeoutExpired:
                 row = {'module': name, 'status': 'TIMEOUT', 'exit_code': None}
-        row.update(seconds=round(time.monotonic() - started, 3), log=log.name)
+        output = log.read_text(encoding='utf-8', errors='replace')
+        summary = re.search(r'^(?:OK|FAILED)\s*\([^\n]*\bskipped=(\d+)', output, re.MULTILINE)
+        skipped_count = int(summary.group(1)) if summary else 0
+        row.update(seconds=round(time.monotonic() - started, 3), log=log.name,
+                   skipped=skipped_count > 0, skipped_count=skipped_count)
         report['modules'].append(row)
         save()
-        print(row['status'] + ' ' + name, flush=True)
+        label = 'PASS (skipped)' if row['status'] == 'PASS' and row['skipped'] else row['status']
+        print(label + ' ' + name, flush=True)
         if row['status'] != 'PASS':
             print(log.read_text(encoding='utf-8', errors='replace')[-6000:], flush=True)
     report['status'] = 'PASS' if all(row['status'] == 'PASS' for row in report['modules']) else 'FAIL'

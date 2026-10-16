@@ -123,6 +123,9 @@ class ExeSourceHardening(unittest.TestCase):
                 'a"b','a'+slash+'"b','line'+slash+chr(10),slash*2+'server'+slash+'share'+slash,
                 'backslash'+slash*2,'-dash','x'*500]
         files=['install.ps1','scripts/build_launcher.ps1','scripts/verify_desktop_launch.ps1','scripts/launch_validation_helpers.ps1','scripts/ascii_json_helpers.ps1']
+        files = [name for name in files if (ROOT / name).is_file()]
+        if 'install.ps1' not in files:
+            print('根目錄 install.ps1 已移除，PowerShell 解析 oracle 只對現存檔案執行', flush=True)
         with tempfile.TemporaryDirectory(prefix='acw-ps-pure-') as tmp:
             root=Path(tmp);fixture=root/'input.json';fixture.write_text(json.dumps({'constants':constants,'values':values,'files':[str(ROOT/p) for p in files]}),encoding='utf-8')
             harness=root/'pure-parser.ps1'

@@ -106,6 +106,8 @@ def command_item(status="completed", actions=None, output="fixture output\r\n", 
 class CodexSchemaFixtureTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        if not SCHEMA_ROOT.exists():
+            raise unittest.SkipTest('需要 evidence/codex-schema/v2 夾具（被 .gitignore，請向 Ryan 取得）')
         cls.schemas = {
             method: json.loads((SCHEMA_ROOT / filename).read_text(encoding="utf-8"))
             for method, filename in {

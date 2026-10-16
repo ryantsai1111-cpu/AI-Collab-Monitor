@@ -20,6 +20,7 @@ COLORS = {'accent': '#a3e635', 'running': '#67e8f9', 'ready': '#86efac',
 def collect_snapshot(core, panels, run=None):
     """Bounded queries against Workspace metadata; no discovery or remote history."""
     roles = []
+    request = core.requests.active()
     for agent in panels:
         task, project = core.agent_task(agent) or {}, core.agent_project(agent) or {}
         sid = task.get(agent + '_session') or ''
@@ -28,6 +29,7 @@ def collect_snapshot(core, panels, run=None):
                           task=compact(task.get('title')) or '尚未開啟對話',
                           session=compact(rows[0]['title']) if rows and rows[0]['title'] and rows[0]['title'] != sid else ('已綁定對話' if sid else '尚未綁定對話'),
                           session_id=sid, task_id=task.get('id'), project_id=project.get('id'),
+                          request_label=request['label'] if request and core.provider(agent) == 'local' else '',
                           state=getattr(core.adapters.get(agent), 'state', 'Disconnected'),
                           approvals=len(panels[agent].pending_approval_events)))
     state = run.snapshot() if run else None
@@ -91,7 +93,11 @@ class RoleCard(QFrame):
                  COLORS['ready'] if row['state'] == 'Connected' else COLORS['muted'])
         self.status.setText(f"{row['approvals']} 待核准" if row['approvals'] else STATES.get(row['state'], row['state']))
         desktop = self.window().property('theme') == 'desktop'
-        self.status.setStyleSheet('color: ' + (desktop_state_color(row['state'], row['approvals']) if desktop else color))
+        if row.get('request_label'):
+            self.status.setText('執行中 · ' + row['request_label'])
+            color = COLORS['running']
+        self.status.setStyleSheet('color: ' + (COLORS['running'] if row.get('request_label') else
+                                             desktop_state_color(row['state'], row['approvals']) if desktop else color))
         participation = ('本輪參與' if run['state'] == 'running' else '最近協作角色') if in_scope else '獨立角色'
         duty = ROLES.get(row.get('provider', row['agent']), ('', '依本次任務分工'))[1]
         if in_scope:
@@ -337,8 +343,11 @@ class AgentRail(QScrollArea):
                      COLORS['error'] if row['state'] in ('Error', 'Blocked', 'Interrupted') else
                      COLORS['running'] if row['state'] == 'Busy' else
                      COLORS['ready'] if row['state'] == 'Connected' else COLORS['muted'])
+            if row.get('request_label'):
+                state, color = '執行中 · ' + row['request_label'], COLORS['running']
             status.setText('● ' + state)
-            status.setStyleSheet('color: ' + (desktop_state_color(row['state'], row['approvals']) if self.property('theme') == 'desktop' else color))
+            status.setStyleSheet('color: ' + (COLORS['running'] if row.get('request_label') else
+                                            desktop_state_color(row['state'], row['approvals']) if self.property('theme') == 'desktop' else color))
             context.setText(row['project'])
             context.setToolTip(row['project'] + '\n' + row['task'])
             session.setText(row['session'])

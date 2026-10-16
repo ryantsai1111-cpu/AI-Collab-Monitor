@@ -42,7 +42,8 @@ class CoreTests(unittest.TestCase):
         self.root=Path(self.temp.name)
         self.repo=self.root/'isolated-repo';self.repo.mkdir()
         self.adapters={a:SyntheticAdapter(a) for a in ('claude','dot','codex')}
-        self.core=WorkspaceCore(self.root/'data',self.adapters)
+        self.clock=[1000.0]
+        self.core=WorkspaceCore(self.root/'data',self.adapters,clock=lambda:self.clock[0])
         self.core.git_snapshot=lambda project_id=None:{'branch':'synthetic-branch','diff':'','status':'','log':''}
         self.project=self.core.create_project('Isolated Test Project',self.repo)
         self.core.select_project(self.project['id'])
@@ -57,6 +58,63 @@ class CoreTests(unittest.TestCase):
         self.core.ingest_event(agent,'message_delta',content=text)
         event=self.core.ingest_event(agent,'message_end')
         return event['message_id']
+    def test_idle_checkpoint_flushes_wal_after_five_minutes(self):
+        self.core.store.db.execute('PRAGMA wal_autocheckpoint=0')
+        # Make the main file timestamp deterministic without sleeping for filesystem resolution.
+        os.utime(self.core.store.db_path, (1, 1))
+        before = self.core.store.db_path.stat().st_mtime_ns
+        for index in range(30):
+            self.response(text=f'checkpoint fixture {index}: ' + 'x' * 2048)
+        wal = Path(str(self.core.store.db_path) + '-wal')
+        self.assertGreater(wal.stat().st_size, 0)
+        self.clock[0] += 300
+        self.assertIsNone(self.core.maybe_checkpoint())
+        self.clock[0] += 1
+        result = self.core.maybe_checkpoint()
+        self.assertEqual(0, result[0])
+        self.assertGreater(result[1], 0)
+        self.assertEqual(result[1], result[2])
+        self.assertGreater(self.core.store.db_path.stat().st_mtime_ns, before)
+        self.assertEqual('wal', self.core.store.db.execute('PRAGMA journal_mode').fetchone()[0])
+        with patch.object(self.core.store, 'checkpoint') as checkpoint:
+            self.core.poll_requests()
+            checkpoint.assert_not_called()
+
+    def test_busy_adapter_defers_checkpoint_until_idle_poll(self):
+        self.clock[0] += 301
+        self.adapters['claude'].state = 'Busy'
+        with patch.object(self.core.store, 'checkpoint', return_value=(0, 2, 2)) as checkpoint:
+            self.core.poll_requests()
+            checkpoint.assert_not_called()
+            self.adapters['claude'].state = 'Connected'
+            self.core.poll_requests()
+            checkpoint.assert_called_once_with('PASSIVE')
+
+    def test_unsuccessful_checkpoint_does_not_advance_interval(self):
+        self.clock[0] += 301
+        for result in ((1, 2, 0), (0, 2, 1)):
+            with patch.object(self.core.store, 'checkpoint', return_value=result) as checkpoint:
+                self.core.maybe_checkpoint()
+                self.core.maybe_checkpoint()
+                self.assertEqual(2, checkpoint.call_count)
+        with patch.object(self.core.store, 'checkpoint', side_effect=RuntimeError('fixture failure')), \
+                self.assertLogs('acw.store', level='WARNING') as logs:
+            self.core.maybe_checkpoint()
+        self.assertIn('Periodic WAL checkpoint failed', logs.output[0])
+        with patch.object(self.core.store, 'checkpoint', return_value=(0, 0, 0)) as checkpoint:
+            self.core.maybe_checkpoint()
+            checkpoint.assert_called_once_with('PASSIVE')
+
+    def test_checkpoint_rejects_invalid_mode_and_close_logs_failure(self):
+        with self.assertRaises(ValueError):
+            self.core.store.checkpoint('PASSIVE); DROP TABLE messages; --')
+        with patch.object(self.core.store, 'checkpoint', side_effect=RuntimeError('fixture failure')) as checkpoint, \
+                self.assertLogs('acw.store', level='WARNING') as logs:
+            self.core.close()
+        checkpoint.assert_called_once_with('TRUNCATE')
+        self.assertTrue(self.core.store._closed)
+        self.assertIn('WAL checkpoint on close failed', logs.output[0])
+
     def test_no_automatic_connections_or_resends(self):
         self.assertTrue(all(not adapter.calls for adapter in self.adapters.values()))
         self.core.close()
