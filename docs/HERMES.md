@@ -39,11 +39,38 @@ Workspace 保存固定 `hermes-<UUID>` 對話 ID；真實 Hermes ID 位於原有
 - `run.sh` 另外會用 `tasklist` 檢查是否有任何 `hermes.exe` 在跑，所以本程式的 child 執行期間 `run.sh` 也會拒絕啟動；本程式只以鎖判斷，不按名稱掃描其他 Hermes。
 - 診斷資訊（`diagnostics()`）包含 `lock_file` 與 `lock_held`。
 
-## 請求檔派工（run.sh → 協作站）
+## 請求檔派工（Hermes 與 Codex）
 
 關閉 GUI 會中止進行中的請求，並寫回 `interrupted` 結果；工作目錄可能留下未提交的修改。關閉前會以中文點名確認正在執行的 label 與 worktree，預設不關閉。AgentRail 與協作總覽的 Hermes 卡片會顯示「執行中 · <label>」。
 
 `hermes-delegation` skill 的 `run.sh` 在協作站開著時，不自己起 `hermes.exe`，而是寫一個請求檔，讓**協作站自己的 core** 派工；這樣 Claude 派給 Hermes 的每一步，都有對應的 project、session、messages、events，跟從 UI 送出的一樣。實作在 `acw/requests.py`（不依賴 Qt），設計見 [DESIGN-hermes-single-entry.md](DESIGN-hermes-single-entry.md) §3.2。
+
+### 共用角色腳本與 Codex 派工
+
+每個 instance 的角色指示由 [PLAYBOOKS.md](PLAYBOOKS.md) 管理。請求缺省 `use_playbook: true`，送出前在原始 prompt 前加上該 instance 的 instructions；設 `false` 則完整保留原始 prompt。自動協作也在每一步加上同一層指示，VERDICT 與交接信封不變。一般手動對話不自動加入。
+
+新增欄位：`agent` 缺省 `local`，只接受 provider 為 `local` 或 `codex` 的內建／動態 instance id；`spec` 是 Codex 專用的 worktree 內相對檔案路徑；`timeout_seconds` 是有效執行時間上限。Codex 缺省採 playbook 的 `limits.timeout_seconds`（預設 7200 秒），不覆寫 adapter settings。缺 spec、路徑逃出 worktree 或檔案不存在會回 `no-spec`（REFUSED）。dirty／Connected 守門與 Hermes 相同，同時仍只有一個 run。
+
+Codex 核准留在對應面板，由使用者操作，dispatcher 不代為核准。等待至少一筆 approval 時暫停有效執行計時；每個 request_id 只寫一次 `APPROVAL_NEEDED`，收到回應寫 `APPROVAL_RESOLVED`。全部解決後繼續計時。Codex 投影寫 `codex.log`，timeline actor 為 `CODEX`。Hermes 仍寫 `hermes.log`／`HERMES`。
+
+相容決策（2026-10-16 Ryan 確認）：未提供 timeout_seconds 的舊 Hermes 請求保留 `run_budget + 120` 秒逾時，不改成 7200 秒；REWORK-01 明確將 timeout_seconds 限於 Codex；Hermes 一律採 run_budget + 120 秒，不採用該欄位。Hermes 請求若未提供 run_budget／max_turns，改以該 instance 的 playbook limits 補入；請求自帶值優先，執行結束仍恢復 adapter 原設定。PROGRESS.md 與 dirty 守門不變；沒有 agent 欄位仍派給 local。
+
+通用 stdlib client（只寫請求，不開另一個 Core／資料庫）：
+
+```powershell
+python scripts/dispatch_request.py --agent codex --worktree C:/projects/example --label implement-01 --spec docs/HANDOFF-x.md --data-dir C:/path/to/data --monitor-root C:/path/to/monitor
+python scripts/dispatch_request.py --agent local --worktree C:/projects/example --label step-a1 --briefs docs/briefs/x --prompt-file C:/tmp/prompt.txt --run-budget 600 --max-turns 60
+```
+
+可選 `--timeout`（僅 Codex 生效）、`--allow-dirty`。內建 Codex 必須帶 `--spec`，內建 Hermes 必須帶 `--briefs`；參數缺失與 label 已被占用都 exit 2，後者請改用另一個 label。Windows 接受 `/c/...` 並轉為 `C:\...`。`--data-dir` 缺省採 ACW_DATA_DIR，否則是 `%LOCALAPPDATA%/AI-Collaboration-Workspace/data`。動態 instance 用 `--agent agent-<id>`；Codex instance 帶 `--spec`，Hermes instance 帶 `--briefs`。未給 prompt-file 時，Codex 提示會要求依 spec 執行、開 PR、不 push main；Hermes 沿用固定啟動句。
+
+Client 要求心跳 15 秒內且 pid 活著；無回應印 `workspace: dispatcher not responding` 並 exit 4，不回退直接執行。等待結果時每秒檢查，心跳超過 30 秒即撤回請求，記錄 `RUN_ENDED ... dispatcher-lost` 並 exit 1；Ctrl-C／TERM 也撤回請求，GUI 已接受的工作由 GUI 自己處理。完成印一行結果 JSON 與 codex_exit／hermes_exit，complete exit 0，其餘 exit 1；rejected 的 REFUSAL_CODES（含 no-spec）exit 3。RUN_STARTED／RUN_ENDED 由 client 寫，approval 與執行內容由 GUI 投影。
+
+已知限制：Codex 伺服端自行清除核准時可能不發事件，目前 adapter 也不發 approval_cancelled。若沒有 approval_response，dispatcher 可能仍把該筆視為待核准而暫停逾時計時，直到收到終止事件或關閉／取消工作；本 PR 不修改 adapter 來推測解決狀態。
+
+run.sh 直接路徑目前尚未套用 playbook，由審查者後續接線，不在本 PR 修改範圍。
+
+以下保留 Hermes run.sh 的既有協定；本任務不修改 skill 的接線。
 
 **何時走這條路**：未設 `HERMES_DIRECT=1`，且 dispatcher 的心跳有效。每次 `poll()` 都會改寫 `ACW_DATA_DIR/requests/.dispatcher.json`（預設 `%LOCALAPPDATA%\AI-Collaboration-Workspace\data`；內容 `{pid, at, busy}`，`busy` 表示有 run 在跑，協作站關閉時刪除）。`run.sh` 要求它的 mtime 距現在不到 `HERMES_DISPATCHER_FRESH`（預設 15）秒，而且心跳裡的 pid 活著。`run.sh` **不看** `workspace.lock`：Qt 的 QLockFile 在 GUI 重啟後仍留著前一個行程的 pid，而該 pid 可能被無關的程式重用（2026-10-15 實際發生）。心跳不存在、太舊或 pid 已死（跑的是舊程式碼、當掉、執行緒卡住）時，印 `workspace: dispatcher is not responding (...), using direct mode` 並走直接路徑；若此時 `workspace.lock` 指到活著的 pid，會多印一行提示 GUI 開著但沒有 dispatcher。等結果時 `run.sh` 每 10 秒再看一次心跳，超過 `HERMES_DISPATCHER_STALE`（預設 30）秒沒更新就撤回請求、寫 `RUN_ENDED … dispatcher-lost`、exit 1，**不**回退直接路徑（dispatcher 可能已經啟動 Hermes）。否則 `run.sh` 照舊直接起 `hermes.exe`。請求模式下 `run.sh` 不建 `hermes.lock`，由 `HermesAdapter` 建。
 
@@ -95,3 +122,7 @@ run.sh 等待結果最多 `run_budget + 180` 秒；逾時就撤回請求檔、�
 - Claude 的 [協作紀錄](../AI-Collab-Monitor/docs/claude-hermes-collaboration.md) 是本次研究來源；其中其他專案的 commit、push、正式系統或設定指令不會自動套用於本程式。
 
 測試與已知缺項見 [tests/README](../tests/README.md)。
+
+## 已刪除對話的恢復
+
+Claude／Codex 只在 adapter 尚未持有目標 session、真的需要恢復時檢查本機 transcript。adapter 已持有的 session 直接放行；本次 Core 透過 create_session 建立的最新 session id 也有記憶體內豁免，因為第一則訊息送出前還沒有 transcript。這份豁免不寫入設定，重啟 GUI 後即失效。需要恢復且沒有豁免時，若 transcript 已刪除或從未產生，協作站記錄 session_missing、清除失效綁定並顯示「此對話的紀錄已不存在（ID 前八碼），請開新對話」，不啟動 resume。歷史仍保留，草稿不丟失；使用者按「新對話並傳送」後才建立新 session 並傳送。

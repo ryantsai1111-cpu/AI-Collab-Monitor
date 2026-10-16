@@ -14,7 +14,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from acw import desktop_sessions
-from acw.core import WorkspaceCore
+from tests.workspace_fixtures import TranscriptFixtureCore as WorkspaceCore
 from acw.ui import AGENTS, SessionNavigator, _normalize_dir, _same_dir
 from test_ui_refresh import OfflineAdapter, OfflineWindow
 

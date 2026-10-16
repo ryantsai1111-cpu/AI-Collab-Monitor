@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 from .presentation import (session_identity, session_display, local_session_displays,
                            project_label, task_label, compact)
-from . import approvals
+from . import approvals, playbooks
 from .orchestrator import Orchestrator
 from .monitor import AgentRail, MonitorDashboard, collect_snapshot
 from .theme import (CODE_BLOCK_BG, CODE_INLINE_BG, CODE_INLINE_FG, EVENT_COLOR, HEADING_COLOR, MUTED_COLOR,
@@ -26,7 +26,7 @@ from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont, QKeySequenc
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
     QFormLayout, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
-    QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
+    QListWidget, QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
     QScrollArea, QSizePolicy, QSpinBox, QSplitter, QStackedWidget, QTabWidget,
     QTableWidget, QTableWidgetItem, QTextBrowser, QToolButton, QTreeWidget, QTabBar,
     QTreeWidgetItem, QVBoxLayout, QWidget,
@@ -161,6 +161,128 @@ class PromptEdit(QPlainTextEdit):
             event.acceptProposedAction()
         else:
             super().dropEvent(event)
+
+
+class PlaybookDialog(QDialog):
+    """Edit persisted per-instance instructions without contacting any backend."""
+    def __init__(self, core, agent, parent=None):
+        super().__init__(parent)
+        self.core, self.agent = core, agent
+        self._loaded_data, self._loaded_index = None, -1
+        self.setWindowTitle('角色腳本')
+        self.resize(900, 780)
+        layout = QVBoxLayout(self)
+        layout.addWidget(label('角色腳本 · 切換 Agent 時會提示儲存未存修改。權限欄位記錄角色約定，實際操作仍由後端核准。', True))
+        split = QSplitter()
+        self.agents = QListWidget()
+        self.agent_ids = list(core.agent_ids)
+        self.agents.addItems([core.agent_name(key) for key in self.agent_ids])
+        self.agents.setAccessibleName('角色腳本 Agent 清單')
+        split.addWidget(self.agents)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        form_body = QWidget()
+        form = QFormLayout(form_body)
+        self.role = QLineEdit()
+        self.role.setMaxLength(40)
+        form.addRow('角色', self.role)
+        self.markdown = {}
+        for key, title in (('duties', '職責'), ('instructions', '派工指示'), ('report', '回報格式')):
+            field = QPlainTextEdit()
+            field.setMinimumHeight(90)
+            field.setAccessibleName(title)
+            self.markdown[key] = field
+            form.addRow(title, field)
+        self.limits = {}
+        for key, title in (('run_budget', '執行預算（秒）'), ('max_turns', '工具回合上限'), ('timeout_seconds', '派工逾時（秒）')):
+            field = QSpinBox()
+            field.setRange(1, 2147483647)
+            self.limits[key] = field
+            form.addRow(title, field)
+        self.limits_note = label('run_budget／max_turns：Hermes 請求未指定時的預設值；timeout_seconds：僅 Codex 生效。', True)
+        self.limits_note.setWordWrap(True)
+        form.addRow(self.limits_note)
+        self.permissions = {}
+        for key, title in (('commit', '允許 commit'), ('push', '允許 push（仍依任務授權）'), ('outside_card', '允許任務卡範圍外工作')):
+            field = QCheckBox(title)
+            self.permissions[key] = field
+            form.addRow(field)
+        scroll.setWidget(form_body)
+        split.addWidget(scroll)
+        split.setStretchFactor(1, 1)
+        split.setSizes([190, 670])
+        layout.addWidget(split, 1)
+        self.feedback = label('', True)
+        self.feedback.setWordWrap(True)
+        layout.addWidget(self.feedback)
+        buttons = QHBoxLayout()
+        self.reset_button = button('還原預設', self.reset)
+        buttons.addWidget(self.reset_button)
+        buttons.addStretch()
+        self.save_button = button('儲存', self.save)
+        buttons.addWidget(self.save_button)
+        buttons.addWidget(button('關閉', self.accept))
+        layout.addLayout(buttons)
+        for control in self.findChildren(QPushButton):
+            control.setAutoDefault(False)
+            control.setDefault(False)
+        self.agents.currentRowChanged.connect(self.select_agent)
+        self.agents.setCurrentRow(self.agent_ids.index(agent))
+
+    def form_data(self):
+        return dict(role=self.role.text(), **{key: field.toPlainText() for key, field in self.markdown.items()},
+                    limits={key: field.value() for key, field in self.limits.items()},
+                    permissions={key: field.isChecked() for key, field in self.permissions.items()})
+
+    def select_agent(self, index):
+        if index < 0: return
+        if index != self._loaded_index and self._loaded_data is not None and self.form_data() != self._loaded_data:
+            answer = QMessageBox.question(self, '未儲存的角色腳本', '要先儲存目前 Agent 的修改嗎？',
+                                          QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel, QMessageBox.Cancel)
+            if answer == QMessageBox.Cancel or (answer == QMessageBox.Yes and not self.save()):
+                previous = self.agents.blockSignals(True)
+                self.agents.setCurrentRow(self._loaded_index)
+                self.agents.blockSignals(previous)
+                return
+        self.agent = self.agent_ids[index]
+        data = playbooks.load(self.core, self.agent)
+        self.role.setText(data['role'])
+        for key, field in self.markdown.items(): field.setPlainText(data[key])
+        for key, field in self.limits.items(): field.setValue(data['limits'][key])
+        for key, field in self.permissions.items(): field.setChecked(data['permissions'][key])
+        self.feedback.setText('')
+        self._loaded_data, self._loaded_index = data, index
+
+    def refresh_owner(self):
+        owner = self.parent()
+        if owner and hasattr(owner, 'refresh_monitor'):
+            owner.refresh_monitor()
+            owner.update_context_title()
+
+    def save(self):
+        data = self.form_data()
+        try:
+            playbooks.save(self.core, self.agent, data)
+            self._loaded_data = data
+            self.refresh_owner()
+            self.feedback.setText('已儲存角色腳本與 Markdown。')
+            return True
+        except (ValueError, OSError) as exc:
+            self.feedback.setText(str(exc))
+            return False
+
+    def reset(self):
+        answer = QMessageBox.question(self, '還原角色腳本', '確定要還原預設並覆寫目前 Agent 的角色腳本嗎？',
+                                      QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if answer != QMessageBox.Yes:
+            return False
+        try:
+            playbooks.reset(self.core, self.agent)
+            self.select_agent(self.agents.currentRow())
+            self.refresh_owner()
+            self.feedback.setText('已還原並儲存預設。')
+        except (ValueError, OSError) as exc:
+            self.feedback.setText(str(exc))
 
 
 class DetailDialog(QDialog):
@@ -1145,8 +1267,10 @@ class AgentPanel(QFrame):
         self.send_button.setEnabled(ready and not blocked and not (self.attachments and not files_supported) and not (self._effort_invalid and self.effort.currentData() is None))
         self.send_button.setToolTip("請移除暫存附件或選擇支援的模型" if self.attachments and not files_supported else "請先選擇此模型支援的強度" if self._effort_invalid and self.effort.currentData() is None else "傳送訊息")
         legacy = self.window.core.legacy_local_conversation(self.agent)
-        self.send_button.setText('新對話並傳送' if legacy else BUTTON_LABELS['Send'])
-        feedback = '傳送失敗：' + self.send_error if self.send_error else ''
+        missing = self.window.core.missing_session(self.agent)
+        self.send_button.setText('新對話並傳送' if legacy or missing else BUTTON_LABELS['Send'])
+        feedback = (f'此對話的紀錄已不存在（{missing[:8]}），請開新對話' if missing else
+                    '傳送失敗：' + self.send_error if self.send_error else '')
         if not feedback and legacy:
             name = ROLE_NAMES[legacy['harness']]
             feedback = f'這是舊的 {name} Local 對話。按「新對話並傳送」會建立 Hermes 對話，舊紀錄保留。'
@@ -1353,6 +1477,7 @@ class AgentPanel(QFrame):
             return
         model, effort, attachments = self.model.currentData(), self.effort.currentData(), list(self.attachments)
         legacy = self.window.core.legacy_local_conversation(self.agent)
+        missing = self.window.core.missing_session(self.agent)
         if self.agent == 'dot':
             if self.window.orchestrator and self.window.orchestrator.active:
                 self.window.show_error('請先結束自動協作，再傳送持續對話訊息。');return
@@ -1378,7 +1503,7 @@ class AgentPanel(QFrame):
             if self.agent == 'dot': return self.window.core.send_dot_conversation(content)
             if self.window.core.legacy_local_conversation(self.agent) != legacy:
                 raise RuntimeError('對話已變更，請確認目前對話後再傳送')
-            self.window.core.prepare_conversation(self.agent, fresh=bool(legacy))
+            self.window.core.prepare_conversation(self.agent, fresh=bool(legacy or missing))
             return self.window.core.send_message(self.agent, content, model=model, effort=effort, attachments=attachments or None)
         def sent(_):
             if self.agent == 'dot': self.follow_dot_replies()
@@ -2401,7 +2526,7 @@ class MainWindow(QMainWindow):
         menu = QMenu(workspace_menu)
         for text, callback in (("工作紀錄…", self.show_records), ("任務筆記…", self.notes), ("比較回覆…", self.compare),
                                ("差異／測試／附件…", self.inspect_artifacts), ("匯出…", self.export),
-                               ("設定…", self.settings),
+                               ("角色腳本…", self.edit_playbook), ("設定…", self.settings),
                                ("診斷…", self.diagnostics), ("停止全部 Agent…", self.stop_task)):
             menu.addAction(text, callback)
         workspace_menu.setMenu(menu)
@@ -2436,7 +2561,11 @@ class MainWindow(QMainWindow):
         side.setSpacing(SPACE['sm'])
         self.sidebar_agent_title = label(self.role_names[self._preferred_agent])
         self.sidebar_agent_title.setObjectName('sidebar_agent_title')
-        side.addWidget(self.sidebar_agent_title)
+        agent_heading = QHBoxLayout()
+        agent_heading.addWidget(self.sidebar_agent_title, 1)
+        self.playbook_button = button('角色腳本', self.edit_playbook)
+        agent_heading.addWidget(self.playbook_button)
+        side.addLayout(agent_heading)
         self.sidebar_agent_meta = label('', True)
         side.addWidget(self.sidebar_agent_meta)
         side.addWidget(label('目前綁定', True))
@@ -2705,6 +2834,9 @@ class MainWindow(QMainWindow):
             self.navigator.fill()
             self.refresh_monitor()
 
+    def edit_playbook(self):
+        PlaybookDialog(self.core, self._preferred_agent, self).exec()
+
     def add_agent_dialog(self):
         dialog = QDialog(self)
         dialog.setWindowTitle('新增獨立 Agent')
@@ -2793,7 +2925,7 @@ class MainWindow(QMainWindow):
             agent = self._preferred_agent
             state = self.panels[agent].state.text() if hasattr(self, 'panels') else ''
             self.sidebar_agent_title.setText(self.role_names[agent])
-            self.sidebar_agent_meta.setText(ROLE_LABELS[self.core.provider(agent)] + '\n' + state)
+            self.sidebar_agent_meta.setText((playbooks.load(self.core, agent)['role'] or ROLE_LABELS[self.core.provider(agent)]) + '\n' + state)
         project, task = self.view_project() or {}, self.view_task() or {}
         prefix = '本機紀錄' if hasattr(self, 'records_dialog') and self.records_dialog.isVisible() else self.role_names[self._preferred_agent]
         sid = (task.get(self._preferred_agent + '_session') or '') if prefix != '本機紀錄' else ''
@@ -3012,7 +3144,8 @@ class MainWindow(QMainWindow):
             self.panels[agent].update_controls()
         def failed(message):
             if agent:
-                self.panels[agent].set_state("Error")
+                state = getattr(self.core.adapters.get(agent), 'state', 'Disconnected') if self.core.missing_session(agent) else 'Error'
+                self.panels[agent].set_state(state)
                 self.panels[agent].notice.setText(message)
                 self.panels[agent].notice.setToolTip(message)
             if on_error:
@@ -3253,6 +3386,9 @@ class MainWindow(QMainWindow):
             if panel and kind in ("approval_response", "approval_cancelled"):
                 self.resolve_cached_approval(event)
             displayed_task_id = identifier(self.core.agent_task(agent) or {}) if panel else current_task_id
+            if panel and kind == 'session_missing' and event.get('task_id') == displayed_task_id:
+                panel.send_error = event.get('content', '')
+                panel.update_controls()
             if agent=='dot' and kind in ('message_snapshot','prompt_sent','history_page'):
                 target=getattr(self.core.adapters.get('dot'),'target','')
                 if target and (event.get('session_id')==target or kind=='history_page'):
@@ -4495,7 +4631,7 @@ class MainWindow(QMainWindow):
             return
         request = self.core.requests.active()
         if not self._close_pending and (request or busy):
-            message = (f"Hermes 仍在執行 skill 派來的步驟 {request['label']}（{request['worktree']}）。"
+            message = (f"{self.core.agent_name(self.core.requests.agent)} 仍在執行 skill 派來的步驟 {request['label']}（{request['worktree']}）。"
                        "關閉會中止它，工作目錄可能留下未提交的修改。仍要關閉？" if request else
                        "仍有 Agent 在執行。關閉會要求取消，歷史會保留，重啟不會自動重送。仍要關閉？")
             result = QMessageBox.question(self, "確認關閉", message, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)

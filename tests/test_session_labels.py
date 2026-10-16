@@ -5,7 +5,7 @@ from unittest.mock import patch
 from PySide6.QtWidgets import QApplication, QPushButton
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
-from acw.core import WorkspaceCore
+from tests.workspace_fixtures import TranscriptFixtureCore as WorkspaceCore
 from acw.presentation import session_display, project_label, timestamp
 from acw.ui import MainWindow, NativeSessionDialog, SessionHistoryDialog, SessionDetailsDialog, HandoffDialog
 from test_core import SyntheticAdapter

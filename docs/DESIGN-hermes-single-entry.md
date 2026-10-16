@@ -33,6 +33,8 @@
 
 ### §3.2 階段 B：協作站當派工端，run.sh 用請求檔交給它
 
+2026-10-16 起請求檔亦支援 Codex 與每個 instance 的 playbook；最新欄位、核准暫停計時與通用 CLI 見 [HERMES.md](HERMES.md)「請求檔派工（Hermes 與 Codex）」。
+
 **為什麼不是獨立 CLI 開同一個資料庫**：`run.py` 用 `QLockFile(data_dir/workspace.lock)` 做單一實例；`WorkspaceCore` 本身不鎖，所以第二個行程開同一個 sqlite 技術上可行，但 GUI 的 `WorkspaceCore` 把 `agents.instances`、`selection.<agent>` 等設定快取在記憶體，另一個行程改資料庫會讓 GUI 的狀態與資料庫脫節。所以 GUI 開著時，**只能由 GUI 那個 core 來派工**。
 
 做法：
@@ -72,5 +74,5 @@
 - 不讓 Claude Code 本身變成協作站裡的一個 adapter；Claude 的 session 由 Claude Desktop 管。
 - 不把 skill 的 `PROGRESS.md`／任務卡搬進 sqlite；它們留在 repo 裡是刻意的，Hermes 讀 repo 就夠。
 - 不替 Hermes 加逐次核准橋接。
-- 不把 Codex 接進請求檔：`deliver-to-codex` skill 沒有無頭執行腳本，Codex 是由 Ryan 在 Codex 桌面版的對話裡驅動，沒有可以攔截的啟動點（2026-10-15 確認）。要接的話得先有一條 Claude 直接啟動 `codex exec` 的路徑，目前沒有這個需求。
+- 2026-10-15 原先不接 Codex 的決策已由 2026-10-16 playbooks-dispatch 規格取代；Codex 現在走協作站自己的 app-server adapter，非 codex exec。
 - Claude 本身不進協作站當 agent；它的審查決策由 `hermes-delegation/scripts/progress.mjs` 寫進監看器的 `claude.log` 與 timeline（`APPROVE`／`HOLD`／`REWORK`），協作站經 LegacyReader 看得到。

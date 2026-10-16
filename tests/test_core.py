@@ -11,7 +11,7 @@ import zipfile
 import zlib
 from unittest.mock import patch
 from pathlib import Path
-from acw.core import WorkspaceCore
+from tests.workspace_fixtures import TranscriptFixtureCore as WorkspaceCore
 from acw.adapters.base import Adapter,Capabilities
 
 class SyntheticAdapter(Adapter):
@@ -637,5 +637,141 @@ class CoreTests(unittest.TestCase):
         self.adapters['claude'].get_history=switch
         with self.assertRaisesRegex(PermissionError,'preview discarded'):self.core.native_history('claude',record['id'])
         self.assertEqual([],self.core.messages(agent='claude'))
+
+class UuidSessionAdapter(SyntheticAdapter):
+    """Native-shaped session IDs without creating any transcript or backend process."""
+    def create_session(self):
+        from uuid import uuid4
+        self.session_id = str(uuid4())
+        self.calls.append('create_session')
+        self.emit('session', session_id=self.session_id)
+        return self.session_id
+
+
+class NativeSessionAvailabilityTests(unittest.TestCase):
+    """Use the production Core and real isolated transcript files, not the routing double."""
+    def setUp(self):
+        from acw.core import WorkspaceCore as NativeCore
+        from acw import desktop_sessions
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.claude_root = self.root / 'claude'
+        self.codex_root = self.root / 'codex'
+        self.claude_root.mkdir()
+        self.codex_root.mkdir()
+        for target, result in (('transcript_roots', [self.claude_root]), ('codex_roots', [self.codex_root])):
+            guard = patch.object(desktop_sessions, target, return_value=result)
+            guard.start()
+            self.addCleanup(guard.stop)
+        guard = patch.object(desktop_sessions, '_HISTORY_FILES', {})
+        guard.start()
+        self.addCleanup(guard.stop)
+        self.adapters = {agent: UuidSessionAdapter(agent) for agent in ('claude', 'codex', 'local')}
+        self.core = NativeCore(self.root / 'data', self.adapters)
+        self.addCleanup(self.core.close)
+        self.core.git_snapshot = lambda *a, **k: {'branch': 'fixture'}
+        self.core.select_project(self.core.create_project('Fixture', self.root)['id'])
+        self.task = self.core.create_task('Missing transcript fixture')
+        self.sid = '12345678-1234-4234-8234-123456789abc'
+
+    def test_new_native_session_can_prepare_first_send_without_transcript_or_resume(self):
+        for agent in ('claude', 'codex'):
+            with self.subTest(agent=agent):
+                self.adapters[agent].state = 'Connected'
+                task = self.core.prepare_conversation(agent, fresh=True)
+                sid = task[agent + '_session']
+                self.assertFalse(self.core.session_available(agent, sid))
+                self.adapters[agent].calls.clear()
+                with patch('acw.desktop_sessions.history_stamp', side_effect=AssertionError('No resume check for held session')):
+                    prepared = self.core.prepare_conversation(agent, fresh=False)
+                self.assertEqual(sid, prepared[agent + '_session'])
+                self.assertEqual([], self.adapters[agent].calls)
+
+    def test_missing_transcript_is_rejected_after_core_restart(self):
+        for agent in ('claude', 'codex'):
+            with self.subTest(agent=agent):
+                self.adapters[agent].state = 'Connected'
+                task = self.core.prepare_conversation(agent, fresh=True)
+                sid = task[agent + '_session']
+                self.assertFalse(self.core.session_available(agent, sid))
+                core_type = type(self.core)
+                self.core.close()
+                self.adapters = {key: UuidSessionAdapter(key) for key in ('claude', 'codex', 'local')}
+                self.core = core_type(self.root / 'data', self.adapters)
+                self.addCleanup(self.core.close)
+                self.core.git_snapshot = lambda *a, **k: {'branch': 'fixture'}
+                self.adapters[agent].state = 'Connected'
+                with self.assertRaisesRegex(ValueError, '紀錄已不存在'):
+                    self.core.prepare_conversation(agent, fresh=False)
+                self.assertEqual('', self.core.agent_task(agent)[agent + '_session'])
+                self.assertEqual([], self.adapters[agent].calls)
+
+    def test_fresh_native_session_is_exempt_when_adapter_needs_to_resume_it(self):
+        self.adapters['codex'].state = 'Connected'
+        task = self.core.prepare_conversation('codex', fresh=True)
+        sid = task['codex_session']
+        self.adapters['codex'].session_id = ''
+        self.adapters['codex'].calls.clear()
+        with patch('acw.desktop_sessions.history_stamp', side_effect=AssertionError('Fresh session is exempt')):
+            self.core.prepare_conversation('codex')
+        self.assertEqual(sid, self.core.agent_task('codex')['codex_session'])
+        self.assertEqual(['resume_session'], self.adapters['codex'].calls)
+
+    def test_held_native_session_skips_existence_gate_on_explicit_resume_and_open(self):
+        self.core._set_task_session(self.task['id'], 'codex', self.sid)
+        self.core.store.insert('sessions', dict(id=self.sid, agent='codex', task_id=self.task['id'],
+            project_id=self.task['project_id'], cwd=str(self.root), created_at='2026-10-16', updated_at='2026-10-16'))
+        self.adapters['codex'].state = 'Connected'
+        self.adapters['codex'].session_id = self.sid
+        with patch('acw.desktop_sessions.history_stamp', side_effect=AssertionError('Held session needs no existence check')):
+            self.core.resume_session('codex', self.sid)
+            self.core.open_saved_conversation('codex', self.sid)
+        self.assertEqual(self.sid, self.core.agent_task('codex')['codex_session'])
+
+    def test_session_available_uses_real_claude_and_codex_transcript_roots(self):
+        for agent, root, relative in (
+                ('claude', self.claude_root, 'project/' + self.sid + '.jsonl'),
+                ('codex', self.codex_root, 'sessions/2026/10/16/rollout-fixture-' + self.sid + '.jsonl')):
+            self.assertFalse(self.core.session_available(agent, self.sid))
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('{}\n', encoding='utf-8')
+            self.assertTrue(self.core.session_available(agent, self.sid))
+            path.unlink()
+            self.assertFalse(self.core.session_available(agent, self.sid))
+        self.assertTrue(self.core.session_available('local', 'opaque-hermes-id'))
+
+    def test_missing_bound_session_is_cleared_without_resume_or_resend(self):
+        self.core._set_task_session(self.task['id'], 'claude', self.sid)
+        self.adapters['claude'].state = 'Connected'
+        self.adapters['claude'].session_id = ''
+        self.adapters['claude'].calls.clear()
+        with self.assertRaisesRegex(ValueError, '此對話的紀錄已不存在（12345678），請開新對話'):
+            self.core.prepare_conversation('claude')
+        self.assertEqual('', self.core.agent_task('claude')['claude_session'])
+        self.assertEqual(self.sid, self.core.missing_session('claude'))
+        self.assertEqual([], self.adapters['claude'].calls)
+        events = self.core.store.query("SELECT * FROM events WHERE type='session_missing'")
+        self.assertEqual(1, len(events))
+        self.assertIn('12345678', events[0]['summary'])
+        with self.assertRaises(ValueError):
+            self.core.prepare_conversation('claude')
+        self.core.prepare_conversation('claude', fresh=True)
+        self.assertIn('create_session', self.adapters['claude'].calls)
+        self.assertIsNone(self.core.missing_session('claude'))
+
+    def test_resume_and_open_saved_session_check_before_adapter_calls(self):
+        self.core._set_task_session(self.task['id'], 'codex', self.sid)
+        self.adapters['codex'].state = 'Connected'
+        self.core.store.insert('sessions', dict(id=self.sid, agent='codex', task_id=self.task['id'],
+            project_id=self.task['project_id'], cwd=str(self.root), created_at='2026-10-16', updated_at='2026-10-16'))
+        for operation in (lambda: self.core.resume_session('codex', self.sid),
+                          lambda: self.core.open_saved_conversation('codex', self.sid)):
+            self.adapters['codex'].calls.clear()
+            with self.assertRaisesRegex(ValueError, '紀錄已不存在'):
+                operation()
+            self.assertEqual([], self.adapters['codex'].calls)
+
 
 if __name__=='__main__':unittest.main()

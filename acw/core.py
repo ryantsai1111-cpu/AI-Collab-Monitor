@@ -47,6 +47,7 @@ class WorkspaceCore:
         self._operations={}
         self._active_requests={}
         self._session_reservations={}
+        self._fresh_sessions={}
         self._adapter_epochs={}
         self._operation_context=threading.local()
         self._dot_root_lock=threading.Lock()
@@ -185,6 +186,37 @@ class WorkspaceCore:
         if harness not in ('claude','codex'): return None
         return {'task_id':task['id'],'session_id':session_id,'harness':harness}
 
+    def session_available(self,agent,session_id):
+        provider=self.provider(agent)
+        if provider not in ('claude','codex'): return True
+        from .desktop_sessions import history_stamp
+        return history_stamp(provider,session_id) is not None
+
+    def missing_session(self,agent):
+        task=self.agent_task(agent) or {}
+        return (task.get('metadata') or {}).get('missing_sessions',{}).get(agent)
+
+    def _require_available_session(self,agent,session_id,task=None):
+        if self._fresh_sessions.get(agent)==session_id: return
+        if self.session_available(agent,session_id): return
+        task=task or self.agent_task(agent)
+        content=f'此對話的紀錄已不存在（{session_id[:8]}），請開新對話'
+        with self._lock:
+            if task and task.get(agent+'_session')==session_id:
+                self._set_task_session(task['id'],agent,'')
+                updated=self.get_task(task['id'])
+                metadata=dict(updated.get('metadata') or {})
+                missing=dict(metadata.get('missing_sessions') or {})
+                missing[agent]=session_id
+                metadata['missing_sessions']=missing
+                self.store.update('tasks',{'id':task['id']},{'metadata':metadata})
+                context=self._context(agent)
+                if context.get('task_id')==task['id']:
+                    context['session_id']=''
+            self._record('session_missing',agent,task_id=task['id'] if task else None,
+                         session_id=session_id,content=content)
+        raise ValueError(content)
+
     def prepare_conversation(self,agent,*,fresh=False):
         """Explicit user action: obtain a conversation without requiring task-management UI."""
         self._assert_agent_idle(agent)
@@ -192,13 +224,18 @@ class WorkspaceCore:
         adapter=self._adapter(agent)
         if adapter.state!='Connected': raise RuntimeError('請先連線此 Agent')
         task=self.agent_task(agent)
+        if not fresh and self.missing_session(agent):
+            missing=self.missing_session(agent)
+            raise ValueError(f'此對話的紀錄已不存在（{missing[:8]}），請開新對話')
         if fresh and (not self.capabilities(agent).get('supports_sessions') or self.capabilities(agent).get('supports_create_session') is False):
             raise NotImplementedError('This Agent cannot create a new session')
         if fresh or not task:
             task=self.create_agent_task(agent,'新對話 '+now()[:16].replace('T',' '))
         session_id=task.get(agent+'_session') or ''
         if session_id:
-            if getattr(adapter,'session_id','')!=session_id: self.resume_session(agent,session_id)
+            if getattr(adapter,'session_id','')!=session_id:
+                self._require_available_session(agent,session_id)
+                self.resume_session(agent,session_id)
         elif self.capabilities(agent).get('supports_sessions') and self.capabilities(agent).get('supports_create_session') is not False:
             self.create_session(agent)
         return self.agent_task(agent)
@@ -217,6 +254,8 @@ class WorkspaceCore:
             raise ValueError('此對話的工作目錄與目前 Project 不符')
         task=self.get_task(saved.get('task_id')) if saved.get('task_id') else None
         if task and task['project_id']!=project['id']: raise ValueError('Saved conversation project mismatch')
+        if getattr(self._adapter(agent),'session_id','')!=session_id:
+            self._require_available_session(agent,session_id,task)
         if task: self.select_agent_task(agent,task['id'])
         else: self.create_agent_task(agent,saved.get('title') or '已保存的對話')
         return self.resume_session(agent,session_id)
@@ -802,7 +841,15 @@ class WorkspaceCore:
                 fields['metadata']['native_session_id']=native_session_id
         if self.store.get('sessions',identity): self.store.update('sessions',identity,fields)
         else: self.store.insert('sessions',dict(identity,**fields,title=session_id,created_at=now()))
-        if task: self._set_task_session(task['id'],agent,session_id)
+        if task:
+            self._set_task_session(task['id'],agent,session_id)
+            updated=self.get_task(task['id'])
+            metadata=dict(updated.get('metadata') or {})
+            missing=dict(metadata.get('missing_sessions') or {})
+            if agent in missing:
+                missing.pop(agent)
+                metadata['missing_sessions']=missing
+                self.store.update('tasks',{'id':task['id']},{'metadata':metadata})
 
     @_agent_action
     def create_session(self,agent):
@@ -816,6 +863,7 @@ class WorkspaceCore:
         result=adapter.create_session()
         sid=result.get('id',result.get('session_id','')) if isinstance(result,dict) else result
         if not isinstance(sid,str) or not sid.strip(): raise RuntimeError('Backend did not confirm a new session identifier')
+        self._fresh_sessions[agent]=sid
         self._map_session(agent,sid)
         return result
 
@@ -825,6 +873,8 @@ class WorkspaceCore:
         adapter=self._adapter(agent)
         if not self.capabilities(agent).get('supports_sessions'): raise NotImplementedError(f'{agent}: sessions Unsupported')
         if getattr(adapter,'state','')=='Busy': raise RuntimeError('Wait for the active turn before resuming a session')
+        if getattr(adapter,'session_id','')!=session_id:
+            self._require_available_session(agent,session_id)
         saved=self.store.get('sessions',{'agent':agent,'id':session_id})
         if self.provider(agent)=='local' and getattr(adapter,'local_harness','')=='hermes':
             if not saved or (saved.get('metadata') or {}).get('local_harness')!='hermes':
