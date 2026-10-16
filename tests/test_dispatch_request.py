@@ -78,6 +78,14 @@ class DispatchClientTests(unittest.TestCase):
             self.assertFalse((self.directory / 'fixture.json').exists())
 
     @unittest.skipUnless(os.name == 'nt', 'MSYS drive conversion is Windows-specific')
+    def test_heartbeat_slightly_in_the_future_is_still_fresh(self):
+        # Windows can report a just-written file's mtime a few ms after time.time().
+        stamp = self.heartbeat.stat().st_mtime
+        with patch.object(client, 'pid_alive', return_value=True), patch.object(client.time, 'time', return_value=stamp - 0.01):
+            self.assertTrue(client.dispatcher_ready(self.directory, 15))
+        with patch.object(client, 'pid_alive', return_value=True), patch.object(client.time, 'time', return_value=stamp - 5):
+            self.assertFalse(client.dispatcher_ready(self.directory, 15))
+
     def test_msys_worktree_path_is_converted_before_writing_request(self):
         args = self.args.copy()
         args[args.index('--worktree') + 1] = '/c/workspace/fixture'

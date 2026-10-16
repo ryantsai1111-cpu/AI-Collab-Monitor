@@ -45,7 +45,9 @@ def dispatcher_ready(directory, maximum_age):
         path = directory / '.dispatcher.json'
         data = json.loads(path.read_text(encoding='utf-8-sig'))
         age = time.time() - path.stat().st_mtime
-        return 0 <= age <= maximum_age and pid_alive(data.get('pid'))
+        # A just-written file's mtime can be a few milliseconds ahead of time.time() on Windows
+        # (different clock resolutions), so a small negative age still means "fresh".
+        return -2 <= age <= maximum_age and pid_alive(data.get('pid'))
     except (OSError, ValueError, AttributeError):
         return False
 
