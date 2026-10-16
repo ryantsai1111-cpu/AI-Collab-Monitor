@@ -24,7 +24,7 @@
 
 ## 1. 不變量
 
-1. 只動 `acw/requests.py`、`tests/test_codex_requests.py`（或新測試檔）、`docs/HERMES.md`。不碰 `acw/adapters/*`、`acw/store.py`、`acw/core.py`、`scripts/dispatch_request.py`（它的行為不用改）。
+1. 只動 `acw/requests.py`、`tests/*.py`、`docs/HERMES.md`；Task C 另外允許 `acw/adapters/codex.py` 的 `create_session`／`resume_session` 參數組裝與 `acw/ui.py` 的 Codex 設定對話框與面板說明行。不碰 `acw/store.py`、`acw/core.py`、`scripts/dispatch_request.py`。
 2. Hermes（provider `local`）的完成判定與投影**完全不變**；`tests/test_hermes_requests.py` 不得修改斷言，必須全過。skill 的離線測試 `bash ~/.claude/skills/hermes-delegation/scripts/tests/run-offline.sh` 必須 `OFFLINE TEST PASS`。
 3. `python scripts/run_tests.py --ui` 全綠，全套 0 FAIL。
 
@@ -48,6 +48,26 @@
 4. 回合結束時印一次 `[RESULT exit=<0|1>] <最後一則訊息的第一行 ≤200 字>`，並寫 timeline `TURN_END | <status>`。
 5. 遮罩：所有輸出照現有 `sanitize` + `hermes_mask.mask`。
 
+## Task C：Codex 面板的沙箱與核准設定
+
+**背景**：`CodexAdapter.create_session()`（`acw/adapters/codex.py:450-456`）只送 `{"approvalsReviewer": "user", "cwd": …}`，沙箱與核准完全沿用 Codex 自己對該資料夾的預設。煙霧測試的臨時 repo 不在 `~/.codex/config.toml` 的 `[projects.…] trust_level = "trusted"` 清單裡，thread 拿到 `sandbox: readOnly`、`approvalPolicy: on-request`（`session` 事件的 `permissions` 欄位），連讀檔都要逐一核准、永遠寫不了檔；而且這台 Windows 的沙箱 helper 會失敗（`helper_unknown_error: setup refresh had errors`）。Ryan 的許多專案根目錄（`AI-Collab-Workspace`、`kpr-erp-*`）都不在信任清單。
+
+**例外**：這一項需要動 `acw/adapters/codex.py` 的 `create_session` 與 `resume_session` 參數組裝，以及 `acw/ui.py` 的 Codex 設定對話框。只准動這兩處，其他 adapter 行為不變。
+
+**要求**：
+1. Codex 面板設定（與既有 Codex 設定同一個對話框）新增兩個下拉：
+   - 「沙箱」：`沿用 Codex 設定`（預設，不送參數）／`唯讀`（`read-only`）／`可寫入專案`（`workspace-write`）／`完整存取`（`danger-full-access`）。
+   - 「核准」：`沿用 Codex 設定`（預設）／`需要時詢問`（`on-request`）／`失敗時詢問`（`on-failure`）／`不詢問`（`never`）。
+   存在 `agent.<id>` 設定裡的 `sandbox`、`approval_policy`。
+2. `create_session` 與 `resume_session` 在設定不是「沿用」時，把值帶進 `thread/start`／`thread/resume` 的參數（先查本機 app-server 的 schema 或 `codex app-server --help` 確認欄位名稱是 `sandbox`／`approvalPolicy` 及其字串值；若欄位名稱不同，以實際 schema 為準並在回報寫明）。
+3. 面板標頭下方那行能力說明加上目前 thread 實際拿到的權限（`_permission_state` 的 `sandbox.type` 與 `approvalPolicy`），例如「沙箱：workspace-write · 核准：on-failure」，讓使用者一眼看出這個對話能不能寫檔。
+4. 不要替使用者預設成完整存取；預設維持「沿用 Codex 設定」。
+5. `docs/HERMES.md`「請求檔派工」的 Codex 段落補一句：派工前在 Codex 面板設定確認沙箱至少是「可寫入專案」，否則 Codex 會一路要求核准。
+
+**驗收**：
+- `tests/test_codex_adapter.py` 或新檔：替身 app-server 收到的 `thread/start` 參數在「沿用」時不含 `sandbox`／`approvalPolicy`，選了值時含對應字串；`resume` 同理。
+- UI 測試：設定對話框有兩個下拉，選值後存進 `agent.codex` 設定；面板說明行顯示 `_permission_state`。
+
 ## 驗收（附執行輸出原文）
 
 - `tests/test_codex_requests.py` 新增一個替身 Codex adapter 的完整回合：`message_start` → `message_end`（第一則）→ `command` inProgress → `approval` → `approval_response` → `command` completed → `message_start` → `message_end`（第二則）→ `event` `Turn completed` → `state Connected`。斷言：
@@ -66,6 +86,6 @@
 
 ## 不做
 
-- 不改 Codex adapter、不改核准策略或沙箱設定（那是使用者在 GUI 的設定）。
+- Codex adapter 除了 Task C 那兩個方法的參數外不改；不替使用者決定權限等級（預設沿用 Codex 設定）。
 - 不改 `dispatch_request.py`、不改 Hermes 路徑。
 - 不要 push main。
