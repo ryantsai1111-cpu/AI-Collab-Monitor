@@ -94,6 +94,24 @@ class MaintenanceTests(unittest.TestCase):
         self.assertEqual(report['status'], 'FAIL')
         self.assertEqual([row['status'] for row in report['modules']], ['PASS', 'FAIL'])
 
+    def test_runner_surfaces_skips_without_hiding_failures(self):
+        self.write('tests/test_one.py')
+        self.write('tests/test_two.py')
+        def run(command, **kwargs):
+            failed = command[-2] == 'test_two'
+            kwargs['stdout'].write('FAILED (failures=1, skipped=2)\n' if failed else 'OK (skipped=1)\n')
+            return subprocess.CompletedProcess(command, int(failed))
+        output = io.StringIO()
+        with patch.object(run_tests, 'ROOT', self.root), \
+                patch.object(run_tests.subprocess, 'run', side_effect=run), contextlib.redirect_stdout(output):
+            self.assertEqual(1, run_tests.main([]))
+        report = json.loads(next((self.root / 'evidence').rglob('result.json')).read_text())
+        self.assertEqual('FAIL', report['status'])
+        self.assertEqual([True, True], [row['skipped'] for row in report['modules']])
+        self.assertEqual([1, 2], [row['skipped_count'] for row in report['modules']])
+        self.assertIn('PASS (skipped) test_one', output.getvalue())
+        self.assertIn('FAIL test_two', output.getvalue())
+
     def test_runner_timeout_is_reported_as_failure(self):
         self.write('tests/test_one.py')
         with patch.object(run_tests, 'ROOT', self.root), patch.object(run_tests.subprocess, 'run', side_effect=subprocess.TimeoutExpired('fixture', 1)), contextlib.redirect_stdout(io.StringIO()):
