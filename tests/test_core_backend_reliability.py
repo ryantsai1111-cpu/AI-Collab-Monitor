@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from acw.adapters.dot import DotAdapter
-from acw.core import WorkspaceCore
+from tests.workspace_fixtures import TranscriptFixtureCore as WorkspaceCore
 from acw.store import now
 from test_core import SyntheticAdapter
 

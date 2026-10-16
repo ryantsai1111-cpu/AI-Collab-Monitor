@@ -15,6 +15,9 @@ def envelope(token, verdict='PASS', body='complete handoff'):
 class CoreFixture:
     agent_ids = ('claude', 'dot', 'codex', 'local')
 
+    def get_setting(self, key, default=None):
+        return default
+
     @staticmethod
     def provider(agent):
         return agent

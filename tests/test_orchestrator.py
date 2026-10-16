@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 
 from acw.adapters.dot import DotAdapter
-from acw.core import WorkspaceCore
+from tests.workspace_fixtures import TranscriptFixtureCore as WorkspaceCore
 from acw.orchestrator import Orchestrator, parse_verdict
 from acw.store import now, uid
 from test_ui_refresh import OfflineAdapter

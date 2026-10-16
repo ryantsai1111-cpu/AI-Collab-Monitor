@@ -12,7 +12,7 @@ from unittest.mock import patch
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from acw import approvals
-from acw.core import WorkspaceCore
+from tests.workspace_fixtures import TranscriptFixtureCore as WorkspaceCore
 from acw.ui import AGENTS, ActivityGroup, EventCard
 from test_ui_refresh import OfflineAdapter, OfflineWindow
 

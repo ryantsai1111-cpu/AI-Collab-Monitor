@@ -479,6 +479,10 @@ class RequestDispatcher:
             self._heartbeat(True)
             run['t0'] = self.clock()
             run['operation'] = core.send_message(agent, prompt)
+            if provider == 'codex':
+                identity = getattr(adapter, 'active_operation_id', None)
+                if callable(identity):
+                    run['operation'] = identity()
         except Exception as exc:
             self._clear(run)
             return self._reject(label, 'send-failed', sanitize(str(exc)) or type(exc).__name__, started, task_id=task_id)

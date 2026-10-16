@@ -67,9 +67,11 @@ class DispatchClientTests(unittest.TestCase):
     def test_local_default_prompt_and_interruption_cleanup(self):
         args = self.args.copy()
         args[1] = 'local'
+        args[args.index('--spec')] = '--briefs'
+        args[args.index('spec.md')] = 'docs/briefs/t'
         def interrupt(_):
             request = json.loads((self.directory / 'fixture.json').read_text(encoding='utf-8'))
-            self.assertEqual(client.LOCAL_PROMPT, request['prompt'])
+            self.assertEqual(client.LOCAL_PROMPT.format(worktree=self.root, briefs='docs/briefs/t'), request['prompt'])
             raise KeyboardInterrupt
         with patch.object(client, 'pid_alive', return_value=True), patch.object(client.time, 'sleep', side_effect=interrupt):
             self.assertEqual(1, client.main(args))

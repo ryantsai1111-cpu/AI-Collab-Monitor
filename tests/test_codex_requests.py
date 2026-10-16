@@ -113,6 +113,18 @@ class CodexRequestTests(unittest.TestCase):
         self.core.poll_requests()
         self.assertEqual(1, len(self.adapter.sent))
 
+    def test_timeout_cancels_with_opaque_native_operation_token_not_turn_id(self):
+        token = (7, 2, 'native-thread', 'native-turn', 12345)
+        stopped = []
+        self.adapter.active_operation_id = lambda: token
+        self.adapter.stop_if_owned = lambda expected: stopped.append(expected)
+        self.request(timeout_seconds=1)
+        self.assertEqual(token, self.core.requests._run['operation'])
+        self.now[0] += 2
+        self.core.poll_requests()
+        self.assertEqual([token], stopped)
+        self.assertEqual('interrupted', self.result()['status'])
+
     def test_unsupported_agent_is_rejected(self):
         self.request(agent='claude')
         self.assertTrue(self.result()['reason'].startswith('bad-request:'))

@@ -1240,8 +1240,10 @@ class AgentPanel(QFrame):
         self.send_button.setEnabled(ready and not blocked and not (self.attachments and not files_supported) and not (self._effort_invalid and self.effort.currentData() is None))
         self.send_button.setToolTip("請移除暫存附件或選擇支援的模型" if self.attachments and not files_supported else "請先選擇此模型支援的強度" if self._effort_invalid and self.effort.currentData() is None else "傳送訊息")
         legacy = self.window.core.legacy_local_conversation(self.agent)
-        self.send_button.setText('新對話並傳送' if legacy else BUTTON_LABELS['Send'])
-        feedback = '傳送失敗：' + self.send_error if self.send_error else ''
+        missing = self.window.core.missing_session(self.agent)
+        self.send_button.setText('新對話並傳送' if legacy or missing else BUTTON_LABELS['Send'])
+        feedback = (f'此對話的紀錄已不存在（{missing[:8]}），請開新對話' if missing else
+                    '傳送失敗：' + self.send_error if self.send_error else '')
         if not feedback and legacy:
             name = ROLE_NAMES[legacy['harness']]
             feedback = f'這是舊的 {name} Local 對話。按「新對話並傳送」會建立 Hermes 對話，舊紀錄保留。'
@@ -1448,6 +1450,7 @@ class AgentPanel(QFrame):
             return
         model, effort, attachments = self.model.currentData(), self.effort.currentData(), list(self.attachments)
         legacy = self.window.core.legacy_local_conversation(self.agent)
+        missing = self.window.core.missing_session(self.agent)
         if self.agent == 'dot':
             if self.window.orchestrator and self.window.orchestrator.active:
                 self.window.show_error('請先結束自動協作，再傳送持續對話訊息。');return
@@ -1473,7 +1476,7 @@ class AgentPanel(QFrame):
             if self.agent == 'dot': return self.window.core.send_dot_conversation(content)
             if self.window.core.legacy_local_conversation(self.agent) != legacy:
                 raise RuntimeError('對話已變更，請確認目前對話後再傳送')
-            self.window.core.prepare_conversation(self.agent, fresh=bool(legacy))
+            self.window.core.prepare_conversation(self.agent, fresh=bool(legacy or missing))
             return self.window.core.send_message(self.agent, content, model=model, effort=effort, attachments=attachments or None)
         def sent(_):
             if self.agent == 'dot': self.follow_dot_replies()
@@ -3114,7 +3117,8 @@ class MainWindow(QMainWindow):
             self.panels[agent].update_controls()
         def failed(message):
             if agent:
-                self.panels[agent].set_state("Error")
+                state = getattr(self.core.adapters.get(agent), 'state', 'Disconnected') if self.core.missing_session(agent) else 'Error'
+                self.panels[agent].set_state(state)
                 self.panels[agent].notice.setText(message)
                 self.panels[agent].notice.setToolTip(message)
             if on_error:
@@ -3355,6 +3359,9 @@ class MainWindow(QMainWindow):
             if panel and kind in ("approval_response", "approval_cancelled"):
                 self.resolve_cached_approval(event)
             displayed_task_id = identifier(self.core.agent_task(agent) or {}) if panel else current_task_id
+            if panel and kind == 'session_missing' and event.get('task_id') == displayed_task_id:
+                panel.send_error = event.get('content', '')
+                panel.update_controls()
             if agent=='dot' and kind in ('message_snapshot','prompt_sent','history_page'):
                 target=getattr(self.core.adapters.get('dot'),'target','')
                 if target and (event.get('session_id')==target or kind=='history_page'):

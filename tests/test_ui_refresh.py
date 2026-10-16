@@ -25,7 +25,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QComboBox, QDialog, QLabel, QMenu, QMessageBox, QPushButton, QToolButton
 
 from acw.adapters.base import Adapter, Capabilities
-from acw.core import WorkspaceCore
+from tests.workspace_fixtures import TranscriptFixtureCore as WorkspaceCore
 from acw.store import now
 from acw.ui import AGENTS, EventCard, MainWindow, MessageCard, PromptEdit
 
@@ -279,6 +279,37 @@ class WorkspaceUiRefreshTests(unittest.TestCase):
         self.assertIn('架構驗收負責人', self.window.sidebar_agent_meta.text())
         dialog.close()
         dialog.deleteLater()
+
+    def test_missing_transcript_shows_new_conversation_send_and_recovers(self):
+        panel = self.connect_fixture('claude')
+        self.window.reported_errors.clear()
+        panel.input.setPlainText('Retained draft for missing session')
+        old_task = self.core.agent_task('claude')['id']
+        old_session = self.core.agent_task('claude')['claude_session']
+        import time
+        def run_worker(*args, **kwargs):
+            return MainWindow.run(self.window, *args, **kwargs)
+        with patch.object(self.core, 'session_available', return_value=False), \
+                patch.object(self.window, 'run', side_effect=run_worker):
+            panel.send()
+            until = time.monotonic() + 5
+            while self.window.workers and time.monotonic() < until:
+                QTest.qWait(10)
+                time.sleep(.001)
+            self.assertFalse(self.window.workers)
+        self.assertIn('紀錄已不存在', panel.send_feedback.text())
+        self.assertEqual('新對話並傳送', panel.send_button.text())
+        self.assertEqual('Retained draft for missing session', panel.input.toPlainText())
+        self.assertEqual('', self.core.agent_task('claude')['claude_session'])
+        self.assertFalse(any(call[0] in ('resume_session', 'send') for call in self.adapters['claude'].calls))
+        self.window.reported_errors.clear()
+        self.assertEqual('Connected', panel.connection_state)
+        self.assertTrue(panel.send_button.isEnabled())
+        panel.send()
+        self.assertNotEqual(old_task, self.core.agent_task('claude')['id'])
+        self.assertTrue(any(call[0] == 'create_session' for call in self.adapters['claude'].calls))
+        self.assertTrue(any(call[0] == 'send' for call in self.adapters['claude'].calls))
+        self.assertIsNone(self.core.missing_session('claude'))
 
     def settle(self):
         for _ in range(3):

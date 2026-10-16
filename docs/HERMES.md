@@ -118,3 +118,7 @@ run.sh 等待結果最多 `run_budget + 180` 秒；逾時就撤回請求檔、�
 - Claude 的 [協作紀錄](../AI-Collab-Monitor/docs/claude-hermes-collaboration.md) 是本次研究來源；其中其他專案的 commit、push、正式系統或設定指令不會自動套用於本程式。
 
 測試與已知缺項見 [tests/README](../tests/README.md)。
+
+## 已刪除對話的恢復
+
+Claude／Codex 在恢復前會確認本機 transcript 是否仍存在；若已刪除，協作站記錄 session_missing、清除失效綁定並顯示「此對話的紀錄已不存在（ID 前八碼），請開新對話」，不啟動 resume。歷史仍保留，草稿不丟失；使用者按「新對話並傳送」後才建立新 session 並傳送。新建的 session 不會立刻套用這項恢復檢查。

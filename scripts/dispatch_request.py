@@ -17,7 +17,7 @@ import time
 REFUSAL_CODES = ('bad-label', 'bad-request', 'no-worktree', 'no-progress', 'dirty-worktree',
                  'git-failed', 'expired', 'no-spec')
 LABEL = re.compile(r'(?!\.)[A-Za-z0-9._-]{1,64}')
-LOCAL_PROMPT = 'Read PROGRESS.md and do the step it points to.'
+LOCAL_PROMPT = '到 {worktree}，讀 {briefs}/PROGRESS.md，照它指的任務卡執行。只做進度檔指的那一步，做完該步的收尾（含 commit 與 push）後就結束並回報。'
 
 
 def pid_alive(pid):
@@ -95,7 +95,7 @@ def main(argv=None):
     actor = 'CODEX' if codex else 'HERMES'
     try:
         prompt = args.prompt_file.read_text(encoding='utf-8-sig') if args.prompt_file else (
-            f'照 {args.spec} 執行；做完開 PR 不要 push main；回報用規格的回報格式' if codex else LOCAL_PROMPT)
+            f'照 {args.spec} 執行；做完開 PR 不要 push main；回報用規格的回報格式' if codex else LOCAL_PROMPT.format(worktree=args.worktree, briefs=args.briefs))
     except OSError as exc:
         parser.error(str(exc))
     request = dict(agent=args.agent, label=args.label, worktree=str(args.worktree), prompt=prompt,
