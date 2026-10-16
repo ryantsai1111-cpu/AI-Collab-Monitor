@@ -30,7 +30,7 @@ def collect_snapshot(core, panels, run=None):
                           task=compact(task.get('title')) or '尚未開啟對話',
                           session=compact(rows[0]['title']) if rows and rows[0]['title'] and rows[0]['title'] != sid else ('已綁定對話' if sid else '尚未綁定對話'),
                           session_id=sid, task_id=task.get('id'), project_id=project.get('id'),
-                          request_label=request['label'] if request and core.provider(agent) == 'local' else '',
+                          request_label=request['label'] if request and agent == core.requests.agent else '',
                           state=getattr(core.adapters.get(agent), 'state', 'Disconnected'),
                           approvals=len(panels[agent].pending_approval_events)))
     state = run.snapshot() if run else None

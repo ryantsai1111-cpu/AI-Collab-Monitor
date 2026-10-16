@@ -21,6 +21,7 @@ from pathlib import Path
 
 from .hermes_mask import LineMasker, mask
 from .security import sanitize
+from . import playbooks
 
 HEARTBEAT = '.dispatcher.json'
 LABEL = re.compile(r'(?!\.)[A-Za-z0-9._-]{1,64}')
@@ -32,10 +33,10 @@ GRACE_SECONDS = 120          # added to run_budget before the workspace gives up
 EXPIRY_SECONDS = 180         # a request older than run_budget + this is dead: run.sh has stopped waiting
 PARTIAL_JSON_SECONDS = 5     # an unparsable request younger than this may still be mid-write
 MAX_BUDGET, MAX_TURNS = 86400, 1000
-WANTED = ('message_start', 'message_delta', 'tool_start', 'tool_result', 'message_end', 'error')
+WANTED = ('message_start', 'message_delta', 'tool_start', 'tool_result', 'message_end', 'error', 'approval', 'approval_response')
 # Reasons starting with one of these mean "the request itself is wrong": run.sh refuses (exit 3). Every other
 # rejection means "this workspace cannot take it right now": run.sh falls back to starting hermes.exe directly.
-REFUSAL_CODES = ('bad-label', 'bad-request', 'no-worktree', 'no-progress', 'dirty-worktree', 'git-failed', 'expired')
+REFUSAL_CODES = ('bad-label', 'bad-request', 'no-worktree', 'no-progress', 'dirty-worktree', 'git-failed', 'expired', 'no-spec')
 
 
 def _iso():
@@ -67,14 +68,15 @@ class MonitorProjection:
     ``hermes_mask.mask`` (a copy of the direct path's rules), so both entry points mask alike.
     """
 
-    def __init__(self, label, root):
+    def __init__(self, label, root, provider='local'):
         self.label = label
+        self.actor = 'CODEX' if provider == 'codex' else 'HERMES'
         self.hermes_log = self.timeline_log = None
         if isinstance(root, str) and root and Path(root).is_dir():
             logs = Path(root) / 'logs'
             try:
                 logs.mkdir(parents=True, exist_ok=True)
-                self.hermes_log, self.timeline_log = logs / 'hermes.log', logs / 'timeline.log'
+                self.hermes_log, self.timeline_log = logs / ('codex.log' if provider == 'codex' else 'hermes.log'), logs / 'timeline.log'
             except OSError:
                 pass
         self.done = 0        # complete lines of the accumulated assistant text already written
@@ -111,7 +113,7 @@ class MonitorProjection:
         if (event, message) in self.seen:
             return
         self.seen.add((event, message))
-        self._append(self.timeline_log, '%s | %s | HERMES | %s | %s' % (_iso(), self.label, event, message))
+        self._append(self.timeline_log, '%s | %s | %s | %s | %s' % (_iso(), self.label, self.actor, event, message))
 
     def scan(self, line):
         if '[DECISION NEEDED]' in line:
@@ -192,7 +194,7 @@ class MonitorProjection:
 class RequestDispatcher:
     def __init__(self, core, directory=None, agent='local', clock=time.monotonic):
         self.core = core
-        self.agent = agent
+        self.default_agent = agent
         self.directory = Path(directory) if directory else Path(core.data_dir) / 'requests'
         self.clock = clock                      # monotonic seconds; tests replace it
         self._poll_lock = threading.Lock()
@@ -201,6 +203,10 @@ class RequestDispatcher:
         self._buffer = deque(maxlen=20000)
         self._active_task = None
         core._event_taps.append(self._on_event)
+
+    @property
+    def agent(self):
+        return self._run['agent'] if self._run else self.default_agent
 
     def active(self):
         """Return a detached public snapshot without exposing adapter/run internals."""
@@ -219,10 +225,11 @@ class RequestDispatcher:
             return
         if event.get('type') not in WANTED:
             return
-        slim = {key: event.get(key) for key in ('type', 'content', 'name', 'input', 'is_error', 'duration_ms', 'status')
+        slim = {key: event.get(key) for key in ('type', 'content', 'name', 'input', 'is_error', 'duration_ms', 'status', 'request_id', 'details', 'approved')
                 if key in event}
         if slim['type'] == 'tool_result':
             slim.pop('content', None)           # tool output is never projected
+        slim['at'] = self.clock()
         self._buffer.append(slim)
 
     # ------------------------------------------------------------------ files
@@ -341,6 +348,21 @@ class RequestDispatcher:
             return self._reject(label, 'bad-request', '請求檔不是有效的 JSON 物件', started)
         if str(request.get('label', label)) != label:
             return self._reject(label, 'bad-request', '請求內的 label 與檔名不一致', started)
+        agent = request.get('agent', self.default_agent)
+        try:
+            provider = self.core.provider(agent)
+        except (ValueError, TypeError):
+            provider = None
+        if provider not in ('local', 'codex'):
+            return self._reject(label, 'bad-request', 'agent 必須是 Hermes 或 Codex instance', started)
+        if type(request.get('use_playbook', True)) is not bool:
+            return self._reject(label, 'bad-request', 'use_playbook 必須是布林值', started)
+        limits = playbooks.load(self.core, agent)['limits']
+        timeout = request.get('timeout_seconds', limits['timeout_seconds'] if provider == 'codex' else None)
+        if timeout is not None:
+            timeout = _positive(timeout, 2147483647)
+            if timeout is None:
+                return self._reject(label, 'bad-request', 'timeout_seconds 必須是正整數', started)
         prompt = request.get('prompt')
         budget, turns = request.get('run_budget'), request.get('max_turns')
         budget = None if budget in (None, '') else _positive(budget, MAX_BUDGET)
@@ -350,7 +372,7 @@ class RequestDispatcher:
         if (request.get('run_budget') not in (None, '') and budget is None) or \
            (request.get('max_turns') not in (None, '') and turns is None):
             return self._reject(label, 'bad-request', 'run_budget／max_turns 必須是範圍內的正整數', started)
-        wait = (budget or 600) + EXPIRY_SECONDS
+        wait = (timeout if provider == 'codex' else budget or 600) + EXPIRY_SECONDS
         if age > wait:
             return self._reject(label, 'expired', '請求已過期（run.sh 已不再等待）', started)
         try:
@@ -360,16 +382,22 @@ class RequestDispatcher:
             worktree = None
         if worktree is None or not worktree.is_dir():
             return self._reject(label, 'no-worktree', 'worktree 必須是存在的絕對路徑：' + str(request.get('worktree')), started)
-        briefs = str(request.get('briefs') or '').strip()
-        progress = (worktree / briefs / 'PROGRESS.md') if briefs else None
+        relative = request.get('spec') if provider == 'codex' else request.get('briefs')
+        relative = relative.strip() if isinstance(relative, str) else ''
+        candidate = worktree / relative if relative else None
+        target = candidate if provider == 'codex' or candidate is None else candidate / 'PROGRESS.md'
         try:
-            inside = progress is not None and progress.resolve().is_relative_to(worktree)
+            inside = bool(target and not Path(relative).is_absolute() and target.resolve().is_relative_to(worktree))
         except (OSError, ValueError):
             inside = False
-        if briefs and not inside:
-            return self._reject(label, 'bad-request', 'briefs 必須是 worktree 內的相對路徑', started)
-        if progress is None or not progress.is_file():
-            return self._reject(label, 'no-progress', '找不到 %s/PROGRESS.md' % (briefs or '(未指定)'), started)
+        if provider == 'codex':
+            if not inside or not target.is_file():
+                return self._reject(label, 'no-spec', 'spec 必須是 worktree 內存在的相對檔案路徑', started)
+        else:
+            if relative and not inside:
+                return self._reject(label, 'bad-request', 'briefs 必須是 worktree 內的相對路徑', started)
+            if target is None or not target.is_file():
+                return self._reject(label, 'no-progress', '找不到 %s/PROGRESS.md' % (relative or '(未指定)'), started)
         allow_dirty = request.get('allow_dirty') is True or str(request.get('allow_dirty')).lower() in ('1', 'true')
         self._heartbeat(True)                   # git status can take a while on a big tree
         dirty = self._dirty(worktree)
@@ -377,21 +405,21 @@ class RequestDispatcher:
             return self._reject(label, 'git-failed', '無法執行 git status', started)
         if dirty and not allow_dirty:
             return self._reject(label, 'dirty-worktree', '工作樹不乾淨：' + _clip(dirty, 200), started)
-        adapter = self.core.adapters.get(self.agent)
+        adapter = self.core.adapters.get(agent)
         state = getattr(adapter, 'state', 'Disconnected')
         if adapter is not None and state in ('Error', 'Disconnected'):
             # A failed earlier run leaves the adapter in Error until someone reconnects; try that once here.
             # Busy / Connecting are never touched.
             self._heartbeat(True)
             try:
-                self.core.connect(self.agent)
+                self.core.connect(agent)
             except Exception:
                 pass
-            adapter = self.core.adapters.get(self.agent)
+            adapter = self.core.adapters.get(agent)
             state = getattr(adapter, 'state', 'Disconnected')
         if adapter is None or state != 'Connected':
-            return self._reject(label, 'local-not-connected', '協作站的 %s agent 目前不是 Connected（狀態 %s）' % (self.agent, state), started)
-        return self._launch(label, request, worktree, prompt, budget, turns, started)
+            return self._reject(label, 'local-not-connected' if provider == 'local' else 'agent-not-connected', '協作站的 %s agent 目前不是 Connected（狀態 %s）' % (agent, state), started)
+        return self._launch(label, request, worktree, prompt, budget, turns, started, timeout=timeout)
 
     @staticmethod
     def _dirty(worktree):
@@ -405,11 +433,14 @@ class RequestDispatcher:
         return done.stdout.strip() if done.returncode == 0 else None
 
     # ------------------------------------------------------------------ launch
-    def _launch(self, label, request, worktree, prompt, budget, turns, started):
-        core, agent = self.core, self.agent
+    def _launch(self, label, request, worktree, prompt, budget, turns, started, *, timeout=None):
+        core, agent = self.core, request.get('agent', self.default_agent)
+        provider = core.provider(agent)
         task_id = ''
         try:
             self._heartbeat(True)
+            if request.get('use_playbook', True):
+                prompt = playbooks.compose_prompt(core, agent, prompt)
             target = _norm(worktree)
             project = next((p for p in core.list_projects() if p.get('repo_path') and _norm(p['repo_path']) == target), None)
             if project is None:
@@ -419,14 +450,15 @@ class RequestDispatcher:
             task = core.prepare_conversation(agent, fresh=True)
             task_id = task['id']
             try:
-                core.update_task(task_id, title=sanitize('Hermes · ' + label))
+                core.update_task(task_id, title=sanitize(core.agent_name(agent) + ' · ' + label))
             except Exception:
                 pass                              # a missing nicer title is not a reason to refuse
             adapter = core.adapters[agent]
             monitor_root = request.get('monitor_root')
-            run = {'label': label, 'worktree': str(worktree), 'task_id': task_id, 'started': started, 'adapter': adapter, 'saved': {},
+            run = {'agent': agent, 'provider': provider, 'label': label, 'worktree': str(worktree), 'task_id': task_id, 'started': started, 'adapter': adapter, 'saved': {},
                    'budget': budget or _positive(adapter.settings.get('run_budget', 600), MAX_BUDGET) or 600,
-                   'monitor': MonitorProjection(label, monitor_root if isinstance(monitor_root, str) else ''),
+                   'monitor': MonitorProjection(label, monitor_root if isinstance(monitor_root, str) else '', provider),
+                   'timeout': timeout, 'paused': 0.0, 'pause_start': None, 'approvals': set(), 'approval_seen': set(),
                    'session_id': '', 'operation': None, 'end': None, 'end_deferred': False, 'errors': [],
                    'result_pending': None, 'flushed': False}
         except Exception as exc:
@@ -440,16 +472,16 @@ class RequestDispatcher:
             # A request carries its own limits for this run only. The adapter reads run_budget/max_turns from its
             # settings dict when it builds argv, which is also what the user's saved agent config feeds; the saved
             # config must not change, so the override is a temporary edit of the live dict, undone when the run ends.
-            for key, value in (('run_budget', budget), ('max_turns', turns)):
+            for key, value in ((('run_budget', budget), ('max_turns', turns)) if provider == 'local' else ()):
                 if value is not None:
                     run['saved'][key] = adapter.settings.get(key, _MISSING)
                     adapter.settings[key] = value
             self._heartbeat(True)
+            run['t0'] = self.clock()
             run['operation'] = core.send_message(agent, prompt)
         except Exception as exc:
             self._clear(run)
             return self._reject(label, 'send-failed', sanitize(str(exc)) or type(exc).__name__, started, task_id=task_id)
-        run['t0'] = self.clock()
         current = core.agent_task(agent) or {}
         run['session_id'] = current.get(agent + '_session', '') or ''
         return []
@@ -484,6 +516,22 @@ class RequestDispatcher:
                 break
         for event in events:
             kind = event['type']
+            if run['provider'] == 'codex' and kind in ('approval', 'approval_response'):
+                request_id = str(event.get('request_id') or '')
+                at = max(run['t0'], event['at'])
+                if request_id and kind == 'approval' and request_id not in run['approval_seen']:
+                    run['approval_seen'].add(request_id)
+                    if not run['approvals']:
+                        run['pause_start'] = at
+                    run['approvals'].add(request_id)
+                    summary = _clip(event.get('details') or event.get('content') or '', 160)
+                    monitor.timeline('APPROVAL_NEEDED', request_id + ' ' + summary)
+                elif request_id in run['approvals'] and kind == 'approval_response':
+                    run['approvals'].remove(request_id)
+                    monitor.timeline('APPROVAL_RESOLVED', request_id)
+                    if not run['approvals']:
+                        run['paused'] += at - run['pause_start']
+                        run['pause_start'] = None
             if kind == 'error':
                 run['errors'].append(sanitize(str(event.get('content') or '')))
             if kind == 'message_end':
@@ -498,14 +546,18 @@ class RequestDispatcher:
             if run['errors']:
                 return self._finish(run, 'error', run['errors'][-1])
             if run['end_deferred']:
-                return self._finish(run, 'interrupted', 'Hermes 工作被中止')
+                return self._finish(run, 'interrupted', self.core.agent_name(run['agent']) + ' 工作被中止')
             run['end_deferred'] = True
             return []
-        if self.clock() - run['t0'] > run['budget'] + GRACE_SECONDS:
+        elapsed = self.clock() - run['t0'] - run['paused']
+        if run['pause_start'] is not None:
+            elapsed -= self.clock() - run['pause_start']
+        timeout = run['timeout'] if run['timeout'] is not None else run['budget'] + GRACE_SECONDS
+        if elapsed > timeout:
             self._stop(run)
             monitor.flush()
             monitor.say('[ERROR] 協作站等候逾時，已要求停止此工作')
-            return self._finish(run, 'interrupted', '超過 run_budget+%d 秒仍未收到完成事件，已要求停止' % GRACE_SECONDS)
+            return self._finish(run, 'interrupted', '超過 %d 秒有效執行時間仍未收到完成事件，已要求停止' % timeout)
         return []
 
     @staticmethod

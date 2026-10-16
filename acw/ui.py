@@ -4597,7 +4597,7 @@ class MainWindow(QMainWindow):
             return
         request = self.core.requests.active()
         if not self._close_pending and (request or busy):
-            message = (f"Hermes 仍在執行 skill 派來的步驟 {request['label']}（{request['worktree']}）。"
+            message = (f"{self.core.agent_name(self.core.requests.agent)} 仍在執行 skill 派來的步驟 {request['label']}（{request['worktree']}）。"
                        "關閉會中止它，工作目錄可能留下未提交的修改。仍要關閉？" if request else
                        "仍有 Agent 在執行。關閉會要求取消，歷史會保留，重啟不會自動重送。仍要關閉？")
             result = QMessageBox.question(self, "確認關閉", message, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)

@@ -11,6 +11,7 @@ from datetime import datetime
 from unittest.mock import patch
 
 from acw.core import WorkspaceCore
+from acw.playbooks import compose_prompt
 from acw.requests import MonitorProjection
 from acw.security import sanitize
 from acw.adapters.hermes import HermesAdapter
@@ -109,7 +110,7 @@ class RequestDispatcherTests(unittest.TestCase):
         self.request(label, **override)
         self.core.poll_requests()
         self.assertIsNone(self.result(label), 'a started run has no result yet')
-        self.assertEqual([PROMPT], self.adapter.sent)
+        self.assertEqual([compose_prompt(self.core, 'local', PROMPT)], self.adapter.sent)
 
     def test_active_snapshot_is_detached_and_cleared_after_completion(self):
         self.assertIsNone(self.core.requests.active())
@@ -257,7 +258,7 @@ class RequestDispatcherTests(unittest.TestCase):
         self.adapter.fail_send = ''
         self.request('r2')
         self.core.poll_requests()
-        self.assertEqual([PROMPT], self.adapter.sent)
+        self.assertEqual([compose_prompt(self.core, 'local', PROMPT)], self.adapter.sent)
 
     def test_bad_budget_is_rejected(self):
         self.request(run_budget='lots')
@@ -356,12 +357,12 @@ class RequestDispatcherTests(unittest.TestCase):
         self.request('r2')
         self.core.poll_requests()
         self.assertIsNone(self.result('r2'))
-        self.assertEqual([PROMPT], self.adapter.sent)
+        self.assertEqual([compose_prompt(self.core, 'local', PROMPT)], self.adapter.sent)
         self.say('message_end', content='done', status='complete')
         self.core.poll_requests()
         self.assertEqual('complete', self.result('r1')['status'])
         self.core.poll_requests()
-        self.assertEqual([PROMPT, PROMPT], self.adapter.sent)
+        self.assertEqual([compose_prompt(self.core, 'local', PROMPT)] * 2, self.adapter.sent)
 
     def test_without_a_monitor_root_nothing_is_projected(self):
         self.start_run(monitor_root='')
@@ -449,7 +450,7 @@ class RequestDispatcherTests(unittest.TestCase):
         later = path.stat().st_mtime + 5
         os.utime(path, (later, later))
         self.core.poll_requests()
-        self.assertEqual([PROMPT], self.adapter.sent)
+        self.assertEqual([compose_prompt(self.core, 'local', PROMPT)], self.adapter.sent)
 
 
 class MonitorProjectionTests(unittest.TestCase):
