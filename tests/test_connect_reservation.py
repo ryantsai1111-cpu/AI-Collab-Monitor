@@ -9,6 +9,8 @@ class ConnectReservationTests(unittest.TestCase):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
         self.adapter=SyntheticAdapter('codex')
         self.core=WorkspaceCore(Path(self.tmp.name)/'data',{'codex':self.adapter})
+        # This barrier tests connection ownership, independent of Git subprocess startup latency.
+        self.core.git_snapshot=lambda *args,**kwargs:{'branch':'fixture'}
         self.addCleanup(self.core.close)
         self.repo=Path(self.tmp.name)/'repo';self.repo.mkdir()
         self.project=self.core.create_project('fixture',self.repo)

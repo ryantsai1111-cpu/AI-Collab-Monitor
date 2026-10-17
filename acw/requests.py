@@ -70,6 +70,9 @@ class MonitorProjection:
 
     def __init__(self, label, root, provider='local'):
         self.label = label
+        self.provider = provider
+        self.turn_ended = False
+        self.last_message = ''
         self.actor = 'CODEX' if provider == 'codex' else 'HERMES'
         self.hermes_log = self.timeline_log = None
         if isinstance(root, str) and root and Path(root).is_dir():
@@ -161,7 +164,34 @@ class MonitorProjection:
         if kind == 'message_delta':
             self.text(str(event.get('content') or ''))
             return
+        if self.provider == 'codex' and kind == 'message_end':
+            # Completed text can arrive without deltas, or replace their last fragment.
+            self.text(str(event.get('content') or self.latest))
         self.flush()
+        if self.provider == 'codex':
+            if kind == 'message_end':
+                self.last_message = str(event.get('content') or self.latest)
+                self.say('')
+                self.reset()
+                return
+            if kind == 'command':
+                if event.get('status') == 'inProgress':
+                    self.say('[CMD] ' + _clip(self.clean(event.get('command') or ''), 120))
+                else:
+                    self.say('[CMD DONE] status=%s exit=%s' % (event.get('status'), event.get('exit_code')))
+                return
+            if kind == 'file':
+                action = event.get('action') or ''
+                if isinstance(action, dict):
+                    action = action.get('type', '')
+                self.say('[FILE] %s %s' % (action, event.get('path') or ''))
+                return
+            if kind == 'diff':
+                self.say('[DIFF] %s files' % event.get('file_count', 0))
+                return
+            if kind == 'test':
+                self.say('[TEST] %s %s' % (event.get('name') or '', event.get('result') or ''))
+                return
         if kind == 'message_start':
             self.reset()                         # the core starts a fresh accumulated text
             return
@@ -189,6 +219,19 @@ class MonitorProjection:
                 self.scan(line)
         elif kind == 'error':
             self.say('[ERROR] ' + _clip(self.clean(event.get('content') or ''), RESULT_MAX))
+
+
+    def end_turn(self, status, successful, *, inferred=False):
+        if self.turn_ended:
+            return
+        self.turn_ended = True
+        self.flush()
+        reply = self.clean(self.latest or self.last_message)
+        first = reply.splitlines()[0] if reply.splitlines() else ''
+        self.say('[RESULT exit=%s] %s' % (0 if successful else 1, _clip(first, 200)))
+        self.timeline('TURN_END', status)
+        if inferred:
+            self.timeline('TURN_END_INFERRED', status)
 
 
 class RequestDispatcher:
@@ -223,10 +266,37 @@ class RequestDispatcher:
         task_id = self._active_task
         if task_id is None or event.get('agent') != self.agent or event.get('task_id') != task_id:
             return
-        if event.get('type') not in WANTED:
+        kind = event.get('type')
+        codex = self._run is not None and self._run['provider'] == 'codex'
+        if codex:
+            # Even an unprojected output notification means the turn is still active.
+            self._run['last_activity'] = self.clock()
+        if codex and kind in ('event', 'state', 'command', 'file', 'diff', 'test'):
+            if kind == 'event' and not str(event.get('summary') or '').startswith('Turn '):
+                return
+            keys = {
+                'event': ('summary', 'status', 'turn_id'), 'state': ('state',),
+                'command': ('command', 'status', 'exit_code'), 'file': ('path', 'action'),
+                'diff': (), 'test': ('name', 'result'),
+            }[kind]
+            slim = dict(type=kind, **{key: event[key] for key in keys if key in event})
+            if kind == 'diff':
+                paths = event.get('paths') or ([event['path']] if event.get('path') else [])
+                # Retain only a count from aggregate unified diffs, never patch content.
+                patch = str(event.get('diff') or event.get('content') or '')
+                slim['file_count'] = len(set(paths)) if paths else len(re.findall(r'^diff --git ', patch, re.M))
+                if not slim['file_count']:
+                    slim['file_count'] = len(re.findall(r'^\+\+\+ (?!/dev/null)', patch, re.M))
+            elif kind == 'test' and not event.get('name'):
+                slim['name'] = event.get('framework') or 'test'
+                slim['result'] = ' '.join('%s=%s' % (key, event[key]) for key in ('passed', 'failed', 'skipped', 'exit_code') if key in event)
+        elif kind in WANTED:
+            slim = {key: event.get(key) for key in ('type', 'content', 'name', 'input', 'is_error', 'duration_ms', 'status', 'request_id', 'details', 'approved')
+                    if key in event}
+        else:
             return
-        slim = {key: event.get(key) for key in ('type', 'content', 'name', 'input', 'is_error', 'duration_ms', 'status', 'request_id', 'details', 'approved')
-                if key in event}
+        if codex and kind in ('message_start', 'message_delta', 'message_end'):
+            slim['message_id'] = event.get('message_id')
         if slim['type'] == 'tool_result':
             slim.pop('content', None)           # tool output is never projected
         slim['at'] = self.clock()
@@ -236,12 +306,14 @@ class RequestDispatcher:
     def _result_path(self, label):
         return self.directory / (label + '.result.json')
 
-    def _write_result(self, label, status, reason='', *, session_id='', task_id='', started=None):
+    def _write_result(self, label, status, reason='', *, session_id='', task_id='', started=None, codex=None):
         ended = _iso()
         result = {'label': label, 'status': status, 'reason': sanitize(reason),
                   'exit_code': 0 if status == 'complete' else 1,
                   'session_id': session_id or '', 'task_id': task_id or '',
                   'started': started or ended, 'ended': ended}
+        if codex is not None:
+            result.update(codex)
         path = self._result_path(label)
         temporary = path.with_name(path.name + '.tmp')
         temporary.write_text(json.dumps(result, ensure_ascii=False), encoding='utf-8', newline='')
@@ -463,7 +535,8 @@ class RequestDispatcher:
                    'monitor': MonitorProjection(label, monitor_root if isinstance(monitor_root, str) else '', provider),
                    'timeout': timeout, 'paused': 0.0, 'pause_start': None, 'approvals': set(), 'approval_seen': set(),
                    'session_id': '', 'operation': None, 'end': None, 'end_deferred': False, 'errors': [],
-                   'result_pending': None, 'flushed': False}
+                   'result_pending': None, 'flushed': False, 'turn_status': None, 'messages': 0, 'message_ids': set(),
+                   'last_state': None, 'idle_transition': False, 'last_activity': self.clock()}
         except Exception as exc:
             return self._reject(label, 'prepare-failed', sanitize(str(exc)) or type(exc).__name__, started, task_id=task_id)
         # Everything that can fail is built above; from here on the run slot, the tap filter and the settings
@@ -541,10 +614,34 @@ class RequestDispatcher:
                         run['pause_start'] = None
             if kind == 'error':
                 run['errors'].append(sanitize(str(event.get('content') or '')))
-            if kind == 'message_end':
+            if run['provider'] == 'codex':
+                if kind == 'state':
+                    state = event.get('state')
+                    run['idle_transition'] = state == 'Connected' and (run['idle_transition'] or run['last_state'] == 'Busy')
+                    run['last_state'] = state
+                elif kind in ('message_start', 'message_delta', 'message_end'):
+                    message_id = event.get('message_id')
+                    if message_id and message_id not in run['message_ids']:
+                        run['message_ids'].add(message_id)
+                        run['messages'] += 1
+                elif kind == 'event' and run['turn_status'] is None:
+                    run['turn_status'] = str(event.get('status') or event.get('summary', 'Turn unknown')[5:])
+            elif kind == 'message_end':
                 status = 'complete' if event.get('status') not in ('interrupted', 'cancelled') else 'interrupted'
                 run['end'] = status
             monitor.event(event, 0 if (kind == 'message_end' and run['end'] == 'complete') else 1)
+        if run['provider'] == 'codex':
+            terminal = run['turn_status']
+            if terminal is not None:
+                status = 'complete' if terminal == 'completed' else 'interrupted' if terminal in ('interrupted', 'cancelled') else 'error'
+                reason = (run['errors'][-1] if run['errors'] else 'Turn ' + terminal) if status == 'error' else ''
+                return self._finish(run, status, reason)
+            if (run['idle_transition'] and not run['approvals'] and
+                    getattr(run['adapter'], 'state', None) == 'Connected' and
+                    self.clock() - run['last_activity'] > 5):
+                run['turn_status'] = 'completed'
+                monitor.end_turn('completed', True, inferred=True)
+                return self._finish(run, 'complete', '')
         if run['end'] == 'complete':
             return self._finish(run, 'complete', '')
         if run['end'] is not None:
@@ -582,6 +679,10 @@ class RequestDispatcher:
     def _finish(self, run, status, reason):
         """Answer run.sh. The result file is written (3 tries) BEFORE the run slot is freed; if it still fails the
         run stays in ``_run`` marked result_pending and the next poll tries again, so run.sh is not left waiting."""
+        if run['provider'] == 'codex':
+            if run['turn_status'] is None:
+                run['turn_status'] = 'interrupted' if status == 'interrupted' else 'failed'
+            run['monitor'].end_turn(run['turn_status'], status == 'complete')
         if not run['flushed']:
             run['monitor'].flush()
             run['flushed'] = True
@@ -595,7 +696,9 @@ class RequestDispatcher:
         for attempt in range(3):
             try:
                 result = self._write_result(run['label'], status, reason, session_id=session_id,
-                                            task_id=run['task_id'], started=run['started'])
+                                            task_id=run['task_id'], started=run['started'],
+                                            **({'codex': {'turn_status': run['turn_status'], 'messages': run['messages']}}
+                                               if run['provider'] == 'codex' else {}))
                 break
             except OSError:
                 if attempt < 2:

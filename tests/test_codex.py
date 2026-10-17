@@ -169,12 +169,12 @@ class CodexProtocolTests(unittest.TestCase):
             self.a.send_message("hello")
         self.assertEqual(self.a.requests, [])
 
-    def test_unsafe_inherited_sandbox_blocks_turn(self):
+    def test_returned_full_access_sandbox_allows_turn(self):
         self.a.session_id, self.a._session_ready = "test", True
         self.a._permission_state = {"sandbox": {"type": "dangerFullAccess"}}
-        with self.assertRaises(PermissionError):
-            self.a.send_message("hello")
-        self.assertEqual(self.a.requests, [])
+        self.a.responses["turn/start"] = {"turn": {"id": "approved-turn"}}
+        self.assertEqual("approved-turn", self.a.send_message("hello"))
+        self.assertEqual(self.a.requests[0][0], "turn/start")
 
     def test_unknown_inherited_sandbox_blocks_turn(self):
         self.a.session_id, self.a._session_ready = "test", True

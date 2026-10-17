@@ -1240,8 +1240,9 @@ class AgentPanel(QFrame):
             adapter=getattr(self.window.core,'adapters',{}).get(self.agent)
             error=getattr(adapter,'last_error','') if adapter is not None else ''
             if error:
-                self.notice.setText(error)
-                self.notice.setToolTip(error)
+                note = error + (' · ' + self.codex_permission_note() if self.provider == 'codex' else '')
+                self.notice.setText(note)
+                self.notice.setToolTip(note)
 
     def update_state_style(self):
         color = (desktop_state_color(self.connection_state, bool(self.pending_approval_events))
@@ -1325,9 +1326,25 @@ class AgentPanel(QFrame):
             self.notice.setToolTip(self.notice.text())
         elif self.agent == 'dot':
             self.input.setPlaceholderText("傳送訊息給 G8毛，繼續原本的對話…")
+        if self.provider == 'codex' and enabled:
+            permission_note = self.codex_permission_note()
+            detail = compact(cap.get('detail') or '能力尚未偵測', 115)
+            self.notice.setText(permission_note + ' · ' + detail)
+            self.notice.setToolTip(str(cap.get('detail') or '') + '\n' + permission_note)
         if self.agent == 'dot' and self.connection_state == 'Error':
             error=getattr(self.window.core.adapters.get('dot'),'last_error','')
             if error: self.notice.setText(error);self.notice.setToolTip(error)
+
+    def codex_permission_note(self):
+        adapter = self.window.core.adapters.get(self.agent)
+        # Disconnected or newly selected projects must not display the previous thread's permissions.
+        current = getattr(adapter, 'session_id', '') and getattr(adapter, '_session_ready', False)
+        permissions = (getattr(adapter, '_permission_state', {}) or {}) if current else {}
+        sandbox = (permissions.get('sandbox') or {}).get('type')
+        sandbox = {'readOnly': 'read-only', 'workspaceWrite': 'workspace-write',
+                   'dangerFullAccess': 'danger-full-access'}.get(sandbox, sandbox)
+        return '目前 thread · 沙箱：%s · 核准：%s' % (
+            sandbox or '尚未取得', permissions.get('approvalPolicy') or '尚未取得')
 
     def set_monitor(self, monitor):
         self.monitor = monitor
@@ -3323,8 +3340,11 @@ class MainWindow(QMainWindow):
                             or (directory and row.get('cwd') and Path(row['cwd']).resolve() == Path(directory).resolve())]
             panel.refresh_sessions(sessions, task.get(f"{agent}_session"))
             if diag.get("last_error"):
-                panel.notice.setText(diag["last_error"])
-                panel.notice.setToolTip(diag["last_error"])
+                note = diag["last_error"]
+                if panel.provider == 'codex':
+                    note += ' · ' + panel.codex_permission_note()
+                panel.notice.setText(note)
+                panel.notice.setToolTip(note)
         except Exception as exc:
             self.show_error(str(exc), False)
 
@@ -4434,6 +4454,7 @@ class MainWindow(QMainWindow):
         agent_layout.addWidget(label("後端設定於下次連線生效。模型與思考強度選項來自實際連線的後端。", True))
         fields = {}
         local_fields = {}
+        codex_fields = {}
         local_pages = []
         for agent in self.agents:
             form = QFormLayout()
@@ -4517,6 +4538,25 @@ class MainWindow(QMainWindow):
                                              self.test_hermes_cli(values, output, trigger, dialog_state))
                 form.addRow(probe_button)
                 form.addRow(probe_result)
+            if self.core.provider(agent) == 'codex':
+                sandbox, approval_policy = QComboBox(), QComboBox()
+                sandbox.setObjectName('codex_sandbox_' + agent)
+                approval_policy.setObjectName('codex_approval_policy_' + agent)
+                for text, value in (('沿用 Codex 設定', None), ('唯讀', 'read-only'),
+                                    ('可寫入專案', 'workspace-write'), ('完整存取', 'danger-full-access')):
+                    sandbox.addItem(text, value)
+                for text, value in (('沿用 Codex 設定', None), ('需要時詢問', 'on-request'),
+                                    ('失敗時詢問（此版本不支援）', 'on-failure'), ('不詢問', 'never')):
+                    approval_policy.addItem(text, value)
+                unsupported = approval_policy.model().item(approval_policy.findData('on-failure'))
+                unsupported.setEnabled(False)
+                unsupported.setToolTip('本機 app-server schema 不支援 on-failure。')
+                sandbox.setCurrentIndex(max(0, sandbox.findData(saved.get('sandbox'))))
+                approval_policy.setCurrentIndex(max(0, approval_policy.findData(saved.get('approval_policy'))))
+                form.addRow('沙箱', sandbox)
+                form.addRow('核准', approval_policy)
+                form.addRow(label('下次建立或恢復對話生效；目前 thread 的實際權限顯示於面板標頭下方。', True))
+                codex_fields[agent] = (sandbox, approval_policy)
             if self.core.provider(agent) != 'local':
                 form.addRow("逾時（秒）", timeout)
                 form.addRow("預設模型", model)
@@ -4613,6 +4653,13 @@ class MainWindow(QMainWindow):
                     values["default_effort"] = effort.currentData()
                 if self.core.provider(agent) == 'local':
                     values['default_model'] = values['model']
+                if agent in codex_fields:
+                    sandbox, approval_policy = codex_fields[agent]
+                    permissions = dict(sandbox=sandbox.currentData(), approval_policy=approval_policy.currentData())
+                    values.update(permissions)
+                    adapter = self.core.adapters.get(agent)
+                    if adapter is not None:
+                        adapter.settings.update(permissions)
                 self.core.set_setting("agent." + agent, values)
                 self.panels[agent].update_controls()
             self.core.set_setting("legacy.root", legacy_root.text().strip())

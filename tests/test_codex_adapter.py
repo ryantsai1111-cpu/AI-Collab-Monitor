@@ -342,5 +342,52 @@ class CodexNativePreviewTests(unittest.TestCase):
         self.assertEqual(self.adapter.requests, [])
 
 
+
+class CodexSessionPermissionTests(unittest.TestCase):
+    """Transport substitute checks fields verified against the installed schema."""
+    def test_start_and_resume_inherit_omit_permissions_and_explicit_values_are_forwarded(self):
+        from test_codex import ProtocolTestAdapter
+        for sandbox in (None, '', 'inherit', 'read-only', 'workspace-write', 'danger-full-access'):
+            for approval in (None, '', 'inherit', 'on-request', 'never', 'untrusted'):
+                with self.subTest(sandbox=sandbox, approval=approval):
+                    adapter = ProtocolTestAdapter()
+                    adapter.settings.update(sandbox=sandbox, approval_policy=approval)
+                    adapter.cwd = FIXTURE_CWD
+                    response = {'thread': {'id': THREAD, 'cwd': FIXTURE_CWD},
+                                'sandbox': {'type': 'workspaceWrite'}, 'approvalPolicy': 'on-request'}
+                    adapter.responses.update({'thread/start': response, 'thread/resume': response,
+                                              'thread/read': {'thread': response['thread']}})
+                    adapter.create_session()
+                    adapter.resume_session(THREAD)
+                    for method, params in adapter.requests:
+                        if method == 'thread/read':
+                            continue
+                        self.assertEqual('user', params['approvalsReviewer'])
+                        if sandbox in (None, '', 'inherit'):
+                            self.assertNotIn('sandbox', params)
+                        else:
+                            self.assertEqual(sandbox, params['sandbox'])
+                        if approval in (None, '', 'inherit'):
+                            self.assertNotIn('approvalPolicy', params)
+                        else:
+                            self.assertEqual(approval, params['approvalPolicy'])
+                    self.assertEqual('workspaceWrite', adapter._permission_state['sandbox']['type'])
+                    self.assertEqual('on-request', adapter._permission_state['approvalPolicy'])
+
+    def test_unsupported_setting_is_rejected_before_session_mutation(self):
+        from test_codex import ProtocolTestAdapter
+        for setting, value in (('sandbox', 'invented'), ('approval_policy', 'on-failure')):
+            for operation in ('start', 'resume'):
+                with self.subTest(setting=setting, operation=operation):
+                    adapter = ProtocolTestAdapter()
+                    adapter.settings[setting] = value
+                    adapter.responses['thread/read'] = {'thread': {'id': THREAD}}
+                    with self.assertRaisesRegex(ValueError, 'Unsupported Codex'):
+                        if operation == 'start':
+                            adapter.create_session()
+                        else:
+                            adapter.resume_session(THREAD)
+                    self.assertFalse(any(method in ('thread/start', 'thread/resume') for method, _ in adapter.requests))
+
 if __name__ == "__main__":
     unittest.main()
