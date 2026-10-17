@@ -389,5 +389,44 @@ class CodexSessionPermissionTests(unittest.TestCase):
                             adapter.resume_session(THREAD)
                     self.assertFalse(any(method in ('thread/start', 'thread/resume') for method, _ in adapter.requests))
 
+
+class CodexApprovalDecisionTests(unittest.TestCase):
+    """The user's "no" must map onto whichever negative decision the server actually offers."""
+    def _request(self, adapter, available):
+        params = {'threadId': THREAD, 'turnId': 't1', 'itemId': 'i1', 'command': 'Get-Location', 'cwd': FIXTURE_CWD}
+        if available is not None:
+            params['availableDecisions'] = available
+        adapter._handle_server_request({'id': 7, 'method': 'item/commandExecution/requestApproval', 'params': params})
+        return next(data['request_id'] for kind, data in adapter.events if kind == 'approval')
+
+    def test_reject_uses_cancel_when_decline_is_not_offered(self):
+        from test_codex import ProtocolTestAdapter
+        adapter = ProtocolTestAdapter()
+        offered = ['accept', {'acceptWithExecpolicyAmendment': {'execpolicy_amendment': ['Get-Location']}}, 'cancel']
+        request_id = self._request(adapter, offered)
+        adapter.approve(request_id, False)
+        self.assertEqual([{'id': 7, 'result': {'decision': 'cancel'}}], adapter.writes)
+        self.assertNotIn(request_id, adapter._approvals)
+
+    def test_reject_prefers_decline_when_offered_and_accept_stays_accept(self):
+        from test_codex import ProtocolTestAdapter
+        for available, approved, expected in ((['accept', 'decline', 'cancel'], False, 'decline'),
+                                              (None, False, 'decline'),
+                                              (['accept', 'cancel'], True, 'accept')):
+            with self.subTest(available=available, approved=approved):
+                adapter = ProtocolTestAdapter()
+                request_id = self._request(adapter, available)
+                adapter.approve(request_id, approved)
+                self.assertEqual(expected, adapter.writes[-1]['result']['decision'])
+
+    def test_unanswerable_request_stays_pending_without_writing(self):
+        from test_codex import ProtocolTestAdapter
+        adapter = ProtocolTestAdapter()
+        request_id = self._request(adapter, ['acceptForSession'])
+        with self.assertRaisesRegex(ValueError, 'does not offer'):
+            adapter.approve(request_id, False)
+        self.assertEqual([], adapter.writes)
+        self.assertIn(request_id, adapter._approvals)
+
 if __name__ == "__main__":
     unittest.main()
