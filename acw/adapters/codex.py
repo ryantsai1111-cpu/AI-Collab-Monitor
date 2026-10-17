@@ -676,9 +676,15 @@ class CodexAdapter(Adapter):
         if method == "item/permissions/requestApproval":
             result = {"permissions": params.get("permissions", {}) if approved else {}, "scope": "turn"}
         else:
-            decision = "accept" if approved else "decline"
             available = params.get("availableDecisions")
-            if available and decision not in available:
+            offered = [item for item in available if isinstance(item, str)] if available else None
+            if approved:
+                decision = "accept"
+            else:
+                # A command approval offers "cancel" rather than "decline" (seen 2026-10-17 with
+                # ['accept', {'acceptWithExecpolicyAmendment': …}, 'cancel']); either one is the user's "no".
+                decision = next((name for name in ("decline", "cancel") if offered is None or name in offered), None)
+            if offered is not None and decision not in offered:
                 self._approvals[str(request_id)] = request
                 raise ValueError("Backend does not offer this one-time decision")
             result = {"decision": decision}
