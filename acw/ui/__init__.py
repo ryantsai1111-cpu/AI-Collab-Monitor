@@ -35,6 +35,11 @@ from .dialogs import (
 from .artifacts import (
     ArtifactPanel,
 )
+from .navigator import (
+    SessionNavigator,
+    _normalize_dir,
+    _same_dir,
+)
 from .main_window import (
     AGENTS,
     AgentPanel,
@@ -45,10 +50,7 @@ from .main_window import (
     STATE_LABELS,
     STATUSES,
     STATUS_LABELS,
-    SessionNavigator,
     TRANSCRIPT_EVENTS,
-    _normalize_dir,
-    _same_dir,
 )
 
 from PySide6.QtGui import (
