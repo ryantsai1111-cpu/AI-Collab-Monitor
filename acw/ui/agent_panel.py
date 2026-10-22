@@ -72,6 +72,7 @@ class AgentPanel(QFrame):
         self._restoring_view = False
         self._view_generation = 0
         self._restore_scroll = None
+        self._restore_bottom = False
         self.setObjectName("panel")
         self.setMinimumWidth(300)
         layout = QVBoxLayout(self)
@@ -387,7 +388,10 @@ class AgentPanel(QFrame):
         events = {}
         for widget in self.event_cards():
             events[widget.event_key] = widget.toggle.isChecked()
+        bar = self.scroll.verticalScrollBar()
+        at_bottom = self._restore_bottom if self._restore_scroll is not None else bar.maximum() - bar.value() < 100
         return {
+            "at_bottom": at_bottom,
             "draft": self.input.toPlainText(), "draft_cursor": (cursor.anchor(), cursor.position()),
             "send_error": self.send_error,
             "attachments": list(self.attachments), "model": self.model.currentData(),
@@ -402,6 +406,8 @@ class AgentPanel(QFrame):
         self._view_generation += 1
         generation = self._view_generation
         self._restore_scroll = state.get('scroll', 0)
+        # A conversation opened for the first time, or left at its end, reopens at the latest message.
+        self._restore_bottom = bool(state.get('at_bottom', 'scroll' not in state))
         self.input.setPlainText(state.get("draft", ""))
         self.send_error = state.get('send_error', '')
         self.attachments = list(state.get("attachments", []))
@@ -454,8 +460,10 @@ class AgentPanel(QFrame):
         self.update_controls()
         def restore_scroll():
             if generation != self._view_generation: return
-            self.scroll.verticalScrollBar().setValue(state.get("scroll", 0))
+            bar = self.scroll.verticalScrollBar()
+            bar.setValue(bar.maximum() if self._restore_bottom else state.get("scroll", 0))
             self._restore_scroll = None
+            self._restore_bottom = False
             self._restoring_view = False
         QTimer.singleShot(0, self, restore_scroll)
 

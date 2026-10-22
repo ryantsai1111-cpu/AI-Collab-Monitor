@@ -318,6 +318,24 @@ class WorkbenchTests(unittest.TestCase):
         self.fixture.settle()
         self.assertEqual(40, panel.scroll.verticalScrollBar().value())
 
+    def test_unseen_or_bottom_view_reopens_at_latest_message(self):
+        self.fixture.add_saved_response(text='\n\n'.join('Long visible fixture paragraph ' * 8 for _ in range(60)))
+        panel = self.window.panels['claude']
+        self.fixture.settle()
+        bar = panel.scroll.verticalScrollBar()
+        self.assertGreater(bar.maximum(), 100)
+        panel.restore_view_state({})
+        self.fixture.settle()
+        self.assertEqual(bar.maximum(), bar.value())
+        self.assertTrue(panel.capture_view_state()['at_bottom'])
+        panel.restore_view_state({'scroll': 10, 'at_bottom': True})
+        self.fixture.settle()
+        self.assertEqual(bar.maximum(), bar.value())
+        panel.restore_view_state({'scroll': 10, 'at_bottom': False})
+        self.fixture.settle()
+        self.assertEqual(10, bar.value())
+        self.assertFalse(panel.capture_view_state()['at_bottom'])
+
     def test_shutdown_stops_dispatch_before_backend_cancellation(self):
         panel = self.fixture.connect_fixture('claude')
         adapter = self.fixture.adapters['claude']
