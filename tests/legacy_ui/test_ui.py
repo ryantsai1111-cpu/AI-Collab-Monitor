@@ -534,7 +534,7 @@ class WorkspaceUITests(unittest.TestCase):
         self.assertTrue(dialog.history_button.isEnabled())
         self.assertEqual(len(self.core.calls), 1, "Selecting a row must not read history")
         prior_task = dict(self.core.current_task)
-        with patch("acw.ui.NativeHistoryDialog") as preview:
+        with patch("acw.ui.main_window.NativeHistoryDialog") as preview:
             preview.return_value.exec.return_value = 0
             QTest.qWait(20)
             QTest.mouseClick(dialog.history_button, Qt.LeftButton)

@@ -12,28 +12,87 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from .presentation import (session_identity, session_display, local_session_displays,
-                           project_label, task_label, compact)
-from . import approvals, playbooks
-from .orchestrator import Orchestrator
-from .monitor import AgentRail, MonitorDashboard, collect_snapshot
-from .theme import (CODE_BLOCK_BG, CODE_INLINE_BG, CODE_INLINE_FG, EVENT_COLOR, HEADING_COLOR, MUTED_COLOR,
-                    STATE_COLORS, STATE_IDLE, SPACE, build_style, console_palette, desktop_palette, desktop_state_color, metal_palette)
-
-from PySide6.QtCore import Qt, Signal, QObject, QRunnable, QThreadPool, QTimer, QUrl, QByteArray
-from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont, QKeySequence, QPixmap, QTextCharFormat,
-                           QTextCursor, QTextDocument, QTextFormat)
-from PySide6.QtWidgets import (
-    QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
-    QFormLayout, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
-    QListWidget, QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
-    QScrollArea, QSizePolicy, QSpinBox, QSplitter, QStackedWidget, QTabWidget,
-    QTableWidget, QTableWidgetItem, QTextBrowser, QToolButton, QTreeWidget, QTabBar,
-    QTreeWidgetItem, QVBoxLayout, QWidget,
+from ..presentation import (
+    session_identity,
+    session_display,
+    local_session_displays,
+    project_label,
+    task_label,
+    compact,
+)
+from .. import approvals, playbooks
+from ..orchestrator import Orchestrator
+from ..monitor import AgentRail, MonitorDashboard, collect_snapshot
+from ..theme import (
+    CODE_BLOCK_BG,
+    CODE_INLINE_BG,
+    CODE_INLINE_FG,
+    EVENT_COLOR,
+    HEADING_COLOR,
+    MUTED_COLOR,
+    STATE_COLORS,
+    STATE_IDLE,
+    SPACE,
+    build_style,
+    console_palette,
+    desktop_palette,
+    desktop_state_color,
+    metal_palette,
 )
 
+from PySide6.QtCore import Qt, Signal, QObject, QRunnable, QThreadPool, QTimer, QUrl, QByteArray
+from PySide6.QtGui import (
+    QAction,
+    QColor,
+    QDesktopServices,
+    QFont,
+    QKeySequence,
+    QPixmap,
+    QTextCharFormat,
+    QTextCursor,
+    QTextDocument,
+    QTextFormat,
+)
+from PySide6.QtWidgets import (
+    QApplication,
+    QButtonGroup,
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFileDialog,
+    QFormLayout,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QHeaderView,
+    QInputDialog,
+    QLabel,
+    QListWidget,
+    QLineEdit,
+    QMainWindow,
+    QMenu,
+    QMessageBox,
+    QPlainTextEdit,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QSpinBox,
+    QSplitter,
+    QStackedWidget,
+    QTabWidget,
+    QTextBrowser,
+    QToolButton,
+    QTreeWidget,
+    QTabBar,
+    QTreeWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
+
+
 # Same folder as run.py: the monitor lives inside the repository, not on the Desktop.
-LEGACY_MONITOR_ROOT = str(Path(__file__).resolve().parents[1] / "AI-Collab-Monitor")
+LEGACY_MONITOR_ROOT = str(Path(__file__).resolve().parents[2] / "AI-Collab-Monitor")
 AGENTS = ("claude", "dot", "codex", "local")
 STATUSES = ("NEW", "PLANNING", "REVIEWING", "READY", "IMPLEMENTING", "VERIFYING",
             "WAITING_USER", "BLOCKED", "DONE", "FAILED", "CANCELLED")
@@ -1058,7 +1117,7 @@ class AgentPanel(QFrame):
 
     def dot_consent(self, action):
         if self.monitor: return False
-        from .adapters.dot import DISCLOSURE
+        from ..adapters.dot import DISCLOSURE
         adapter = self.window.core.adapters['dot']
         target = adapter.target_name+' ('+adapter.target+')' if adapter.target else 'Identifier/name enumeration only; select G8毛 next'
         box = QMessageBox(QMessageBox.Question, 'Unofficial Dot — explicit local action', '', QMessageBox.Yes | QMessageBox.No, self)
@@ -1509,7 +1568,7 @@ class AgentPanel(QFrame):
         self.input.clear()
         self.clear_attachments()
         def failed(message):
-            from .security import sanitize
+            from ..security import sanitize
             retained_text = self.input.toPlainText() or content
             retained_files = list(dict.fromkeys(self.attachments + attachments))
             if self.agent != 'dot': self.window.reload_context()
@@ -2332,7 +2391,7 @@ class SessionNavigator(QWidget):
         return session["title"]
 
     def fill(self, *_):
-        from .desktop_sessions import group_by_project
+        from ..desktop_sessions import group_by_project
         agent, query = self.agent, self.search.text().casefold().strip()
         selected = (self.selected() or {}).get("id")
         if agent not in self.sessions:
@@ -3243,7 +3302,7 @@ class MainWindow(QMainWindow):
             def delivered(result):
                 try:callback(result)
                 except Exception as exc:
-                    from .security import sanitize
+                    from ..security import sanitize
                     message=str(sanitize(str(exc)))
                     adapter=getattr(self.core,'adapters',{}).get(agent) if agent else None
                     if adapter is not None:
@@ -3554,7 +3613,7 @@ class MainWindow(QMainWindow):
 
     def sync_local_conversations(self):
         """Show what Claude Desktop or Codex appended to an open conversation, without reopening it."""
-        from .desktop_sessions import history_stamp
+        from ..desktop_sessions import history_stamp
         if self._close_pending or self._closed:
             return
         for agent in self.agents:
@@ -3647,7 +3706,7 @@ class MainWindow(QMainWindow):
         if self.mode.currentData() == "Monitor":
             self.show_error("監看模式下不能啟動自動協作。")
             return
-        from .adapters.dot import DISCLOSURE
+        from ..adapters.dot import DISCLOSURE
         dialog = QDialog(self)
         dialog.setObjectName("auto_collab_dialog")
         dialog.setWindowTitle("自動協作")
@@ -4508,12 +4567,12 @@ class MainWindow(QMainWindow):
                 for key, widget in fields.items()}
 
     def test_hermes_cli(self, fields, output, trigger, dialog_state):
-        from .adapters.hermes import HermesAdapter
+        from ..adapters.hermes import HermesAdapter
         values = self.hermes_field_values(fields)
         trigger.setEnabled(False)
         output.setText('檢查中…（只讀取 CLI help，不傳送訊息）')
         def probe():
-            from .security import redact_text
+            from ..security import redact_text
             try:
                 candidate = HermesAdapter(lambda *args, **kwargs: None, harness='hermes', **values)
                 result = candidate.probe()
@@ -4527,7 +4586,7 @@ class MainWindow(QMainWindow):
         self.run(probe, completed)
 
     def settings(self, agent=None):
-        from .adapters.hermes import hermes_settings
+        from ..adapters.hermes import hermes_settings
         requested_agent = agent
         dialog = QDialog(self)
         dialog.setWindowTitle("設定")
