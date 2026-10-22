@@ -32,10 +32,12 @@ from .dialogs import (
     SessionHistoryDialog,
     native_transcript,
 )
+from .artifacts import (
+    ArtifactPanel,
+)
 from .main_window import (
     AGENTS,
     AgentPanel,
-    ArtifactPanel,
     LEGACY_MONITOR_ROOT,
     MainWindow,
     ROLE_LABELS,
