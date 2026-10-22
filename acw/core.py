@@ -190,7 +190,7 @@ class WorkspaceCore:
         provider=self.provider(agent)
         if provider not in ('claude','codex'): return True
         from .desktop_sessions import history_stamp
-        return history_stamp(provider,session_id) is not None
+        return history_stamp(provider,session_id,cached_miss=False) is not None
 
     def missing_session(self,agent):
         task=self.agent_task(agent) or {}

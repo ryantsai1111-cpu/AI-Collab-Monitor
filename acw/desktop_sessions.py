@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 import uuid
 from collections import deque
 from datetime import datetime, timezone
@@ -309,20 +310,30 @@ def read_transcript(session_id, limit=200, roots=None):
 
 
 _HISTORY_FILES = {}
+_HISTORY_MISSES = {}
+_HISTORY_MISS_TTL = 30.0
 
 
-def history_stamp(agent, session_id):
-    """(modified, size) of a conversation's local file, or None. Cheap enough to poll."""
+def history_stamp(agent, session_id, cached_miss=True):
+    """(modified, size) of a conversation's local file, or None. Cheap enough to poll.
+
+    A missing file is remembered for _HISTORY_MISS_TTL seconds so polling does not glob every time;
+    one-shot existence checks pass cached_miss=False to always look."""
     if agent not in ('claude', 'codex') or not _valid_id(session_id):
         return None
     key = (agent, session_id.lower())
     path = _HISTORY_FILES.get(key)
     if path is None or not path.is_file():
+        missed = _HISTORY_MISSES.get(key)
+        if cached_miss and missed is not None and time.monotonic() - missed < _HISTORY_MISS_TTL:
+            return None
         pattern = '*/' + key[1] + '.jsonl' if agent == 'claude' else 'sessions/*/*/*/rollout-*' + key[1] + '.jsonl'
         path = next((match for root in (transcript_roots() if agent == 'claude' else codex_roots())
                      for match in Path(root).glob(pattern)), None)
         if path is None:
+            _HISTORY_MISSES[key] = time.monotonic()
             return None
+        _HISTORY_MISSES.pop(key, None)
         _HISTORY_FILES[key] = path
     try:
         status = path.stat()

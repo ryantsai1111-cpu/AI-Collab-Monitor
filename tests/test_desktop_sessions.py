@@ -102,6 +102,25 @@ class ReaderTests(DesktopSessionFixture):
         for hidden in ("PRIVATE REASONING", "TOOL INPUT", "TOOL OUTPUT", "META ROW", "SUBAGENT"):
             self.assertNotIn(hidden, dumped)
 
+    def test_history_stamp_caches_missing_files_for_thirty_seconds(self):
+        missing = "00000000-0000-4000-8000-000000000001"
+        real_glob, calls = Path.glob, []
+        def counting_glob(path, pattern, *args, **kwargs):
+            calls.append(pattern)
+            return real_glob(path, pattern, *args, **kwargs)
+        clock = [1000.0]
+        with patch.object(desktop_sessions, "_HISTORY_FILES", {}), patch.object(desktop_sessions, "_HISTORY_MISSES", {}),              patch.object(desktop_sessions.time, "monotonic", side_effect=lambda: clock[0]),              patch.object(Path, "glob", counting_glob):
+            for _ in range(5):
+                self.assertIsNone(desktop_sessions.history_stamp("claude", missing))
+            self.assertEqual(1, len(calls))
+            clock[0] += 31
+            self.assertIsNone(desktop_sessions.history_stamp("claude", missing))
+            self.assertEqual(2, len(calls))
+            self.assertIsNone(desktop_sessions.history_stamp("claude", missing, cached_miss=False))
+            self.assertEqual(3, len(calls))
+            self.assertIsNotNone(desktop_sessions.history_stamp("claude", SESSION))
+            self.assertNotIn(("claude", SESSION), desktop_sessions._HISTORY_MISSES)
+
     def test_transcript_rejects_non_uuid_identifiers(self):
         for bad in ("../x", "*", "", "not-a-uuid"):
             with self.assertRaises(ValueError):
