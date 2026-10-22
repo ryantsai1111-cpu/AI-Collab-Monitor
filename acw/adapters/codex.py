@@ -107,9 +107,12 @@ class CodexAdapter(Adapter):
             with self._lock:
                 self._pending.pop(request_id, None)
 
-    def _read_loop(self):
+    def _read_loop(self, process=None):
+        # Bound to the process it was started for: a stale reader must not
+        # disconnect or fail requests of a newer connection.
+        process = process or self._process
         try:
-            for line in self._process.stdout:
+            for line in process.stdout:
                 try:
                     message = json.loads(line)
                 except (json.JSONDecodeError, ValueError):
@@ -120,20 +123,21 @@ class CodexAdapter(Adapter):
                 except Exception as exc:
                     self._error(f"Codex event handling: {exc}")
         finally:
-            self._session_ready = False
-            self._turn_done.set()
-            with self._lock:
-                for response in self._pending.values():
-                    try:
-                        response.put_nowait({"error": {"message": "Codex app-server disconnected"}})
-                    except queue.Full:
-                        pass
-            if not self._closing:
-                self.set_state("Disconnected")
-                self._error("Codex app-server disconnected" + (": " + self._stderr_tail[-1] if self._stderr_tail else ""))
+            if process is self._process:
+                self._session_ready = False
+                self._turn_done.set()
+                with self._lock:
+                    for response in self._pending.values():
+                        try:
+                            response.put_nowait({"error": {"message": "Codex app-server disconnected"}})
+                        except queue.Full:
+                            pass
+                if not self._closing:
+                    self.set_state("Disconnected")
+                    self._error("Codex app-server disconnected" + (": " + self._stderr_tail[-1] if self._stderr_tail else ""))
 
-    def _read_stderr(self):
-        for line in self._process.stderr:
+    def _read_stderr(self, process=None):
+        for line in (process or self._process).stderr:
             original = line.rstrip()
             try:
                 diagnostic = json.loads(original)
@@ -373,8 +377,8 @@ class CodexAdapter(Adapter):
                 cwd=self.cwd or None, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, encoding="utf-8", errors="replace", bufsize=1,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), **({'env': env} if env is not None else {}))
-            self._reader = threading.Thread(target=self._read_loop, daemon=True, name="codex-jsonl")
-            self._stderr_reader = threading.Thread(target=self._read_stderr, daemon=True, name="codex-stderr")
+            self._reader = threading.Thread(target=self._read_loop, args=(self._process,), daemon=True, name="codex-jsonl")
+            self._stderr_reader = threading.Thread(target=self._read_stderr, args=(self._process,), daemon=True, name="codex-stderr")
             self._reader.start()
             self._stderr_reader.start()
             handshake = self._request("initialize", {"clientInfo": {"name": "ai_collaboration_workspace", "title": "AI Collaboration Workspace", "version": "1.0.0"}})
