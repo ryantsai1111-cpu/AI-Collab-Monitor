@@ -1611,6 +1611,33 @@ class WorkspaceUiRefreshTests(unittest.TestCase):
         self.assertIn("狀態待確認", item.text(1))
         self.assert_no_adapter_actions()
 
+    def test_work_details_refresh_is_coalesced_across_event_batches(self):
+        self.window.toggle_details()
+        self.settle()
+        self.assertTrue(self.window.details_toggle.isChecked())
+        with patch.object(self.window, "refresh_work_details", wraps=self.window.refresh_work_details) as refresh:
+            for index in range(20):
+                self.core.ingest_event("claude", "command", command="fixture burst %d" % index)
+                self.window.poll_events()
+            self.assertLessEqual(refresh.call_count, 1)
+            QTest.qWait(700)
+            self.assertGreaterEqual(refresh.call_count, 1)
+            self.assertLessEqual(refresh.call_count, 2)
+        self.assert_no_adapter_actions()
+
+    def test_work_details_ignore_message_delta_only_batches(self):
+        self.window.toggle_details()
+        self.settle()
+        self.assertTrue(self.window.details_toggle.isChecked())
+        with patch.object(self.window, "refresh_work_details") as refresh:
+            for _ in range(5):
+                with patch.object(self.core, "drain_events", return_value=[
+                        {"type": "message_delta", "agent": "claude", "message_id": "m-delta", "content": "x"}]):
+                    self.window.poll_events()
+            QTest.qWait(700)
+            self.assertEqual(0, refresh.call_count)
+            self.assertFalse(self.window._details_dirty)
+
     def test_details_toggle_keeps_drafts_and_handoff_mode_reachable(self):
         panel = self.window.panels["claude"]
         panel.input.setPlainText("draft with details toggled")

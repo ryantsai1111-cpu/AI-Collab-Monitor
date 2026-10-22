@@ -2830,6 +2830,12 @@ class MainWindow(QMainWindow):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.poll_events)
         self.timer.start(100)
+        # Work Details rebuilds six trees from 500 events; coalesce bursts of event batches.
+        self._details_dirty = False
+        self._details_timer = QTimer(self)
+        self._details_timer.setSingleShot(True)
+        self._details_timer.setInterval(500)
+        self._details_timer.timeout.connect(self.flush_work_details)
         # Follow conversations that the desktop apps keep writing to while they are shown here.
         self._sync_stamp, self._sync_floor, self._syncing = {}, {}, set()
         self.sync_timer = QTimer(self)
@@ -3099,7 +3105,12 @@ class MainWindow(QMainWindow):
         self.details_toggle.setChecked(False)
         self.details_toggle.setFocus()
 
+    def flush_work_details(self):
+        if self._details_dirty and self.details_toggle.isChecked():
+            self.refresh_work_details()
+
     def refresh_work_details(self):
+        self._details_dirty = False
         groups = {name: [] for name in self.detail_trees}
         task = self.view_task() or {}
         for event in reversed(self.core.events(task_id=task.get('id'), limit=500) if task else []):
@@ -3435,8 +3446,12 @@ class MainWindow(QMainWindow):
             panel=self.panels['dot'];view=panel.capture_view_state();panel.clear_conversation()
             for message in self.core.dot_conversation_messages(limit=panel.dot_visible_limit): panel.add_message(message)
             panel.restore_view_state(view);self.refresh_agent('dot')
-        if self.details_toggle.isChecked():
-            self.refresh_work_details()
+        if self.details_toggle.isChecked() and any(event.get("type") != "message_delta" for event in events):
+            if self._details_timer.isActive():
+                self._details_dirty = True
+            else:
+                self.refresh_work_details()
+                self._details_timer.start()
         error_panel=next((panel for panel in self.panels.values() if panel.connection_state=='Error'),None)
         self.footer.setText('Error · '+error_panel.agent+' · '+error_panel.notice.text() if error_panel else self.last_event)
 
