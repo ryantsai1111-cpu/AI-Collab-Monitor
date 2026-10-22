@@ -1803,5 +1803,69 @@ class WorkspaceUiRefreshTests(unittest.TestCase):
         self.assert_no_adapter_actions()
 
 
+    def seed_history(self, count):
+        for number in range(count):
+            self.core.store.insert("messages", {
+                "id": "limit-%04d" % number, "task_id": self.core.current_task_id, "agent": "claude",
+                "session_id": self.core.current_task["claude_session"], "role": "assistant",
+                "content": "history %d" % number, "timestamp": "2026-01-01T00:%02d:%02d.000" % divmod(number, 60) if number < 3600 else now(),
+                "status": "complete", "metadata": {}})
+
+    def transcript_cards(self, panel):
+        return [panel.transcript_layout.itemAt(index).widget() for index in range(1, panel.transcript_layout.count() - 1)]
+
+    def test_live_transcript_is_capped_with_older_messages_button(self):
+        panel = self.window.panels["claude"]
+        for number in range(350):
+            panel.add_message({"id": "live-%d" % number, "role": "assistant", "content": "live %d" % number})
+        self.settle()
+        self.assertEqual(300, len(self.transcript_cards(panel)))
+        self.assertEqual(300, len(panel.cards))
+        older = panel.findChild(QPushButton, "older_messages")
+        self.assertTrue(older.isVisible())
+        self.assertIn("50", older.text())
+        self.assertNotIn("live-0", panel.cards)
+        self.assertIn("live-349", panel.cards)
+
+    def test_pending_approval_card_survives_transcript_cap(self):
+        panel = self.window.panels["claude"]
+        panel.add_event({"type": "approval_request", "request_id": "cap-pending", "agent": "claude", "command": "fixture"})
+        for number in range(350):
+            panel.add_message({"id": "live-%d" % number, "role": "assistant", "content": "live %d" % number})
+        self.settle()
+        self.assertIn("cap-pending", panel.pending_approval_events)
+        self.assertIn(panel.approvals["cap-pending"], self.transcript_cards(panel))
+        self.assertEqual(300, len(self.transcript_cards(panel)))
+
+    def test_rebuild_renders_last_300_and_show_more_expands(self):
+        self.seed_history(500)
+        self.window.reload_context()
+        self.settle()
+        panel = self.window.panels["claude"]
+        older = panel.findChild(QPushButton, "older_messages")
+        self.assertEqual(300, len(panel.cards))
+        self.assertTrue(older.isVisible())
+        self.assertIn("200", older.text())
+        older.click()
+        self.settle()
+        self.assertEqual(500, len(panel.cards))
+        self.assertEqual(0, panel.hidden_count)
+        self.assertFalse(panel.findChild(QPushButton, "older_messages").isVisible())
+
+    def test_dot_panel_is_not_capped_by_transcript_limit(self):
+        panel = self.window.panels["dot"]
+        for number in range(350):
+            panel.add_message({"id": "dot-%d" % number, "role": "assistant", "content": "dot %d" % number})
+        self.assertEqual(350, len(panel.cards))
+        self.assertFalse(panel.findChild(QPushButton, "older_messages").isVisible())
+
+    def test_timeline_is_capped_at_2000_newest(self):
+        for number in range(2100):
+            self.window.add_timeline_event({"timestamp": "t%05d" % number, "agent": "claude", "type": "x", "status": "", "summary": ""})
+        self.assertEqual(2000, self.window.timeline.topLevelItemCount())
+        self.assertEqual("t00100", self.window.timeline.topLevelItem(0).text(0))
+        self.assertEqual("t02099", self.window.timeline.topLevelItem(1999).text(0))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

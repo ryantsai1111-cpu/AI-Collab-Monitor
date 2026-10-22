@@ -1,0 +1,117 @@
+"""Native desktop workspace package; re-exports the former single-module API."""
+from .. import approvals, playbooks
+
+from .widgets import (
+    ANSI_ESCAPE,
+    APPROVAL_EVENTS,
+    ActivityGroup,
+    BUTTON_LABELS,
+    EVENT_LABELS,
+    EventCard,
+    FocusLabel,
+    MessageBody,
+    MessageCard,
+    PromptEdit,
+    Worker,
+    WorkerSignals,
+    asdict,
+    button,
+    chat_markdown,
+    identifier,
+    label,
+    plain,
+)
+from .dialogs import (
+    DetailDialog,
+    HandoffDialog,
+    NativeHistoryDialog,
+    NativeSessionDialog,
+    PlaybookDialog,
+    ScreenshotReviewDialog,
+    SessionDetailsDialog,
+    SessionHistoryDialog,
+    native_transcript,
+)
+from .artifacts import (
+    ArtifactPanel,
+)
+from .navigator import (
+    SessionNavigator,
+    _normalize_dir,
+    _same_dir,
+)
+from .agent_panel import (
+    AgentPanel,
+    ROLE_LABELS,
+    ROLE_NAMES,
+    STATE_LABELS,
+)
+from .main_window import (
+    AGENTS,
+    LEGACY_MONITOR_ROOT,
+    MainWindow,
+    STATUSES,
+    STATUS_LABELS,
+    TRANSCRIPT_EVENTS,
+)
+
+from PySide6.QtGui import (
+    QAction,
+    QColor,
+    QDesktopServices,
+    QFont,
+    QKeySequence,
+    QPixmap,
+    QTextCharFormat,
+    QTextCursor,
+    QTextDocument,
+    QTextFormat,
+)
+from PySide6.QtWidgets import (
+    QApplication,
+    QButtonGroup,
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFileDialog,
+    QFormLayout,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QHeaderView,
+    QInputDialog,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QMainWindow,
+    QMenu,
+    QMessageBox,
+    QPlainTextEdit,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QSpinBox,
+    QSplitter,
+    QStackedWidget,
+    QTabBar,
+    QTabWidget,
+    QTableWidget,
+    QTableWidgetItem,
+    QTextBrowser,
+    QToolButton,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
+from PySide6.QtCore import (
+    QByteArray,
+    QObject,
+    QRunnable,
+    QThreadPool,
+    QTimer,
+    QUrl,
+    Qt,
+    Signal,
+)

@@ -154,7 +154,7 @@ class CoreAndUiTests(DesktopSessionFixture):
             variants = (directory.upper(), directory.replace('\\', '/', 1), directory + '\\')
             window.navigator.sessions['claude'] = [dict(self.record, id=f'alias-{index}', cwd=value)
                                                    for index, value in enumerate(variants)]
-            with patch('acw.ui._normalize_dir', wraps=_normalize_dir) as normalize:
+            with patch('acw.ui.navigator._normalize_dir', wraps=_normalize_dir) as normalize:
                 window.navigator.fill()
             self.assertEqual(1, [call.args[0] for call in normalize.call_args_list].count(directory))
             self.assertEqual(3, window.navigator.tree.topLevelItem(0).childCount())
