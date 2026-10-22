@@ -21,30 +21,32 @@ from .widgets import (
     label,
     plain,
 )
+from .dialogs import (
+    DetailDialog,
+    HandoffDialog,
+    NativeHistoryDialog,
+    NativeSessionDialog,
+    PlaybookDialog,
+    ScreenshotReviewDialog,
+    SessionDetailsDialog,
+    SessionHistoryDialog,
+    native_transcript,
+)
 from .main_window import (
     AGENTS,
     AgentPanel,
     ArtifactPanel,
-    DetailDialog,
-    HandoffDialog,
     LEGACY_MONITOR_ROOT,
     MainWindow,
-    NativeHistoryDialog,
-    NativeSessionDialog,
-    PlaybookDialog,
     ROLE_LABELS,
     ROLE_NAMES,
     STATE_LABELS,
     STATUSES,
     STATUS_LABELS,
-    ScreenshotReviewDialog,
-    SessionDetailsDialog,
-    SessionHistoryDialog,
     SessionNavigator,
     TRANSCRIPT_EVENTS,
     _normalize_dir,
     _same_dir,
-    native_transcript,
 )
 
 from PySide6.QtGui import (
