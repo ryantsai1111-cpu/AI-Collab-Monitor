@@ -618,6 +618,8 @@ class AgentPanel(QFrame):
         self.cards = {}
         self.approvals = {}
         self.pending_approval_events = {}
+        self.visible_limit = 300
+        self.hidden_count = 0
         self.approval_rules = set()  # "always allow" choices; they last until this role disconnects
         self.attachments = []
         self.connection_state = "Disconnected"
@@ -831,6 +833,9 @@ class AgentPanel(QFrame):
         self.transcript_layout.addWidget(self.empty)
         self.transcript_layout.addStretch()
         self.scroll.setWidget(self.transcript)
+        # Outside the transcript layout so it never counts as a conversation item.
+        self.older_button = self.make_older_button()
+        layout.addWidget(self.older_button)
         layout.addWidget(self.scroll, 1)
         self.new_messages = button("New messages ↓", self.jump_to_latest, f"new_messages_{agent}")
         self.new_messages.hide()
@@ -1598,6 +1603,7 @@ class AgentPanel(QFrame):
         self.cards.clear()
         self.approvals.clear()
         self.pending_approval_events.clear()
+        self.hidden_count = 0
         self.pending_review.hide()
         while self.transcript_layout.count() > 1:
             item = self.transcript_layout.takeAt(0)
@@ -1609,6 +1615,58 @@ class AgentPanel(QFrame):
         self.empty.setObjectName('empty_conversation')
         self.empty.setAlignment(Qt.AlignCenter)
         self.transcript_layout.insertWidget(0, self.empty)
+        self.set_hidden_count(0)
+
+    def make_older_button(self):
+        older = QPushButton()
+        older.setObjectName("older_messages")
+        older.setCursor(Qt.PointingHandCursor)
+        older.clicked.connect(self.show_more_messages)
+        older.hide()
+        return older
+
+    def set_hidden_count(self, count):
+        self.hidden_count = max(0, int(count))
+        self.older_button.setText(f"已收合較早的 {self.hidden_count} 則 · 顯示更多")
+        self.older_button.setVisible(self.hidden_count > 0)
+
+    def show_more_messages(self):
+        state = self.capture_view_state()
+        self.visible_limit += 300
+        self.window.rebuild_panel(self.agent, state)
+        self.restore_view_state(state)
+
+    def prune_transcript(self):
+        if self.agent == "dot":
+            return
+        layout = self.transcript_layout
+        protected = {id(self.approvals[request_id]) for request_id in self.pending_approval_events if request_id in self.approvals}
+
+        def keep(widget):
+            if isinstance(widget, ActivityGroup):
+                return any(id(card) in protected for card in widget.cards)
+            return id(widget) in protected
+        # Layout holds: empty label, cards..., trailing stretch.
+        while layout.count() - 2 > self.visible_limit:
+            victim = None
+            for index in range(1, layout.count() - 1):
+                widget = layout.itemAt(index).widget()
+                if widget is not None and not keep(widget):
+                    victim = index
+                    break
+            if victim is None:
+                break
+            widget = layout.takeAt(victim).widget()
+            if isinstance(widget, MessageCard):
+                for mid in [key for key, card in self.cards.items() if card is widget]:
+                    del self.cards[mid]
+            else:
+                gone = {id(card) for card in widget.cards} if isinstance(widget, ActivityGroup) else {id(widget)}
+                for request_id in [key for key, card in self.approvals.items() if id(card) in gone]:
+                    del self.approvals[request_id]
+            widget.hide()
+            widget.deleteLater()
+            self.set_hidden_count(self.hidden_count + 1)
 
     def add_message(self, message):
         mid = identifier(message)
@@ -1621,6 +1679,7 @@ class AgentPanel(QFrame):
         self.cards[mid] = card
         self.transcript_layout.insertWidget(self.transcript_layout.count() - 1, card)
         card.show()
+        self.prune_transcript()
         self.scroll_bottom()
 
     def add_event(self, event, historical=False):
@@ -1657,6 +1716,7 @@ class AgentPanel(QFrame):
                     self.pending_approval_events[request_id] = event
                     self.pending_review.show()
                     self.window.update_role_tabs()
+        self.prune_transcript()
         self.scroll_bottom()
 
     def review_pending_approval(self):
@@ -3259,6 +3319,31 @@ class MainWindow(QMainWindow):
                           or (identifier(cached) and identifier(event) != identifier(cached))):
                 pending.pop(request_id, None)
 
+    def rebuild_panel(self, agent, view=None):
+        panel = self.panels[agent]
+        if view is None:
+            view = self._agent_views.get(self.agent_context_key(agent), {})
+        panel._restoring_view = True
+        panel.clear_conversation()
+        shown = TRANSCRIPT_EVENTS
+        transcript_messages=self.core.dot_conversation_messages(limit=panel.dot_visible_limit) if agent=="dot" else self.core.messages(agent=agent)
+        history = [(str((message.get("metadata") or {}).get("native_timestamp") or message.get("timestamp") or ""), 0, message) for message in transcript_messages
+                   if message.get("role") in ("user", "assistant")]
+        history += [(str(event.get("timestamp") or ""), 1, event) for event in reversed(self.core.events(agent=agent, limit=400))
+                    if agent != "dot" and event.get("type") in shown]
+        # Stable sort: equal timestamps keep messages before events, as before.
+        ordered = history if agent == "dot" else sorted(history, key=lambda entry: entry[:2])
+        if agent != "dot" and len(ordered) > panel.visible_limit:
+            hidden = len(ordered) - panel.visible_limit
+            ordered = ordered[hidden:]
+            panel.set_hidden_count(hidden)
+        for _, is_event, row in ordered:
+            if is_event:
+                pending_id = row.get("request_id") or (row.get("payload") or {}).get("request_id")
+                panel.add_event(row, historical=pending_id not in view.get("pending", {}))
+            else:
+                panel.add_message(row)
+
     def reload_context(self):
         self.save_context_state()
         key = self.context_key()
@@ -3290,21 +3375,7 @@ class MainWindow(QMainWindow):
                 agent_key = self.agent_context_key(agent)
                 view = self._agent_views.get(agent_key, {})
                 self.reconcile_pending_approvals(view, agent, identifier(agent_task))
-                panel._restoring_view = True
-                panel.clear_conversation()
-                shown = TRANSCRIPT_EVENTS
-                transcript_messages=self.core.dot_conversation_messages(limit=panel.dot_visible_limit) if agent=="dot" else self.core.messages(agent=agent)
-                history = [(str((message.get("metadata") or {}).get("native_timestamp") or message.get("timestamp") or ""), 0, message) for message in transcript_messages
-                           if message.get("role") in ("user", "assistant")]
-                history += [(str(event.get("timestamp") or ""), 1, event) for event in reversed(self.core.events(agent=agent, limit=400))
-                            if agent != "dot" and event.get("type") in shown]
-                # Stable sort: equal timestamps keep messages before events, as before.
-                for _, is_event, row in (history if agent == "dot" else sorted(history, key=lambda entry: entry[:2])):
-                    if is_event:
-                        pending_id = row.get("request_id") or (row.get("payload") or {}).get("request_id")
-                        panel.add_event(row, historical=pending_id not in view.get("pending", {}))
-                    else:
-                        panel.add_message(row)
+                self.rebuild_panel(agent, view)
                 panel.cwd_label.setText(("中繼資料：" if agent == "dot" else "工作目錄：") + (agent_project.get("name", "尚未選擇") if agent == "dot" else agent_project.get(self.core.provider(agent) + '_cwd') or agent_project.get("repo_path") or "尚未選擇"))
                 panel.cwd_label.setToolTip(panel.cwd_label.text())
                 panel.branch_label.setText("分支：" + (agent_task.get("branch") or agent_project.get("active_branch") or "—"))
@@ -4131,6 +4202,8 @@ class MainWindow(QMainWindow):
         item = QTreeWidgetItem([str(event.get(key, "")) for key in ("timestamp", "agent", "type", "status", "summary")])
         item.setData(0, Qt.UserRole, event)
         self.timeline.addTopLevelItem(item)
+        while self.timeline.topLevelItemCount() > 2000:
+            self.timeline.takeTopLevelItem(0)
 
     def build_history(self):
         page = QWidget()
