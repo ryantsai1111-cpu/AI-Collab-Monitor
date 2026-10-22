@@ -19,6 +19,7 @@ import time
 import uuid
 from pathlib import Path
 
+from ._proc import CancellationOwnershipChanged, popen_hidden, run_hidden
 from .base import Adapter, Capabilities
 from ..security import sanitize, safe_file
 
@@ -34,10 +35,10 @@ class _NodeSessionSDK:
         self.__version__ = 'TypeScript '+str(capabilities.get('version', 'unknown'))
 
     def _call(self, action, **payload):
-        completed = subprocess.run([self.node,str(self.helper)],
+        completed = run_hidden([self.node,str(self.helper)],
             input=json.dumps({'action':action,**payload}),capture_output=True,
             text=True,encoding='utf-8',errors='replace',cwd=str(self.helper.parent),
-            timeout=30,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+            timeout=30)
         try:
             response=json.loads(completed.stdout)
         except (ValueError,TypeError) as exc:
@@ -59,8 +60,7 @@ class _NodeSessionSDK:
                           limit=limit or 200,offset=offset)
 
 
-class _CancellationOwnershipChanged(RuntimeError):
-    pass
+_CancellationOwnershipChanged = CancellationOwnershipChanged
 
 
 class ClaudeAdapter(Adapter):
@@ -168,12 +168,11 @@ class ClaudeAdapter(Adapter):
         self.set_state('Connecting')
         try:
             env = self._process_env()
-            self.version = subprocess.run([self.executable, '--version'], capture_output=True,
-                text=True, encoding='utf-8', errors='replace', timeout=15,
-                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0), **({'env': env} if env is not None else {})).stdout.strip()
-            self._process = subprocess.Popen(self._argv(), cwd=self.cwd, stdin=subprocess.PIPE,
+            self.version = run_hidden([self.executable, '--version'], env, capture_output=True,
+                text=True, encoding='utf-8', errors='replace', timeout=15).stdout.strip()
+            self._process = popen_hidden(self._argv(), env, cwd=self.cwd, stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8',
-                errors='replace', bufsize=1, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0), **({'env': env} if env is not None else {}))
+                errors='replace', bufsize=1)
             process = self._process
             self._stdout_thread = threading.Thread(target=self._read_stdout, args=(process,),
                                                    daemon=True, name='claude-events')

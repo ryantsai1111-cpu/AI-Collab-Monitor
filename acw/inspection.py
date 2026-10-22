@@ -1,6 +1,7 @@
 """Read-only git inspection and incremental legacy monitor input."""
 from pathlib import Path
 import subprocess, codecs, re, time
+from .adapters._proc import run_hidden
 
 GIT = r'C:\Program Files\Git\cmd\git.exe'
 
@@ -16,11 +17,11 @@ def git_read(repo, *args):
     safe_args = list(args)
     if args[0] in {'diff', 'log'}:
         safe_args[1:1] = ['--no-ext-diff', '--no-textconv', '--no-color']
-    run = subprocess.run([GIT, '--no-pager', '--no-optional-locks', '--literal-pathspecs',
+    run = run_hidden([GIT, '--no-pager', '--no-optional-locks', '--literal-pathspecs',
                           '-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=NUL',
                           '-C', str(repo), *safe_args],
                          capture_output=True, text=True, encoding='utf-8', errors='replace',
-                         timeout=20, creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+                         timeout=20)
     return {'command': 'git ' + subprocess.list2cmdline(safe_args), 'cwd': str(repo), 'stdout':run.stdout,
             'stderr':run.stderr,'exit_code':run.returncode}
 

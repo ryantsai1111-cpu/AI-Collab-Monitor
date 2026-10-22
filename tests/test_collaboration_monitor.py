@@ -386,6 +386,24 @@ class MonitorTests(unittest.TestCase):
         self.window.refresh_monitor()
         self.assertIn('未自動恢復', self.window.monitor_dashboard.timeline.text())
 
+    def test_snapshot_validates_each_playbook_once_until_the_setting_changes(self):
+        from acw import playbooks
+        agents = list(self.window.panels)
+        collect_snapshot(self.core, self.window.panels)  # warm the per-agent cache
+        with patch.object(playbooks, '_normalize', wraps=playbooks._normalize) as normalize:
+            for _ in range(10):
+                data = collect_snapshot(self.core, self.window.panels)
+            self.assertEqual(0, normalize.call_count)
+            self.core.set_setting('playbook.codex', {'role': 'Edited role'})
+            data = collect_snapshot(self.core, self.window.panels)
+            self.assertEqual(1, normalize.call_count)
+            self.assertEqual('Edited role', next(r for r in data['roles'] if r['agent'] == 'codex')['role'])
+            saved = dict(playbooks.load(self.core, 'codex'), role='Saved role')
+            playbooks.save(self.core, 'codex', saved)
+            data = collect_snapshot(self.core, self.window.panels)
+            self.assertEqual('Saved role', next(r for r in data['roles'] if r['agent'] == 'codex')['role'])
+        self.assertTrue(agents)
+
     def test_dashboard_reflows_and_treats_html_as_plain_text(self):
         dashboard = self.window.monitor_dashboard
         self.window.mode.setCurrentIndex(self.window.mode.findData('Monitor'))

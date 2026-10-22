@@ -59,7 +59,7 @@ Zed 在 2025 年 8 月提出的開放標準，用 JSON-RPC over stdio 定義「�
 ## §3 建議（依優先順序）
 
 1. **本地模型視窗照 §1.4 的路做**：重用既有 Codex／Claude adapter，只換端點。
-   規格已寫在 [HANDOFF-local-llm-panel.md](HANDOFF-local-llm-panel.md)。預設用 Codex harness，
+   規格已寫在 [HANDOFF-local-llm-panel.md](archive/HANDOFF-local-llm-panel.md)。預設用 Codex harness，
    因為幾乎所有本地伺服器都講 OpenAI 相容協定。
 2. **補上 worktree 隔離**：目前 Claude 與 Codex 指向同一個目錄，兩邊同時改檔會互相覆蓋。
    這是本專案與主流做法差距最大、也最容易出事的一點。

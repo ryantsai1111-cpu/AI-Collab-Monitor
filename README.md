@@ -106,4 +106,4 @@ Hermes 的工具核准由 Hermes 既有設定管理；單次 CLI 沒有本視窗
 ## 歷史文件
 
 - [docs/BASELINE-README.md](docs/BASELINE-README.md)：整理前的 README（EXE 被 Windows 攔截時的驗收狀態）
-- [docs/CANDIDATE-PACKAGE-README.md](docs/CANDIDATE-PACKAGE-README.md)：三份 ZIP 候選包的解壓說明
+- [docs/archive/CANDIDATE-PACKAGE-README.md](docs/archive/CANDIDATE-PACKAGE-README.md)：三份 ZIP 候選包的解壓說明

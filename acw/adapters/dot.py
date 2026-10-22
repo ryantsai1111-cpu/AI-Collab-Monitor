@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from functools import wraps
 from datetime import datetime, timezone
 from pathlib import Path
+from ._proc import popen_hidden
 from .base import Adapter, Capabilities
 from ..security import sanitize
 
@@ -54,8 +55,7 @@ def cli_runner(operation, dot_id='', text='', before='', expected_room=''):
     if before: args += ['--before='+before]
     if expected_room: args += ['--expected-room='+expected_room]
     if operation=='send': args += ['--',text]
-    proc=subprocess.Popen(args,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
-                          creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+    proc=popen_hidden(args,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
     out,err=proc.communicate()  # No timeout kill / process-tree kill.
     if proc.returncode: raise RuntimeError(sanitize(err.decode('utf-8',errors='replace'))[:3000] or 'Dot CLI failed')
     return sanitize(json.loads(out.decode('utf-8')))

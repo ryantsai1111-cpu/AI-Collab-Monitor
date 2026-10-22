@@ -62,6 +62,30 @@ class CodexProtocolTests(unittest.TestCase):
         self.assertNotIn('PLAIN_DIAGNOSTIC_CANARY',serialized)
         self.assertIn('Sandbox setup failed',serialized)
 
+    def test_stale_reader_of_replaced_process_leaves_new_connection_untouched(self):
+        import io
+        import queue
+        from types import SimpleNamespace
+        old = SimpleNamespace(stdout=io.StringIO(''))
+        new = SimpleNamespace(stdout=io.StringIO(''))
+        self.a._process = new
+        self.a._session_ready = True
+        self.a._turn_done.clear()
+        self.a._closing = False
+        self.a.state = 'Connected'
+        pending = queue.Queue(maxsize=1)
+        self.a._pending[99] = pending
+        self.a._read_loop(old)
+        self.assertEqual('Connected', self.a.state)
+        self.assertTrue(self.a._session_ready)
+        self.assertFalse(self.a._turn_done.is_set())
+        self.assertTrue(pending.empty())
+        self.assertEqual([], [e for e in self.a.events if e[0] == 'error'])
+        self.a._read_loop(new)
+        self.assertEqual('Disconnected', self.a.state)
+        self.assertFalse(self.a._session_ready)
+        self.assertIn('disconnected', pending.get_nowait()['error']['message'])
+
     def test_attachment_policy_uses_selected_model_actual_input_modalities(self):
         self.a._model_records=[{'id':'image-fixture','model':'image-fixture','isDefault':True,'inputModalities':['text','image']},{'id':'text-fixture','model':'text-fixture','inputModalities':['text']}]
         self.assertTrue(self.a.attachment_capability()['supported'])

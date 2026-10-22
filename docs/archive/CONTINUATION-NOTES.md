@@ -1,6 +1,6 @@
 # Validated authorized follow-up
 
-> 歷史文件（2026-10-09 標註）：保留原始交付／驗收內容。啟動與現況以 [文件索引](README.md)、[使用指南](USER_GUIDE.md) 及 [目前測試紀錄](../tests/README.md) 為準；文內舊計數、路徑或操作授權不能直接套用本版。部分 evidence 未隨此 checkout 提供。
+> 歷史文件（2026-10-09 標註）：保留原始交付／驗收內容。啟動與現況以 [文件索引](../README.md)、[使用指南](../USER_GUIDE.md) 及 [目前測試紀錄](../../tests/README.md) 為準；文內舊計數、路徑或操作授權不能直接套用本版。部分 evidence 未隨此 checkout 提供。
 
 593 scoped criteria PASS /0FAIL /56BLOCKED /4UNSUPPORTED /0PENDING. Final remains BLOCKED by native Dot transport, deferred EXE acceptance,  the individually listed gates. All184 originally independent criteria have scoped PASS. Counts are not653 native end-to-end tests.
 
@@ -19,4 +19,4 @@ Authorized MCP follow-up: actual official Claude `mcp__acw_acceptance__echo`, fi
 
 ## Current approved Dot integration update
 
-The earlier official-bridge blocker remains historical context. An explicitly approved, pinned unofficial Dot adapter and manual UI are now implemented and offline-tested. See [Dot activation and boundaries](DOT-UNOFFICIAL.md). Only the human may trigger live credential-bearing list/connect/read/send. No live Dot PASS or Final acceptance is claimed. EXE work remains deferred.
+The earlier official-bridge blocker remains historical context. An explicitly approved, pinned unofficial Dot adapter and manual UI are now implemented and offline-tested. See [Dot activation and boundaries](../DOT-UNOFFICIAL.md). Only the human may trigger live credential-bearing list/connect/read/send. No live Dot PASS or Final acceptance is claimed. EXE work remains deferred.

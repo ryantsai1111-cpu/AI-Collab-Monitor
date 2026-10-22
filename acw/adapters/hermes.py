@@ -22,6 +22,7 @@ import threading
 import time
 import uuid
 
+from ._proc import popen_hidden, run_hidden
 from .base import Adapter, Capabilities
 from ..security import sanitize
 
@@ -86,10 +87,9 @@ def pid_alive(pid):
             return True
         return True
     try:
-        completed = subprocess.run(
+        completed = run_hidden(
             ['tasklist', '/FI', f'PID eq {pid}', '/NH', '/FO', 'CSV'], stdin=subprocess.DEVNULL,
-            capture_output=True, text=True, errors='replace', timeout=15,
-            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            capture_output=True, text=True, errors='replace', timeout=15)
     except (OSError, subprocess.TimeoutExpired):
         return True  # Unknown liveness must not let a second Hermes start.
     for row in csv.reader(io.StringIO(completed.stdout or '')):
@@ -284,10 +284,10 @@ class HermesAdapter(Adapter):
             raise FileNotFoundError('找不到 Hermes CLI；請在設定選擇 hermes.exe')
         if Path(executable).suffix.lower() in ('.cmd', '.bat', '.ps1'):
             raise ValueError('請選擇 Hermes 原生 executable，不支援 shell wrapper')
-        completed = subprocess.run(
+        completed = run_hidden(
             [executable, 'chat', '--help'], stdin=subprocess.DEVNULL,
             capture_output=True, text=True, encoding='utf-8', errors='replace',
-            timeout=20, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            timeout=20)
         required = ('--query-file', '--format', 'stream-json', '--resume', '--in',
                     '--no-restore-cwd', '--source', '--run-budget', '--max-turns')
         if completed.returncode or any(flag not in completed.stdout for flag in required):
@@ -426,11 +426,10 @@ class HermesAdapter(Adapter):
                 self._cancelled = False
                 self._timeout_error = self._stderr_tail = ''
                 self._operation = uuid.uuid4().hex
-                process = subprocess.Popen(
-                    argv, cwd=self.cwd, env=env, stdin=subprocess.DEVNULL,
+                process = popen_hidden(
+                    argv, env, cwd=self.cwd, stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                     text=True, encoding='utf-8', errors='replace', shell=False,
-                    creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
                     start_new_session=os.name != 'nt')
                 self._process = process
             except Exception:
@@ -561,9 +560,8 @@ class HermesAdapter(Adapter):
             return
         try:
             if os.name == 'nt':
-                subprocess.run(['taskkill', '/PID', str(process.pid), '/T', '/F'],
-                    capture_output=True, timeout=5,
-                    creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+                run_hidden(['taskkill', '/PID', str(process.pid), '/T', '/F'],
+                    capture_output=True, timeout=5)
             else:
                 os.killpg(process.pid, signal.SIGTERM)
             process.wait(timeout=5)
