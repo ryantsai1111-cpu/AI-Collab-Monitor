@@ -82,7 +82,7 @@ def validate(snapshot):
         included={name for name in index if name.startswith(prefix)}
         skipped={row['path'] for row in excluded if row.get('kind')=='file' and row.get('path','').startswith(prefix)}
         if set(entries)!=included|skipped or included&skipped:raise ValueError('Inventory and included/excluded files disagree: '+inventory['root'])
-    required={'run.py','acw/__init__.py','acw/core.py','acw/store.py','acw/ui/__init__.py','acw/ui/main_window.py','acw/ui/widgets.py','acw/ui/dialogs.py','acw/ui/artifacts.py','acw/ui/navigator.py','scripts/dot_cli_entry.py','tools/dot-source-manifest.json',
+    required={'run.py','acw/__init__.py','acw/core.py','acw/store.py','acw/ui/__init__.py','acw/ui/main_window.py','acw/ui/widgets.py','acw/ui/dialogs.py','acw/ui/artifacts.py','acw/ui/navigator.py','acw/ui/agent_panel.py','scripts/dot_cli_entry.py','tools/dot-source-manifest.json',
               'tools/claude-session-sdk/session-helper.mjs','tools/claude-session-sdk/package.json',
               'tools/claude-session-sdk/node_modules/@anthropic-ai/claude-agent-sdk/package.json',
               'vendor/PySide6/__init__.py','vendor/PySide6/QtCore.pyd','vendor/PySide6/QtGui.pyd','vendor/PySide6/QtWidgets.pyd',

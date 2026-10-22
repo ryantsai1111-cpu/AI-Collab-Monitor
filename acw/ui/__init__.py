@@ -40,14 +40,16 @@ from .navigator import (
     _normalize_dir,
     _same_dir,
 )
-from .main_window import (
-    AGENTS,
+from .agent_panel import (
     AgentPanel,
-    LEGACY_MONITOR_ROOT,
-    MainWindow,
     ROLE_LABELS,
     ROLE_NAMES,
     STATE_LABELS,
+)
+from .main_window import (
+    AGENTS,
+    LEGACY_MONITOR_ROOT,
+    MainWindow,
     STATUSES,
     STATUS_LABELS,
     TRANSCRIPT_EVENTS,

@@ -145,7 +145,7 @@ class WorkbenchTests(unittest.TestCase):
         panel = self.window.panels['codex']
         action, control = panel.session_actions['details']
         self.assertTrue(action.isEnabled())
-        with patch('acw.ui.main_window.SessionDetailsDialog') as dialog:
+        with patch('acw.ui.agent_panel.SessionDetailsDialog') as dialog:
             action.trigger()
         self.assertEqual(self.core.agent_task('codex')['codex_session'], dialog.call_args.args[0]['id'])
         self.assertFalse(panel.session_actions['discover'][0].isEnabled())
