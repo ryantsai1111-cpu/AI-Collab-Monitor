@@ -16,12 +16,12 @@ import subprocess
 import threading
 import time
 
+from ._proc import CancellationOwnershipChanged, popen_hidden
 from .base import Adapter, Capabilities
 from ..security import sanitize, safe_file
 
 
-class _CancellationOwnershipChanged(RuntimeError):
-    pass
+_CancellationOwnershipChanged = CancellationOwnershipChanged
 
 
 class CodexAdapter(Adapter):
@@ -373,10 +373,9 @@ class CodexAdapter(Adapter):
             raise FileNotFoundError("Official Codex executable not configured")
         try:
             env = self._process_env()
-            self._process = subprocess.Popen([self.executable, "app-server", "--listen", "stdio://"] + self._extra_args(),
+            self._process = popen_hidden([self.executable, "app-server", "--listen", "stdio://"] + self._extra_args(), env,
                 cwd=self.cwd or None, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, encoding="utf-8", errors="replace", bufsize=1,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), **({'env': env} if env is not None else {}))
+                text=True, encoding="utf-8", errors="replace", bufsize=1)
             self._reader = threading.Thread(target=self._read_loop, args=(self._process,), daemon=True, name="codex-jsonl")
             self._stderr_reader = threading.Thread(target=self._read_stderr, args=(self._process,), daemon=True, name="codex-stderr")
             self._reader.start()

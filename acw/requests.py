@@ -19,6 +19,7 @@ from collections import deque
 from datetime import datetime
 from pathlib import Path
 
+from .adapters._proc import run_hidden
 from .hermes_mask import LineMasker, mask
 from .security import sanitize
 from . import playbooks
@@ -500,9 +501,8 @@ class RequestDispatcher:
     def _dirty(worktree):
         """Porcelain output ('' = clean), or None when git could not tell."""
         try:
-            done = subprocess.run(['git', '-C', str(worktree), 'status', '--porcelain'], stdin=subprocess.DEVNULL,
-                                  capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=60,
-                                  creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            done = run_hidden(['git', '-C', str(worktree), 'status', '--porcelain'], stdin=subprocess.DEVNULL,
+                                  capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=60)
         except (OSError, subprocess.TimeoutExpired):
             return None
         return done.stdout.strip() if done.returncode == 0 else None
