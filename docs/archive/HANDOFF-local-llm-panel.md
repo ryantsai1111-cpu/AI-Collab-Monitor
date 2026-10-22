@@ -1,7 +1,7 @@
 # 交付規格書 — 第四個角色視窗：Local LLM（跑在 Codex 或 Claude Code 環境內）
 
-> 歷史文件（2026-10-09 標註）：保留原始交付／驗收內容。啟動與現況以 [文件索引](README.md)、[使用指南](USER_GUIDE.md) 及 [目前測試紀錄](../tests/README.md) 為準；文內舊計數、路徑或操作授權不能直接套用本版。部分 evidence 未隨此 checkout 提供。
-> 後續使用者已要求自由新增同 provider Agent 與可選主導者，取代本文件固定角色 tuple／不參與協作的舊範圍；目前設計見 [UI-REFRESH](UI-REFRESH.md)。
+> 歷史文件（2026-10-09 標註）：保留原始交付／驗收內容。啟動與現況以 [文件索引](../README.md)、[使用指南](../USER_GUIDE.md) 及 [目前測試紀錄](../../tests/README.md) 為準；文內舊計數、路徑或操作授權不能直接套用本版。部分 evidence 未隨此 checkout 提供。
+> 後續使用者已要求自由新增同 provider Agent 與可選主導者，取代本文件固定角色 tuple／不參與協作的舊範圍；目前設計見 [UI-REFRESH](../UI-REFRESH.md)。
 
 > 對象：接手的 AI agent（Codex）。**本文件自足，不需先前對話脈絡。**
 > 先讀 `docs/ARCHITECTURE.md`、`docs/ADAPTERS.md`、`docs/UI-REFRESH.md`（PySide6 桌面程式，Python 3.12，無 build 工具）。

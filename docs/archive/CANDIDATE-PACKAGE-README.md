@@ -1,6 +1,6 @@
 # AI Collaboration Workspace：完整來源＋Windows x64 Qt 候選版
 
-> 歷史文件（2026-10-09 標註）：保留原始交付／驗收內容。啟動與現況以 [文件索引](README.md)、[使用指南](USER_GUIDE.md) 及 [目前測試紀錄](../tests/README.md) 為準；文內舊計數、路徑或操作授權不能直接套用本版。部分 evidence 未隨此 checkout 提供。
+> 歷史文件（2026-10-09 標註）：保留原始交付／驗收內容。啟動與現況以 [文件索引](../README.md)、[使用指南](../USER_GUIDE.md) 及 [目前測試紀錄](../../tests/README.md) 為準；文內舊計數、路徑或操作授權不能直接套用本版。部分 evidence 未隨此 checkout 提供。
 
 此包包含完整程式來源與官方 PySide6 6.11.2 的 Windows x64 相依檔案。解壓縮後同一個根目錄即有 run.py、requirements.txt、acw/、vendor/、tools/、docs/ 和 tests/，不需把兩個變更包手動拼接，也不需複製原安裝的 vendor。
 
