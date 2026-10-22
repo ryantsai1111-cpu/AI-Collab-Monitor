@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
 import logging
 import os
 from pathlib import Path
@@ -64,10 +65,24 @@ def _normalize(provider, data):
 _INVALID_WARNED = WeakKeyDictionary()
 
 
+_LOADED = WeakKeyDictionary()
+
+
 def load(core, agent):
     provider = core.provider(agent)
+    raw = core.get_setting('playbook.' + agent, {})
     try:
-        result = _normalize(provider, core.get_setting('playbook.' + agent, {}))
+        # The Monitor asks once per agent per second; validate only when the stored value changed.
+        stamp = (provider, json.dumps(raw, sort_keys=True, ensure_ascii=False, default=str))
+    except (TypeError, ValueError):
+        stamp = None
+    cached = _LOADED.get(core, {}).get(agent) if stamp else None
+    if cached and cached[0] == stamp:
+        if core in _INVALID_WARNED:
+            _INVALID_WARNED[core].discard(agent)
+        return deepcopy(cached[1])
+    try:
+        result = _normalize(provider, raw)
     except (ValueError, TypeError):
         warned = _INVALID_WARNED.setdefault(core, set())
         if agent not in warned:
@@ -76,6 +91,8 @@ def load(core, agent):
         return deepcopy(DEFAULTS[provider])
     if core in _INVALID_WARNED:
         _INVALID_WARNED[core].discard(agent)
+    if stamp:
+        _LOADED.setdefault(core, {})[agent] = (stamp, deepcopy(result))
     return result
 
 
