@@ -1,27 +1,37 @@
 """Native desktop workspace package; re-exports the former single-module API."""
 from .. import approvals, playbooks
 
-from .main_window import (
-    AGENTS,
+from .widgets import (
     ANSI_ESCAPE,
     APPROVAL_EVENTS,
     ActivityGroup,
-    AgentPanel,
-    ArtifactPanel,
     BUTTON_LABELS,
-    DetailDialog,
     EVENT_LABELS,
     EventCard,
     FocusLabel,
+    MessageBody,
+    MessageCard,
+    PromptEdit,
+    Worker,
+    WorkerSignals,
+    asdict,
+    button,
+    chat_markdown,
+    identifier,
+    label,
+    plain,
+)
+from .main_window import (
+    AGENTS,
+    AgentPanel,
+    ArtifactPanel,
+    DetailDialog,
     HandoffDialog,
     LEGACY_MONITOR_ROOT,
     MainWindow,
-    MessageBody,
-    MessageCard,
     NativeHistoryDialog,
     NativeSessionDialog,
     PlaybookDialog,
-    PromptEdit,
     ROLE_LABELS,
     ROLE_NAMES,
     STATE_LABELS,
@@ -32,17 +42,9 @@ from .main_window import (
     SessionHistoryDialog,
     SessionNavigator,
     TRANSCRIPT_EVENTS,
-    Worker,
-    WorkerSignals,
     _normalize_dir,
     _same_dir,
-    asdict,
-    button,
-    chat_markdown,
-    identifier,
-    label,
     native_transcript,
-    plain,
 )
 
 from PySide6.QtGui import (

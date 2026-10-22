@@ -10,7 +10,7 @@ def module(name):
 policy=module('installer_policy');observation=module('launch_observation');context=module('package_context');reader=module('read_launch_snapshot')
 
 def valid_snapshot():
-    names=['run.py','acw/__init__.py','acw/core.py','acw/store.py','acw/ui/__init__.py','acw/ui/main_window.py','scripts/dot_cli_entry.py','tools/dot-source-manifest.json',
+    names=['run.py','acw/__init__.py','acw/core.py','acw/store.py','acw/ui/__init__.py','acw/ui/main_window.py','acw/ui/widgets.py','scripts/dot_cli_entry.py','tools/dot-source-manifest.json',
            'tools/claude-session-sdk/session-helper.mjs','tools/claude-session-sdk/package.json',
            'vendor/PySide6/__init__.py','vendor/PySide6/QtCore.pyd','vendor/PySide6/QtGui.pyd','vendor/PySide6/QtWidgets.pyd',
            'vendor/shiboken6/__init__.py','vendor/shiboken6/Shiboken.pyd','vendor/pyside6-6.11.2.dist-info/METADATA','vendor/shiboken6-6.11.2.dist-info/METADATA',
