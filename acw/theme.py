@@ -5,11 +5,14 @@ unwritable asset folder only drops the image.
 """
 from __future__ import annotations
 
+import logging
 import random
 from pathlib import Path
 
 from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QPalette, QPen, QPolygonF
+
+log = logging.getLogger(__name__)
 
 SPACE = {'xs': 4, 'sm': 8, 'md': 12, 'lg': 16, 'xl': 24}
 RADIUS = 6
@@ -411,8 +414,8 @@ def build_style(theme: str = "desktop") -> str:
             if not path.is_file():
                 ASSETS.mkdir(parents=True, exist_ok=True)
                 draw(path)
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("theme asset %s could not be drawn: %s", name, exc)
         style = style.replace("@" + key + "@", path.as_posix() if path.is_file() else "")
     for key, value in (("CHROME_HOVER", CHROME_HOVER), ("CHROME_PRESSED", CHROME_PRESSED), ("CHROME_OFF", CHROME_OFF),
                        ("CHROME", CHROME), ("PLATE_DARK", PLATE_DARK), ("PLATE", PLATE), ("CHASSIS", CHASSIS),
